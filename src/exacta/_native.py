@@ -20,7 +20,10 @@ def available() -> bool:
 def edt_sq(features: Tensor, spacing: Sequence[float]) -> Tensor:
     """Squared Euclidean distance from every voxel to the nearest nonzero voxel of ``features``.
 
-    CPU only. Returns float64; every value is ``inf`` when ``features`` is all zero.
+    Each value is the exact floating-point minimum, over nonzero voxels p, of
+    ``sum_i ((p_i - q_i) * h_i)^2`` rounded and summed in axis order, which is the expression
+    SciPy's ``distance_transform_edt`` evaluates. CPU only. Returns float64; every value is
+    ``inf`` when ``features`` is all zero.
     """
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")

@@ -3,6 +3,7 @@
 // Separable algorithm of Felzenszwalb & Huttenlocher, "Distance Transforms of Sampled
 // Functions", Theory of Computing 8 (2012): one lower-envelope pass per axis, O(n) overall.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -19,9 +20,22 @@ namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
-// Evaluates, at every sample q, the lower envelope of the parabolas (h*q - h*p)^2 + f[p]
-// over samples p with finite f[p]. Scratch: v holds n indices, z holds n + 1 breakpoints.
-void edt_1d(const double *f, double *d, std::int64_t n, double h, std::int64_t *v, double *z) {
+// Evaluates, at every sample q, min over samples p with finite f[p] of (h*(q - p))^2 + f[p],
+// exactly as rounded in floating point (the value a brute-force minimum would give).
+// fmax is the largest finite f. Scratch: v holds n indices, z holds n + 1 breakpoints.
+//
+// The lower envelope gives the minimising parabola, but its breakpoints carry rounding error.
+// Where several parabolas meet at one point, which is common on a voxel grid, they tie
+// mathematically while their rounded values differ by an ulp, and the standard algorithm may
+// discard the one that rounds lowest. So breakpoints that agree to within their rounding error
+// count as ties: tied parabolas are all kept, and all of them are evaluated near the breakpoint.
+// Extra candidates can only lower the result towards the true minimum, never below it.
+void edt_1d(const double *f, double fmax, double *d, std::int64_t n, double h, std::int64_t *v,
+            double *z) {
+  // A breakpoint is a difference of terms up to fmax + xmax^2, divided by at least 2h.
+  const double xmax = h * static_cast<double>(n);
+  const double tol = 64.0 * std::numeric_limits<double>::epsilon() * (fmax + xmax * xmax) / h;
+
   std::int64_t k = -1;
   for (std::int64_t q = 0; q < n; ++q) {
     if (f[q] == kInf) continue;
@@ -30,24 +44,32 @@ void edt_1d(const double *f, double *d, std::int64_t n, double h, std::int64_t *
     while (k >= 0) {
       const double xv = h * static_cast<double>(v[k]);
       s = ((f[q] + xq * xq) - (f[v[k]] + xv * xv)) / (2.0 * (xq - xv));
-      if (s > z[k]) break;
+      if (s > z[k] - tol) break;  // v[k] is lowest somewhere, or ties at z[k]: keep it
       --k;
     }
     ++k;
     v[k] = q;
-    z[k] = s;
+    z[k] = k == 0 ? s : std::max(s, z[k - 1]);  // a kept tie leaves v[k - 1] a zero-width interval
     z[k + 1] = kInf;
   }
   if (k < 0) {
     for (std::int64_t q = 0; q < n; ++q) d[q] = kInf;
     return;
   }
+  // h * (q - p) rounds once, unlike h*q - h*p, and is how SciPy forms the offset, so values
+  // match SciPy's bit for bit; threshold metrics (NSD) are sensitive to the last bit.
+  const auto parabola = [&](std::int64_t q, std::int64_t p) {
+    const double dx = h * static_cast<double>(q - p);
+    return dx * dx + f[p];
+  };
   std::int64_t j = 0;
   for (std::int64_t q = 0; q < n; ++q) {
     const double xq = h * static_cast<double>(q);
     while (z[j + 1] < xq) ++j;
-    const double dx = xq - h * static_cast<double>(v[j]);
-    d[q] = dx * dx + f[v[j]];
+    double best = parabola(q, v[j]);
+    for (std::int64_t i = j - 1; i >= 0 && z[i + 1] >= xq - tol; --i) best = std::min(best, parabola(q, v[i]));
+    for (std::int64_t i = j + 1; i <= k && z[i] <= xq + tol; ++i) best = std::min(best, parabola(q, v[i]));
+    d[q] = best;
   }
 }
 
@@ -96,8 +118,12 @@ int edt_sq(const std::uint8_t *features, double *out, const std::int64_t *shape,
 #pragma omp for schedule(static)
       for (std::int64_t line = 0; line < lines; ++line) {
         const std::int64_t base = (line / stride) * n * stride + line % stride;
-        for (std::int64_t i = 0; i < n; ++i) f[i] = out[base + i * stride];
-        edt_1d(f, d, n, h, v, z);
+        double fmax = 0.0;
+        for (std::int64_t i = 0; i < n; ++i) {
+          f[i] = out[base + i * stride];
+          if (f[i] != kInf) fmax = std::max(fmax, f[i]);
+        }
+        edt_1d(f, fmax, d, n, h, v, z);
         for (std::int64_t i = 0; i < n; ++i) out[base + i * stride] = d[i];
       }
     }

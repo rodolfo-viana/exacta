@@ -18,6 +18,7 @@ import math
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -132,15 +133,28 @@ def _surface_distances(
     box = tuple(slice(lo, hi + 1) for lo, hi in zip(idx.amin(0).tolist(), idx.amax(0).tolist()))
     a, b = a[box], b[box]
     to_a, to_b = edt_sq(a, spacing), edt_sq(b, spacing)
-    return to_b[a].sqrt(), to_a[b].sqrt()
+    return _sqrt(to_b[a]), _sqrt(to_a[b])
+
+
+def _sqrt(x: Tensor) -> Tensor:
+    """Correctly rounded square root of a float64 tensor.
+
+    PyTorch's CPU float64 sqrt is one ulp off for about 1% of inputs (seen in 2.14), which can
+    decide a threshold such as ``d <= tolerance`` when the tolerance is itself a distance between
+    voxel centres (e.g. a voxel diagonal). NumPy's sqrt is correctly rounded, as is CUDA's.
+    """
+    if x.device.type == "cpu":
+        return torch.from_numpy(np.sqrt(x.numpy()))
+    return x.sqrt()
 
 
 def _edt_sq_torch(features: Tensor, spacing: Sequence[float]) -> Tensor:
     """Exact squared Euclidean distance transform in PyTorch, for any device.
 
     Squared distance is separable, so one 1-D min-plus transform per axis is exact:
-    ``out[q] = min_p (h*(q - p))^2 + in[p]``. Each pass is brute force, O(n) per voxel along
-    the axis, but fully vectorised.
+    ``out[q] = min_p (h*(q - p))^2 + in[p]``. Rounding is monotonic, so the per-pass minima give
+    the exact floating-point minimum of the whole expression, as :func:`exacta._native.edt_sq`
+    does. Each pass is brute force, O(n) per voxel along the axis, but fully vectorised.
     """
     out = torch.zeros(features.shape, dtype=torch.float64, device=features.device)
     out.masked_fill_(~features, math.inf)
@@ -149,8 +163,8 @@ def _edt_sq_torch(features: Tensor, spacing: Sequence[float]) -> Tensor:
         lines = out.movedim(axis, -1)
         shape = lines.shape
         lines = lines.reshape(-1, n)
-        x = torch.arange(n, dtype=torch.float64, device=out.device) * h
-        cost = (x[:, None] - x[None, :]).square()  # cost[q, p]
+        i = torch.arange(n, dtype=torch.float64, device=out.device)
+        cost = ((i[:, None] - i[None, :]) * h).square()  # cost[q, p]; offsets rounded once, as SciPy
         result = torch.empty_like(lines)
         step = max(1, _CHUNK // (n * n))
         for start in range(0, lines.shape[0], step):

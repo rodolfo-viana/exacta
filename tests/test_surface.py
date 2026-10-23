@@ -8,7 +8,7 @@ import torch
 import exacta.functional as EF
 import reference
 from _data import blobs, pair
-from exacta.functional.surface import _boundary
+from exacta.functional.surface import _boundary, _sqrt
 
 
 @pytest.mark.parametrize("shape", [(30, 40), (16, 20, 24)])
@@ -69,6 +69,12 @@ def test_empty_handling(device):
     assert EF.hd95(empty, empty, spacing=1, num_classes=2, both_empty=0.0)[0, 1] == 0
     assert EF.hd95(empty, filled, spacing=1, num_classes=2)[0, 1] == math.inf
     assert EF.hd95(filled, empty, spacing=1, num_classes=2, one_empty=99.0)[0, 1] == 99
+
+
+def test_sqrt_is_correctly_rounded(device):
+    x = torch.arange(200_001, dtype=torch.float64)
+    expected = torch.tensor([math.sqrt(v) for v in x.tolist()], dtype=torch.float64)
+    assert torch.equal(_sqrt(x.to(device)).cpu(), expected)
 
 
 def test_spacing_is_required():

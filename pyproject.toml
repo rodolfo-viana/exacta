@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Fast, reference-validated losses and metrics for deep learning on CPU and GPU."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["torch>=2.4"]
+dependencies = ["torch>=2.4", "numpy>=1.22"]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "hypothesis>=6", "numpy>=1.22", "scipy>=1.10"]
