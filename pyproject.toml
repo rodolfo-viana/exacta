@@ -1,0 +1,25 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "exacta"
+dynamic = ["version"]
+description = "Fast, reference-validated losses and metrics for deep learning on CPU and GPU."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "hypothesis>=6", "numpy>=1.22", "scipy>=1.10"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+# The extension uses the stable ABI, so one wheel per platform serves every Python >= 3.12.
+wheel.py-api = "cp312"
+metadata.version.provider = "scikit_build_core.metadata.regex"
+metadata.version.input = "src/exacta/__init__.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
