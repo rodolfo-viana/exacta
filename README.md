@@ -127,28 +127,30 @@ references run on CPU (MONAI's GPU path needs cuCIM, which is not installed here
 
 | Metric | Volume | exacta CPU | exacta GPU | MONAI | Other reference |
 |---|---|---:|---:|---:|---|
-| Dice | 128³ | 0.3 | 0.3 | | NumPy 10.0 |
-| | 256³ | 6.1 | 0.7 | | NumPy 84 |
-| HD95 | 128³ | 44 | 14 | 711 | SciPy EDT 2,607 |
-| | 256³ | 520 | 102 | 9,600 | SciPy EDT 18,486 |
-| NSD, voxels | 128³ | 43 | 14 | 697 | |
-| | 256³ | 532 | 101 | 9,548 | |
-| NSD, surfels | 128³ | 62 | 16 | 1,547 | DeepMind 1,600 |
-| | 256³ | 648 | 113 | 29,869 | DeepMind 12,580 |
-| HD95, mesh | 128³ | 298 | | | MeshMetrics 17,484 |
-| | 256³ | 2,325 | | | MeshMetrics 190,634 |
-| Connected components, 26-conn. | 128³ | 0.5 | 1.8 | | SciPy 14.8 |
-| | 256³ | 5.7 | 7.8 | | SciPy 109 |
-| Largest component, 26-conn. | 128³ | 1.3 | 2.1 | 21.2 | |
-| | 256³ | 11.1 | 9.5 | 159 | |
-| BraTS 2023 lesion-wise, 3 regions | 240×240×155 | 40 | 31 | | BraTS-2023-Metrics 7,700 |
+| Dice | 128³ | 0.5 | 0.3 | | NumPy 10.0 |
+| | 256³ | 7.0 | 0.7 | | NumPy 84 |
+| HD95 | 128³ | 46 | 12 | 711 | SciPy EDT 2,607 |
+| | 256³ | 529 | 86 | 9,600 | SciPy EDT 18,486 |
+| NSD, voxels | 128³ | 43 | 11 | 697 | |
+| | 256³ | 525 | 87 | 9,548 | |
+| NSD, surfels | 128³ | 63 | 13 | 1,547 | DeepMind 1,600 |
+| | 256³ | 653 | 96 | 29,869 | DeepMind 12,580 |
+| HD95, mesh | 128³ | 253 | | | MeshMetrics 17,484 |
+| | 256³ | 1,954 | | | MeshMetrics 190,634 |
+| Connected components, 26-conn. | 128³ | 0.5 | 0.5 | | SciPy 14.8 |
+| | 256³ | 6.0 | 3.4 | | SciPy 109 |
+| Largest component, 26-conn. | 128³ | 1.5 | 0.9 | 21.2 | |
+| | 256³ | 11.0 | 5.2 | 159 | |
+| BraTS 2023 lesion-wise, 3 regions | 240×240×155 | 24 | 31 | | BraTS-2023-Metrics 7,700 |
 
 "SciPy EDT" is exacta's test reference (`tests/reference.py`): the textbook implementation on
 `scipy.ndimage.distance_transform_edt`. exacta's plain-PyTorch GPU fallback (`backend="torch"`)
-takes 3,020 ms for HD95 at 256³. Mesh distances run on the CPU, also for CUDA inputs. The BraTS
-row scores the regions WT, TC and ET of one synthetic case from the lesion test fixtures'
-generator (`tests/fixtures/make_lesion_cases.py`); BraTS-2023-Metrics needs an environment of its
-own (see below) and was timed there, on the same case.
+takes 3,090 ms for HD95 at 256³. Mesh distances run on the CPU, also for CUDA inputs. The fastest
+CPU kernels spend much of their time writing fresh output memory, so their times depend on how
+quickly the operating system supplies it: labelling at 256³ takes 6-13 ms from run to run. The BraTS
+row scores the regions WT, TC and ET of one synthetic case from the lesion test fixtures' generator
+(`tests/fixtures/make_lesion_cases.py`); BraTS-2023-Metrics needs an environment of its own (see
+below) and was timed there, on the same case.
 
 ### Losses
 
