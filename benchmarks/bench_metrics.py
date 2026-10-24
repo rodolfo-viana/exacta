@@ -78,6 +78,7 @@ def methods(pred, target, classes: int, spacing):
         cases.append(("NSD surfels", "DeepMind", "cpu", deepmind_nsd))
     if torch.cuda.is_available():
         pc, tc = pred.cuda(), target.cuda()
+        fg_cuda = pc[0] > 0
         cases += [
             ("Dice", "exacta", "cuda", lambda: EF.dice(pc, tc, num_classes=classes)),
             ("HD95", "exacta triton", "cuda",
@@ -86,6 +87,8 @@ def methods(pred, target, classes: int, spacing):
              lambda: EF.hd95(pc, tc, spacing=spacing, num_classes=classes, backend="torch")),
             ("NSD surfels", "exacta triton", "cuda",
              lambda: EF.nsd(pc, tc, spacing=spacing, tolerance=1.0, num_classes=classes, surface="surfels")),
+            ("label (26-conn.)", "exacta triton", "cuda",
+             lambda: components.label(fg_cuda, connectivity=3)),
         ]
     try:
         import monai.metrics

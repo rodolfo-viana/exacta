@@ -6,7 +6,10 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import array_shapes, arrays
 from scipy import ndimage
 
-from exacta import components
+from exacta import _triton_label, components
+
+GPU = torch.cuda.is_available() and _triton_label.available()
+needs_gpu = pytest.mark.skipif(not GPU, reason="needs CUDA and Triton")
 
 
 def _scipy_label(mask, connectivity):
@@ -125,3 +128,56 @@ def test_rejects_bad_arguments():
         components.remove_small(np.ones(3), -1, connectivity=1)
     with pytest.raises(TypeError):
         components.label(np.ones(3))  # connectivity is required
+
+
+# --- GPU (Triton) -------------------------------------------------------------------------------
+
+
+@needs_gpu
+@pytest.mark.parametrize("shape", [(200,), (37, 41), (17, 23, 29), (1, 9, 1), (40, 300, 7)])
+@pytest.mark.parametrize("density", [0.0, 0.05, 0.3, 0.6, 1.0])
+def test_gpu_label_matches_scipy(shape, density):
+    mask = np.random.default_rng(4).random(shape) < density
+    for connectivity in range(1, len(shape) + 1):
+        expected, n = _scipy_label(mask, connectivity)
+        got, count = components.label(torch.from_numpy(mask).cuda(), connectivity=connectivity)
+        assert got.device.type == "cuda" and got.dtype == torch.int32
+        assert count == n
+        np.testing.assert_array_equal(got.cpu().numpy(), expected)
+
+
+@needs_gpu
+@settings(max_examples=200, deadline=None)
+@given(arrays(np.bool_, array_shapes(min_dims=1, max_dims=3, min_side=0, max_side=9)), st.data())
+def test_gpu_label_matches_scipy_on_random_masks(mask, data):
+    connectivity = data.draw(st.integers(1, mask.ndim))
+    expected, n = _scipy_label(mask, connectivity)
+    got, count = components.label(torch.from_numpy(mask).cuda(), connectivity=connectivity, backend="triton")
+    assert count == n
+    np.testing.assert_array_equal(got.cpu().numpy(), expected)
+
+
+@needs_gpu
+def test_gpu_matches_native_on_a_large_noisy_volume():
+    mask = torch.from_numpy(np.random.default_rng(5).random((96, 128, 160)) < 0.3)
+    for connectivity in (1, 3):
+        native, n = components.label(mask, connectivity=connectivity, backend="native")
+        gpu, m = components.label(mask.cuda(), connectivity=connectivity, backend="triton")
+        assert n == m
+        assert torch.equal(gpu.cpu(), native)
+
+
+@needs_gpu
+def test_gpu_largest_and_remove_small_match_cpu():
+    mask = torch.from_numpy(np.random.default_rng(6).random((20, 22, 24)) < 0.3)
+    gpu = mask.cuda()
+    assert torch.equal(components.largest(gpu, connectivity=2).cpu(), components.largest(mask, connectivity=2))
+    small_gpu = components.remove_small(gpu, 4, connectivity=1).cpu()
+    assert torch.equal(small_gpu, components.remove_small(mask, 4, connectivity=1))
+
+
+def test_backend_validation():
+    with pytest.raises(ValueError, match="backend must be"):
+        components.label(np.ones(3), connectivity=1, backend="cuda")
+    with pytest.raises(NotImplementedError, match="runs on GPU"):
+        components.label(np.ones(3), connectivity=1, backend="triton")
