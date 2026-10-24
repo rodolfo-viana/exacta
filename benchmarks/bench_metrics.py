@@ -1,6 +1,7 @@
 """Time exacta's metrics against reference implementations on synthetic 3D segmentations.
 
     python benchmarks/bench_metrics.py --sizes 96 128 192 --classes 4
+    python benchmarks/bench_metrics.py --sizes 128 256 --only exacta   # skip the slow references
 """
 
 from __future__ import annotations
@@ -162,6 +163,7 @@ def main() -> None:
     parser.add_argument("--sizes", type=int, nargs="+", default=[96, 128, 192])
     parser.add_argument("--classes", type=int, default=4)
     parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--only", help="run only implementations whose name contains this text")
     args = parser.parse_args()
 
     spacing = (1.5, 0.8, 0.8)
@@ -174,6 +176,8 @@ def main() -> None:
         p_np, t_np = pair((size,) * 3, args.classes, seed=0, batch=1, noise=0.0)
         pred, target = torch.from_numpy(p_np), torch.from_numpy(t_np)
         for metric, impl, device, fn in methods(pred, target, args.classes, spacing):
+            if args.only and args.only not in impl:
+                continue
             seconds = timed(fn, device, args.repeat)
             print(f"| {size}³ | {metric} | {impl} | {device} | {seconds * 1e3:,.1f} |", flush=True)
 

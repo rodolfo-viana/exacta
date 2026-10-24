@@ -90,28 +90,32 @@ Each convention is an explicit argument, because this is where libraries disagre
 
 ## Architecture
 
-- Pure PyTorch for anything that reduces to tensor operations: overlap metrics (a single
-  confusion-matrix pass on label maps, so memory does not grow with the number of classes) and
-  the CPU path of the losses.
-- Compiled CPU kernels (`csrc/`) for algorithms that don't: the exact Euclidean distance
-  transform behind HD95, ASSD and NSD, and run-based connected-component labelling. They sit
-  behind a plain C interface and receive arrays through DLPack, so the extension never links
-  against PyTorch and one wheel works across PyTorch versions.
+- Compiled CPU kernels (`csrc/`), multithreaded with OpenMP, for every pass over the voxels that
+  dominates a metric: the exact Euclidean distance transform behind HD95, ASSD and NSD; surface
+  extraction (boundary voxels, neighbour codes, the marching-cubes mesh) and point-to-mesh
+  distances; the voxel counts of the overlap metrics, in one pass that also checks the values;
+  connected-component labelling and the label statistics behind `largest`, `remove_small` and
+  lesion matching; dilation; and the sorts behind percentiles. They sit behind a plain C
+  interface and receive arrays through DLPack, so the extension never links against PyTorch and
+  one wheel works across PyTorch versions. They are built without fused multiply-adds, which
+  would round reference expressions differently.
 - GPU kernels in Triton, compiled at run time, so installing exacta needs no CUDA toolkit or host
   compiler. `backend="auto"` (the default everywhere) picks them on GPU; `backend="torch"`
   remains as a fallback.
   - The distance transform runs the same algorithm as the CPU kernel and gives the same values,
-    bit for bit.
+    bit for bit. Labelling gives the same labels as the CPU kernel and SciPy.
+  - The overlap metrics count voxels in per-block histograms, checking the values as they go.
   - `DiceLoss` and `DiceCELoss` run as two fused kernels, one forward and one backward, that
     keep nothing for the backward pass but the logits: 7-13x faster than the PyTorch path on 3-D
     batches, without its 0.3-2.2 GiB of intermediates (`benchmarks/bench_losses.py`). They
     work under `torch.compile` without graph breaks.
+- PyTorch for the glue between kernels, the CPU path of the losses, and the fallbacks.
 
 ## Benchmarks
 
 AMD Ryzen 9 5900XT (16 cores), NVIDIA RTX 5070, PyTorch 2.14.1, CUDA 13.0. Times in milliseconds,
-median of 5 runs. Reproduce with `python benchmarks/bench_metrics.py --sizes 128 256` and
-`python benchmarks/bench_losses.py`.
+median of 5 runs. Reproduce with `python benchmarks/bench_metrics.py --sizes 128 256` (add
+`--only exacta` to skip the slow references) and `python benchmarks/bench_losses.py`.
 
 ### Metrics
 
@@ -120,21 +124,21 @@ references run on CPU (MONAI's GPU path needs cuCIM, which is not installed here
 
 | Metric | Volume | exacta CPU | exacta GPU | MONAI | Other reference |
 |---|---|---:|---:|---:|---|
-| Dice | 128³ | 7.7 | 0.7 | | NumPy 10.0 |
-| | 256³ | 74 | 5.5 | | NumPy 84 |
-| HD95 | 128³ | 84 | 14 | 711 | SciPy EDT 2,607 |
-| | 256³ | 746 | 101 | 9,600 | SciPy EDT 18,486 |
-| NSD, voxels | 128³ | 59 | 14 | 697 | |
-| | 256³ | 686 | 101 | 9,548 | |
-| NSD, surfels | 128³ | 71 | 16 | 1,547 | DeepMind 1,600 |
-| | 256³ | 751 | 112 | 29,869 | DeepMind 12,580 |
-| HD95, mesh | 128³ | 788 | | | MeshMetrics 17,484 |
-| | 256³ | 5,708 | | | MeshMetrics 190,634 |
-| Connected components, 26-conn. | 128³ | 2.4 | 1.8 | | SciPy 14.8 |
-| | 256³ | 16.9 | 7.8 | | SciPy 109 |
-| Largest component, 26-conn. | 128³ | 4.7 | 2.5 | 21.2 | |
-| | 256³ | 34 | 13.5 | 159 | |
-| BraTS 2023 lesion-wise, 3 regions | 240×240×155 | 990 | 40 | | BraTS-2023-Metrics 7,700 |
+| Dice | 128³ | 0.3 | 0.3 | | NumPy 10.0 |
+| | 256³ | 6.1 | 0.7 | | NumPy 84 |
+| HD95 | 128³ | 44 | 14 | 711 | SciPy EDT 2,607 |
+| | 256³ | 520 | 102 | 9,600 | SciPy EDT 18,486 |
+| NSD, voxels | 128³ | 43 | 14 | 697 | |
+| | 256³ | 532 | 101 | 9,548 | |
+| NSD, surfels | 128³ | 62 | 16 | 1,547 | DeepMind 1,600 |
+| | 256³ | 648 | 113 | 29,869 | DeepMind 12,580 |
+| HD95, mesh | 128³ | 298 | | | MeshMetrics 17,484 |
+| | 256³ | 2,325 | | | MeshMetrics 190,634 |
+| Connected components, 26-conn. | 128³ | 0.5 | 1.8 | | SciPy 14.8 |
+| | 256³ | 5.7 | 7.8 | | SciPy 109 |
+| Largest component, 26-conn. | 128³ | 1.3 | 2.1 | 21.2 | |
+| | 256³ | 11.1 | 9.5 | 159 | |
+| BraTS 2023 lesion-wise, 3 regions | 240×240×155 | 40 | 31 | | BraTS-2023-Metrics 7,700 |
 
 "SciPy EDT" is exacta's test reference (`tests/reference.py`): the textbook implementation on
 `scipy.ndimage.distance_transform_edt`. exacta's plain-PyTorch GPU fallback (`backend="torch"`)
