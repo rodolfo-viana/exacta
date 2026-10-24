@@ -27,11 +27,12 @@ def _backends(device):
     ("shape", "spacing"), [((40, 36), (0.5, 1.25)), ((20, 24, 28), (3.0, 0.8, 0.8))]
 )
 @pytest.mark.parametrize("percentile", [95.0, 100.0, 50.0])
-def test_matches_reference(device, shape, spacing, percentile):
+@pytest.mark.parametrize("combine", ["max", "mean", "pooled"])
+def test_matches_reference(device, shape, spacing, percentile, combine):
     pred, target = pair(shape, 4, seed=5)
     spacings = [spacing] * pred.shape[0]
     expected = reference.per_case(
-        reference.hausdorff, pred, target, 4, spacings=spacings, percentile=percentile
+        reference.hausdorff, pred, target, 4, spacings=spacings, percentile=percentile, combine=combine
     )
     for backend in _backends(device):
         got = EF.hausdorff_distance(
@@ -39,6 +40,7 @@ def test_matches_reference(device, shape, spacing, percentile):
             torch.from_numpy(target).to(device),
             spacing=spacing,
             percentile=percentile,
+            combine=combine,
             num_classes=4,
             backend=backend,
         )
@@ -71,10 +73,119 @@ def test_empty_handling(device):
     assert EF.hd95(filled, empty, spacing=1, num_classes=2, one_empty=99.0)[0, 1] == 99
 
 
+@pytest.mark.parametrize(
+    ("shape", "spacing"), [((40, 36), (0.5, 1.25)), ((20, 24, 28), (3.0, 0.8, 0.8))]
+)
+@pytest.mark.parametrize("combine", ["max", "mean", "pooled"])
+def test_assd_matches_reference(device, shape, spacing, combine):
+    pred, target = pair(shape, 4, seed=8)
+    spacings = [spacing] * pred.shape[0]
+    expected = reference.per_case(reference.assd, pred, target, 4, spacings=spacings, combine=combine)
+    for backend in _backends(device):
+        got = EF.assd(
+            torch.from_numpy(pred).to(device),
+            torch.from_numpy(target).to(device),
+            spacing=spacing,
+            combine=combine,
+            num_classes=4,
+            backend=backend,
+        )
+        assert got.device.type == device.type
+        np.testing.assert_allclose(got.cpu().numpy(), expected, rtol=1e-10, err_msg=backend)
+
+
+# Tolerances include exact multiples of the spacing, where boundary voxels tie with the tolerance.
+@pytest.mark.parametrize(
+    ("shape", "spacing", "tolerance"),
+    [((40, 36), (0.5, 1.25), 0.5), ((40, 36), (0.5, 1.25), 1.75), ((20, 24, 28), (3.0, 0.8, 0.8), 1.6),
+     ((20, 24, 28), (3.0, 0.8, 0.8), 3.3)],
+)
+def test_nsd_matches_reference(device, shape, spacing, tolerance):
+    pred, target = pair(shape, 4, seed=9)
+    spacings = [spacing] * pred.shape[0]
+    expected = reference.per_case(reference.nsd, pred, target, 4, spacings=spacings, tolerance=tolerance)
+    for backend in _backends(device):
+        got = EF.nsd(
+            torch.from_numpy(pred).to(device),
+            torch.from_numpy(target).to(device),
+            spacing=spacing,
+            tolerance=tolerance,
+            num_classes=4,
+            backend=backend,
+        )
+        assert got.device.type == device.type
+        np.testing.assert_array_equal(got.cpu().numpy(), expected, err_msg=backend)
+
+
+def test_nsd_per_class_tolerance(device):
+    pred, target = pair((20, 24, 28), 4, seed=10)
+    spacing, tolerances = (2.0, 0.9, 0.9), [1.0, 1.8, 2.5]  # classes 1, 2, 3
+    got = EF.nsd(
+        torch.from_numpy(pred).to(device),
+        torch.from_numpy(target).to(device),
+        spacing=spacing,
+        tolerance=tolerances,
+        num_classes=4,
+        include_background=False,
+    ).cpu().numpy()
+    for k, tol in enumerate(tolerances):
+        expected = reference.per_case(reference.nsd, pred, target, 4, spacings=[spacing] * 2, tolerance=tol)
+        np.testing.assert_array_equal(got[:, k], expected[:, k + 1])
+
+
+@pytest.mark.parametrize(
+    "tolerance",
+    [2 * 0.7, math.sqrt(0.7 * 0.7 + 0.9 * 0.9)],  # two voxels along axis 0; one voxel diagonal
+    ids=["axis", "diagonal"],
+)
+def test_nsd_counts_distances_equal_to_tolerance(device, tolerance):
+    pred, target = pair((20, 24, 28), 3, seed=11)
+    spacing = (0.7, 0.9, 1.3)
+    expected = reference.per_case(reference.nsd, pred, target, 3, spacings=[spacing] * 2, tolerance=tolerance)
+    for backend in _backends(device):
+        nsd = lambda tol: EF.nsd(  # noqa: E731
+            torch.from_numpy(pred).to(device),
+            torch.from_numpy(target).to(device),
+            spacing=spacing,
+            tolerance=tol,
+            num_classes=3,
+            backend=backend,
+        ).cpu().numpy()
+        at = nsd(tolerance)
+        np.testing.assert_array_equal(at, expected, err_msg=backend)
+        assert (at > nsd(math.nextafter(tolerance, 0))).any(), "no boundary voxel tied with the tolerance"
+
+
 def test_sqrt_is_correctly_rounded(device):
     x = torch.arange(200_001, dtype=torch.float64)
     expected = torch.tensor([math.sqrt(v) for v in x.tolist()], dtype=torch.float64)
     assert torch.equal(_sqrt(x.to(device)).cpu(), expected)
+
+
+def test_nsd_empty_handling(device):
+    empty = torch.zeros(1, 8, 8, 8, dtype=torch.long, device=device)
+    filled = empty.clone()
+    filled[0, 2:5, 2:5, 2:5] = 1
+    assert EF.nsd(empty, empty, spacing=1, tolerance=1, num_classes=2)[0, 1].isnan()
+    assert EF.nsd(empty, filled, spacing=1, tolerance=1, num_classes=2)[0, 1] == 0
+    assert EF.nsd(filled, empty, spacing=1, tolerance=1, num_classes=2, one_empty=math.nan)[0, 1].isnan()
+    assert EF.nsd(filled, filled, spacing=1, tolerance=0, num_classes=2)[0, 1] == 1
+    assert EF.assd(empty, filled, spacing=1, num_classes=2)[0, 1] == math.inf
+
+
+def test_nsd_rejects_bad_tolerance():
+    x = torch.zeros(1, 4, 4, 4, dtype=torch.long)
+    with pytest.raises(ValueError, match=r"one value per evaluated class \(2 values, for classes 1..2\)"):
+        EF.nsd(x, x, spacing=1, tolerance=[1.0, 1.0, 1.0], num_classes=3, include_background=False)
+    with pytest.raises(ValueError, match="non-negative"):
+        EF.nsd(x, x, spacing=1, tolerance=-1.0, num_classes=2)
+
+
+@pytest.mark.parametrize("fn", [EF.hausdorff_distance, EF.assd])
+def test_rejects_unknown_combine(fn):
+    x = torch.zeros(1, 4, 4, 4, dtype=torch.long)
+    with pytest.raises(ValueError, match="combine must be"):
+        fn(x, x, spacing=1, num_classes=2, combine="symmetric")
 
 
 def test_spacing_is_required():
@@ -108,3 +219,75 @@ def test_matches_monai(percentile):
         )
     got = EF.hausdorff_distance(pred, target, spacing=spacing, percentile=percentile, num_classes=4)
     np.testing.assert_allclose(got, expected.double().numpy(), rtol=1e-5)
+
+
+def _monai_one_hot(x):
+    return torch.nn.functional.one_hot(torch.from_numpy(x), 4).movedim(-1, 1)
+
+
+def test_assd_matches_monai():
+    monai = pytest.importorskip("monai.metrics")
+    pred, target = pair((20, 24, 28), 4, seed=12)
+    spacing = (2.0, 0.9, 0.9)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = monai.compute_average_surface_distance(
+            _monai_one_hot(pred),
+            _monai_one_hot(target),
+            include_background=True,
+            symmetric=True,
+            spacing=spacing,
+        )
+    got = EF.assd(pred, target, spacing=spacing, num_classes=4)
+    np.testing.assert_allclose(got, expected.double().numpy(), rtol=1e-5)
+
+
+def test_nsd_matches_monai():
+    monai = pytest.importorskip("monai.metrics")
+    pred, target = pair((20, 24, 28), 4, seed=13)
+    spacing, tolerances = (2.0, 0.9, 0.9), [1.0, 1.5, 2.5, 3.5]  # none is a distance on this grid
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = monai.compute_surface_dice(
+            _monai_one_hot(pred),
+            _monai_one_hot(target),
+            class_thresholds=tolerances,
+            include_background=True,
+            spacing=spacing,
+        )
+    got = EF.nsd(pred, target, spacing=spacing, tolerance=tolerances, num_classes=4)
+    np.testing.assert_allclose(got, expected.double().numpy(), rtol=1e-6)
+
+
+def _medpy_per_case(fn, pred, target, num_classes, spacing):
+    """MedPy raises on empty masks, so cases where a class is absent stay NaN."""
+    out = np.full((pred.shape[0], num_classes), np.nan)
+    for b, c in np.ndindex(out.shape):
+        p, t = pred[b] == c, target[b] == c
+        if p.any() and t.any():
+            out[b, c] = fn(p, t, voxelspacing=spacing)
+    return out
+
+
+def test_pooled_hd95_matches_medpy():
+    medpy = pytest.importorskip("medpy.metric.binary")
+    pred, target = pair((20, 24, 28), 4, seed=14)
+    spacing = (2.0, 0.9, 0.9)
+    expected = _medpy_per_case(medpy.hd95, pred, target, 4, spacing)
+    got = EF.hd95(pred, target, spacing=spacing, num_classes=4, combine="pooled", one_empty=math.nan)
+    np.testing.assert_allclose(got, expected, rtol=1e-10)
+    default = EF.hd95(pred, target, spacing=spacing, num_classes=4, one_empty=math.nan)
+    assert not np.allclose(default, expected, equal_nan=True), "combine had no effect"
+
+
+def test_pooled_assd_matches_medpy():
+    medpy = pytest.importorskip("medpy.metric.binary")
+    from importlib.metadata import version
+
+    if tuple(int(v) for v in version("medpy").split(".")[:3]) < (0, 5, 2):
+        pytest.skip("MedPy < 0.5.2 defines assd differently (0.4 averages the directed means)")
+    pred, target = pair((20, 24, 28), 4, seed=15)
+    spacing = (2.0, 0.9, 0.9)
+    expected = _medpy_per_case(medpy.assd, pred, target, 4, spacing)
+    got = EF.assd(pred, target, spacing=spacing, num_classes=4, one_empty=math.nan)
+    np.testing.assert_allclose(got, expected, rtol=1e-10)

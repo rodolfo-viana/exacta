@@ -8,7 +8,7 @@ import torch.multiprocessing as mp
 
 import exacta.functional as EF
 from _data import pair
-from exacta.metrics import HD95, Dice, IoU
+from exacta.metrics import ASSD, HD95, NSD, Dice, IoU
 
 
 def _batches(device, n=3):
@@ -61,6 +61,29 @@ def test_hd95_spacing_from_constructor():
     torch.testing.assert_close(
         metric.compute().per_case, EF.hd95(pred, target, spacing=(1.5, 1.0, 1.0), num_classes=3)
     )
+
+
+@pytest.mark.parametrize(
+    ("metric_cls", "fn", "kwargs"),
+    [
+        (ASSD, EF.assd, {"combine": "mean"}),
+        (NSD, EF.nsd, {"tolerance": [1.0, 2.0]}),
+    ],
+    ids=["assd", "nsd"],
+)
+def test_surface_metrics_accumulate_like_functional(device, metric_cls, fn, kwargs):
+    batches = _batches(device, n=2)
+    spacings = [(1.0, 1.0, 1.0), (2.0, 0.5, 0.5)]
+    metric = metric_cls(num_classes=3, include_background=False, **kwargs)
+    for (pred, target), spacing in zip(batches, spacings):
+        metric.update(pred, target, spacing=spacing)
+    expected = torch.cat(
+        [
+            fn(p, t, spacing=s, num_classes=3, include_background=False, **kwargs)
+            for (p, t), s in zip(batches, spacings)
+        ]
+    )
+    torch.testing.assert_close(metric.compute().per_case, expected)
 
 
 def test_compute_before_update_and_reset():

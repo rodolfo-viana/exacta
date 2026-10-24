@@ -24,15 +24,46 @@ def boundary(m: np.ndarray) -> np.ndarray:
     return m & ~ndimage.binary_erosion(m, structure=structure, border_value=0)
 
 
-def hausdorff(p: np.ndarray, t: np.ndarray, spacing, percentile: float = 100.0) -> float:
+def surface_distances(p: np.ndarray, t: np.ndarray, spacing) -> tuple[np.ndarray, np.ndarray]:
+    """Distances from each boundary voxel of p to the boundary of t, and from t to p."""
+    bp, bt = boundary(p), boundary(t)
+    d_pt = ndimage.distance_transform_edt(~bt, sampling=spacing)[bp]
+    d_tp = ndimage.distance_transform_edt(~bp, sampling=spacing)[bt]
+    return d_pt, d_tp
+
+
+def _symmetric(stat, d_pt: np.ndarray, d_tp: np.ndarray, combine: str) -> float:
+    if combine == "pooled":
+        return stat(np.concatenate([d_pt, d_tp]))
+    a, b = stat(d_pt), stat(d_tp)
+    return {"max": max(a, b), "mean": (a + b) / 2}[combine]
+
+
+def hausdorff(
+    p: np.ndarray, t: np.ndarray, spacing, percentile: float = 100.0, combine: str = "max"
+) -> float:
     if not p.any() and not t.any():
         return np.nan
     if not p.any() or not t.any():
         return np.inf
-    bp, bt = boundary(p), boundary(t)
-    d_pt = ndimage.distance_transform_edt(~bt, sampling=spacing)[bp]
-    d_tp = ndimage.distance_transform_edt(~bp, sampling=spacing)[bt]
-    return max(np.percentile(d_pt, percentile), np.percentile(d_tp, percentile))
+    return _symmetric(lambda d: np.percentile(d, percentile), *surface_distances(p, t, spacing), combine)
+
+
+def assd(p: np.ndarray, t: np.ndarray, spacing, combine: str = "pooled") -> float:
+    if not p.any() and not t.any():
+        return np.nan
+    if not p.any() or not t.any():
+        return np.inf
+    return _symmetric(np.mean, *surface_distances(p, t, spacing), combine)
+
+
+def nsd(p: np.ndarray, t: np.ndarray, spacing, tolerance: float) -> float:
+    if not p.any() and not t.any():
+        return np.nan
+    if not p.any() or not t.any():
+        return 0.0
+    d_pt, d_tp = surface_distances(p, t, spacing)
+    return ((d_pt <= tolerance).sum() + (d_tp <= tolerance).sum()) / (d_pt.size + d_tp.size)
 
 
 def per_case(fn, pred: np.ndarray, target: np.ndarray, num_classes: int, spacings=None, **kw) -> np.ndarray:

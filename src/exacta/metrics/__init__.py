@@ -1,6 +1,6 @@
 """Stateful metrics that accumulate per-case values across batches and processes."""
 
 from exacta.metrics.base import MetricResult, PerCaseMetric
-from exacta.metrics.segmentation import HD95, Dice, HausdorffDistance, IoU
+from exacta.metrics.segmentation import ASSD, HD95, NSD, Dice, HausdorffDistance, IoU
 
-__all__ = ["HD95", "Dice", "HausdorffDistance", "IoU", "MetricResult", "PerCaseMetric"]
+__all__ = ["ASSD", "HD95", "NSD", "Dice", "HausdorffDistance", "IoU", "MetricResult", "PerCaseMetric"]

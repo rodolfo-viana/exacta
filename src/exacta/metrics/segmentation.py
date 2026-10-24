@@ -9,7 +9,7 @@ from torch import Tensor
 
 from exacta import functional
 from exacta._inputs import InputFormat
-from exacta.functional.surface import Backend
+from exacta.functional.surface import Backend, Combine
 from exacta.metrics.base import PerCaseMetric
 
 
@@ -48,18 +48,39 @@ class IoU(_OverlapMetric):
     _fn = staticmethod(functional.iou)
 
 
-class HausdorffDistance(PerCaseMetric):
-    """Percentile Hausdorff distance; see :func:`exacta.functional.hausdorff_distance`.
+class _SurfaceMetric(PerCaseMetric):
+    """Base for distance metrics.
 
-    ``spacing`` can be set once here or passed to every ``update`` call, which is how to use
-    per-case spacing read from image headers.
+    ``spacing`` can be set once in the constructor or passed to every ``update`` call, which is
+    how to use per-case spacing read from image headers.
     """
+
+    _fn: Any
+
+    def __init__(self, spacing: Any, **kwargs: Any) -> None:
+        super().__init__()
+        self._spacing = spacing
+        self._kwargs = kwargs
+
+    def update(self, pred: Any, target: Any, spacing: Any = None) -> Tensor:
+        """Add a batch; ``spacing`` overrides the constructor's spacing for this batch."""
+        return super().update(pred, target, spacing=self._spacing if spacing is None else spacing)
+
+    def _batch(self, pred: Tensor, target: Tensor, *, spacing: Any) -> Tensor:
+        return self._fn(pred, target, spacing=spacing, **self._kwargs)
+
+
+class HausdorffDistance(_SurfaceMetric):
+    """Percentile Hausdorff distance; see :func:`exacta.functional.hausdorff_distance`."""
+
+    _fn = staticmethod(functional.hausdorff_distance)
 
     def __init__(
         self,
         *,
         spacing: Any = None,
         percentile: float = 100.0,
+        combine: Combine = "max",
         input_format: InputFormat = "index",
         num_classes: int | None = None,
         include_background: bool = True,
@@ -67,10 +88,10 @@ class HausdorffDistance(PerCaseMetric):
         one_empty: float = math.inf,
         backend: Backend = "auto",
     ) -> None:
-        super().__init__()
-        self._spacing = spacing
-        self._kwargs = dict(
+        super().__init__(
+            spacing,
             percentile=percentile,
+            combine=combine,
             input_format=input_format,
             num_classes=num_classes,
             include_background=include_background,
@@ -79,16 +100,67 @@ class HausdorffDistance(PerCaseMetric):
             backend=backend,
         )
 
-    def update(self, pred: Any, target: Any, spacing: Any = None) -> Tensor:
-        """Add a batch; ``spacing`` overrides the constructor's spacing for this batch."""
-        return super().update(pred, target, spacing=self._spacing if spacing is None else spacing)
-
-    def _batch(self, pred: Tensor, target: Tensor, *, spacing: Any) -> Tensor:
-        return functional.hausdorff_distance(pred, target, spacing=spacing, **self._kwargs)
-
 
 class HD95(HausdorffDistance):
     """95th-percentile Hausdorff distance; arguments as in :class:`HausdorffDistance`."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(percentile=95.0, **kwargs)
+
+
+class ASSD(_SurfaceMetric):
+    """Average symmetric surface distance; see :func:`exacta.functional.assd`."""
+
+    _fn = staticmethod(functional.assd)
+
+    def __init__(
+        self,
+        *,
+        spacing: Any = None,
+        combine: Combine = "pooled",
+        input_format: InputFormat = "index",
+        num_classes: int | None = None,
+        include_background: bool = True,
+        both_empty: float = math.nan,
+        one_empty: float = math.inf,
+        backend: Backend = "auto",
+    ) -> None:
+        super().__init__(
+            spacing,
+            combine=combine,
+            input_format=input_format,
+            num_classes=num_classes,
+            include_background=include_background,
+            both_empty=both_empty,
+            one_empty=one_empty,
+            backend=backend,
+        )
+
+
+class NSD(_SurfaceMetric):
+    """Normalized surface Dice; see :func:`exacta.functional.nsd`."""
+
+    _fn = staticmethod(functional.nsd)
+
+    def __init__(
+        self,
+        *,
+        tolerance: Any,
+        spacing: Any = None,
+        input_format: InputFormat = "index",
+        num_classes: int | None = None,
+        include_background: bool = True,
+        both_empty: float = math.nan,
+        one_empty: float = 0.0,
+        backend: Backend = "auto",
+    ) -> None:
+        super().__init__(
+            spacing,
+            tolerance=tolerance,
+            input_format=input_format,
+            num_classes=num_classes,
+            include_background=include_background,
+            both_empty=both_empty,
+            one_empty=one_empty,
+            backend=backend,
+        )

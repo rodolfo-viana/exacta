@@ -16,7 +16,7 @@ Status: early development (v0.0.1). The first release targets 3D medical image s
 ```python
 import exacta.functional as EF
 from exacta.losses import DiceCELoss
-from exacta.metrics import HD95, Dice
+from exacta.metrics import HD95, NSD, Dice
 
 # Training
 loss_fn = DiceCELoss(include_background=False)        # logits (B, C, D, H, W), labels (B, D, H, W)
@@ -25,10 +25,12 @@ loss = loss_fn(model(x), y)
 # Validation: accumulate per-case values across batches (and processes under torch.distributed)
 dice = Dice(num_classes=4, include_background=False)
 hd95 = HD95(num_classes=4, include_background=False)
+nsd = NSD(tolerance=[1.0, 2.0, 2.0], num_classes=4, include_background=False)  # mm, per class
 for x, y, spacing in val_loader:
     pred = model(x).argmax(1)
     dice.update(pred, y)
     hd95.update(pred, y, spacing=spacing)             # per-case voxel size in mm, (B, 3)
+    nsd.update(pred, y, spacing=spacing)
 
 result = hd95.compute()
 result.per_case    # (N, C)
@@ -37,6 +39,10 @@ result.mean        # scalar
 
 # Stateless functions accept PyTorch, NumPy, CuPy or JAX arrays and return the same type
 EF.hd95(pred_np, target_np, spacing=(1.5, 0.8, 0.8), num_classes=4)  # -> np.ndarray (B, C)
+
+# Match another tool's definition explicitly
+EF.hd95(pred, target, spacing=s, num_classes=4, combine="pooled")    # MedPy's hd95
+EF.assd(pred, target, spacing=s, num_classes=4, combine="mean")      # MedPy 0.4's assd
 ```
 
 ## Conventions
@@ -47,10 +53,12 @@ Each convention is an explicit argument, because this is where libraries disagre
 |---|---|
 | Input layout | `input_format="index"`: class indices `(B, *spatial)` + `num_classes`. `"one-hot"`: binary masks `(B, C, *spatial)`. Metrics take hard labels; losses take logits. |
 | Spacing | Required for distance metrics, in the axis order of the tensor. A SimpleITK array is `(z, y, x)` while `GetSpacing()` returns `(x, y, z)`. |
-| Boundary | Mask voxels with a face-adjacent neighbour outside the mask; outside the image counts as background. |
-| HD95 | `max(P95(d(P→T)), P95(d(T→P)))`, linear-interpolated percentile, as in MONAI. MedPy pools both directions instead. |
+| Boundary | Mask voxels with a face-adjacent neighbour outside the mask; outside the image counts as background. Each boundary voxel has equal weight (area-weighted surfels, as in DeepMind's surface-distance, are planned). |
+| HD95 | `combine="max"` (default): `max(P95(d(P→T)), P95(d(T→P)))`, linear-interpolated percentile, as in MONAI. `"pooled"`: one percentile over both directions, as in MedPy. |
+| ASSD | `combine="pooled"` (default): mean over the boundary voxels of both masks, as in MONAI and MedPy 0.5.2. `"mean"`: mean of the two directed means, as in MedPy 0.4. |
+| NSD | Fraction of boundary voxels of both masks within `tolerance` of the other boundary, `d ≤ tolerance`, as in MONAI. Each distance is the exact floating-point minimum of the expression SciPy evaluates, so distances that tie with the tolerance land on the same side as in MedPy. MONAI compares in float32. |
 | Class absent from both | `both_empty`, default NaN (skipped when averaging). |
-| Class absent from one | Dice/IoU give 0. Distance metrics give `one_empty`, default `inf`. |
+| Class absent from one | Dice/IoU give 0. Distance metrics give `one_empty`: default `inf` for HD/ASSD, 0 for NSD. |
 | Aggregation | Per case, then the NaN-ignoring mean over cases, then over classes. |
 
 ## Architecture
@@ -59,7 +67,7 @@ Each convention is an explicit argument, because this is where libraries disagre
   Overlap metrics on label maps use a single confusion-matrix pass, so memory does not grow
   with the number of classes.
 - Compiled kernels (`csrc/`) for algorithms that don't, such as the exact Euclidean distance
-  transform behind HD/HD95. Kernels sit behind a plain C interface and receive arrays through
+  transform behind HD95, ASSD and NSD. Kernels sit behind a plain C interface and receive arrays through
   DLPack, so the compiled extension never links against PyTorch and one wheel works across
   PyTorch versions.
 - On GPU, distance metrics currently use an exact distance transform written in PyTorch
