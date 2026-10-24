@@ -238,3 +238,24 @@ def test_backend_validation():
     logits, target = _inputs("cpu")
     with pytest.raises(NotImplementedError, match="needs a CUDA input"):
         DiceLoss(backend="triton")(logits, target)
+
+
+@needs_gpu
+def test_fused_compiles_without_graph_breaks():
+    logits, target = _fused_inputs("softmax", "index", shape=(2, 4, 8, 9, 10))
+    loss_fn = DiceCELoss(backend="triton")
+    compiled = torch.compile(lambda x, t: loss_fn(x, t), fullgraph=True)  # fullgraph: fail on any break
+    eager_x, compiled_x = logits.clone().requires_grad_(), logits.clone().requires_grad_()
+    eager, got = loss_fn(eager_x, target), compiled(compiled_x, target)
+    eager.backward()
+    got.backward()
+    torch.testing.assert_close(got, eager)
+    torch.testing.assert_close(compiled_x.grad, eager_x.grad)
+
+
+@needs_gpu
+def test_fused_out_of_range_classes_give_nan_when_compiled():
+    logits, target = _fused_inputs("softmax", "index", shape=(2, 4, 8, 9, 10))
+    target[1, 2, 3, 4] = 4
+    loss_fn = DiceLoss(backend="triton")
+    assert torch.compile(lambda x, t: loss_fn(x, t), fullgraph=True)(logits, target).isnan()

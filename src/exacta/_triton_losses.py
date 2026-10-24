@@ -13,7 +13,8 @@ reads them again, recomputes the activation and writes the gradient from a close
 
 Each block of voxels writes its own partial sums, which are then reduced with ``torch.sum``, so
 results do not depend on scheduling (atomic adds would). Half-precision logits are read as they
-are and computed in float32; float64 logits are computed in float64.
+are and computed in float32; float64 logits are computed in float64. Class indices outside
+[0, classes) make the loss NaN; the loss modules also raise on them, outside torch.compile.
 """
 
 from __future__ import annotations
@@ -73,14 +74,15 @@ class _SegLoss(torch.autograd.Function):
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
         blocks = triton.cdiv(voxels, block)
-        partial = torch.empty((batch, blocks, 4, c_pad), dtype=compute, device=logits.device)
+        partial = torch.empty((batch, blocks, 5, c_pad), dtype=compute, device=logits.device)
         _forward[(blocks, batch)](
             logits, target, partial, voxels, classes, blocks,
             ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, C_PAD=c_pad, BLOCK=block,
             COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
         )  # fmt: skip
-        sums = partial.sum(1, dtype=torch.float64)  # (batch, 4, c_pad)
+        sums = partial.sum(1, dtype=torch.float64)  # (batch, 5, c_pad)
         inter, prob, truth, ce_terms = (sums[:, r, :classes] for r in range(4))
+        invalid = sums[:, 4, 0].sum()  # class indices out of range
 
         first = 0 if include_background else 1
         inter, prob, truth = inter[:, first:], prob[:, first:], truth[:, first:]
@@ -102,6 +104,7 @@ class _SegLoss(torch.autograd.Function):
         coef[:, 1, first:classes] = lambda_dice * num / (entries * den * den)
         ctx.save_for_backward(logits, target, coef, ce_scale)
         ctx.config = config
+        loss = torch.where(invalid > 0, torch.nan, loss)
         return loss.to(compute)
 
     @staticmethod
@@ -149,9 +152,9 @@ if triton is not None:
         if ONE_HOT:
             g = tl.load(target + row, mask=mask, other=0).to(COMPUTE)
         else:
-            t = tl.load(target + b * voxels + offs, mask=in_voxels, other=-1).to(tl.int32)
+            t = tl.load(target + b * voxels + offs, mask=in_voxels, other=0).to(tl.int32)
             g = (ch[:, None] == t[None, :]).to(COMPUTE)
-        return p, g, z, lse, mask, row, ch
+        return p, g, z, lse, mask, row, ch, offs
 
     @triton.jit
     def _forward(
@@ -161,7 +164,7 @@ if triton is not None:
     ):  # fmt: skip
         blk = tl.program_id(0)
         b = tl.program_id(1).to(tl.int64)
-        p, g, z, lse, mask, row, ch = _tile(
+        p, g, z, lse, mask, row, ch, offs = _tile(
             logits, target, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT, C_PAD, BLOCK, COMPUTE
         )
         w = mask.to(COMPUTE)
@@ -169,11 +172,17 @@ if triton is not None:
             ce = g * (lse[None, :] - z)
         else:  # binary cross-entropy with logits, as PyTorch computes it
             ce = tl.maximum(z, 0.0) - z * g + libdevice.log1p(tl.exp(-tl.abs(z)))
-        out = partial + ((b * blocks + blk) * 4) * C_PAD + ch
+        out = partial + ((b * blocks + blk) * 5) * C_PAD + ch
         tl.store(out, tl.sum(p * g * w, axis=1))
         tl.store(out + C_PAD, tl.sum(p * w, axis=1))
         tl.store(out + 2 * C_PAD, tl.sum(g * w, axis=1))
         tl.store(out + 3 * C_PAD, tl.sum(ce * w, axis=1))
+        invalid = tl.zeros([C_PAD], dtype=COMPUTE)
+        if not ONE_HOT:
+            t = tl.load(target + b * voxels + offs, mask=offs < voxels, other=0).to(tl.int32)
+            bad = tl.sum(((offs < voxels) & ((t < 0) | (t >= classes))).to(COMPUTE), axis=0)
+            invalid = tl.where(ch == 0, bad, 0.0)
+        tl.store(out + 4 * C_PAD, invalid)
 
     @triton.jit
     def _backward(
@@ -183,7 +192,7 @@ if triton is not None:
     ):  # fmt: skip
         blk = tl.program_id(0)
         b = tl.program_id(1).to(tl.int64)
-        p, g, z, lse, mask, row, ch = _tile(
+        p, g, z, lse, mask, row, ch, offs = _tile(
             logits, target, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT, C_PAD, BLOCK, COMPUTE
         )
         a = tl.load(coef + (b * 2) * C_PAD + ch)

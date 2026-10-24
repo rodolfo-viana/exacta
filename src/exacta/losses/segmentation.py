@@ -89,7 +89,10 @@ class DiceLoss(nn.Module):
         _check_input(input)
         if self.target_format == "index":
             _check_index_target(target, input)
-            _check_index_values(target, input.shape[1])
+            if not torch.compiler.is_compiling():
+                # Reading the range back is a host sync, which torch.compile would split the graph
+                # at; compiled code relies on the kernels, which turn the loss into NaN instead.
+                _check_index_values(target, input.shape[1])
             if target.dtype.is_floating_point:
                 target = target.long()
         else:
