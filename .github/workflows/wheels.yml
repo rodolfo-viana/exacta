@@ -19,17 +19,18 @@ jobs:
           python-version: "3.12"
       - name: Build, repair and test portable wheels
         run: |
-          exec > >(tee wheel-build.log) 2>&1
+          exec > >(tee "$RUNNER_TEMP/wheel-build.log") 2>&1
           python -m pip install cibuildwheel==4.3.4
           python -m cibuildwheel --output-dir wheelhouse
       - name: Expose failure details in the check annotations
         if: failure()
         run: |
           python - <<'PY'
+          import os
           from pathlib import Path
-          log = Path("wheel-build.log")
+          log = Path(os.environ["RUNNER_TEMP"]) / "wheel-build.log"
           if log.exists():
-              message = "\n".join(log.read_text()[-12000:].splitlines()[-80:])
+              message = "\n".join(log.read_text()[-3000:].splitlines()[-35:])
               message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
               print(f"::error title=Wheel build or test failure::{message}")
           PY

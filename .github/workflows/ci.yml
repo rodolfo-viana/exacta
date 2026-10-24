@@ -33,7 +33,7 @@ jobs:
           python-version: "3.10"
       - name: Build and test an installed sdist with minimum dependencies
         run: |
-          exec > >(tee source-test.log) 2>&1
+          exec > >(tee "$RUNNER_TEMP/source-test.log") 2>&1
           python -m pip install build==1.6.1 twine==7.0.0 mypy
           python -m build --sdist
           python -m twine check --strict dist/*
@@ -46,10 +46,11 @@ jobs:
         if: failure()
         run: |
           python - <<'PY'
+          import os
           from pathlib import Path
-          log = Path("source-test.log")
+          log = Path(os.environ["RUNNER_TEMP"]) / "source-test.log"
           if log.exists():
-              message = "\n".join(log.read_text()[-12000:].splitlines()[-80:])
+              message = "\n".join(log.read_text()[-3000:].splitlines()[-35:])
               message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
               print(f"::error title=Source build or test failure::{message}")
           PY
