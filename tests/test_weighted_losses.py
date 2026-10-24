@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from scipy.special import expit, softmax
 
-from exacta.losses import DiceCELoss, DiceLoss, FocalLoss, TverskyLoss
+from exacta.losses import DiceCELoss, DiceLoss, FocalLoss, GeneralizedDiceLoss, TverskyLoss
 from test_losses import _both_backends, _fused_inputs, _inputs, needs_gpu
 
 
@@ -226,7 +226,7 @@ def test_weighted_losses_autograd_limitations_are_explicit(loss_cls):
         torch.autograd.grad(fused(logits, target.detach()), logits, create_graph=True)
 
 
-@pytest.mark.parametrize("loss_cls", [DiceLoss, DiceCELoss, TverskyLoss, FocalLoss])
+@pytest.mark.parametrize("loss_cls", [DiceLoss, DiceCELoss, TverskyLoss, FocalLoss, GeneralizedDiceLoss])
 def test_losses_reject_noninteger_indices_and_invalid_input(device, loss_cls):
     logits, target = _inputs(device)
     with pytest.raises(TypeError, match="integer dtype"):
@@ -240,7 +240,7 @@ def test_losses_reject_noninteger_indices_and_invalid_input(device, loss_cls):
 
 
 @needs_gpu
-@pytest.mark.parametrize("loss_cls", [DiceLoss, DiceCELoss, TverskyLoss, FocalLoss])
+@pytest.mark.parametrize("loss_cls", [DiceLoss, DiceCELoss, TverskyLoss, FocalLoss, GeneralizedDiceLoss])
 @pytest.mark.parametrize("target_format", ["index", "one-hot"])
 def test_losses_reject_device_mismatch(loss_cls, target_format):
     logits, target = _fused_inputs("softmax", target_format)

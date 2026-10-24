@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from exacta import _triton_losses
+from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms
 
 Activation = Literal["softmax", "sigmoid", "none"]
 TargetFormat = Literal["index", "one-hot"]
@@ -57,6 +58,9 @@ class _OverlapLoss(nn.Module):
     def _tversky_weights(self) -> tuple[float, float] | None:
         return None
 
+    def _generalized_config(self) -> tuple[WeightType, EmptyTarget] | None:
+        return None
+
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
         if _use_triton(self.backend, input, target):
             return self._fused(input, target, lambda_dice=1.0, lambda_ce=0.0, cross_entropy=False)
@@ -84,7 +88,15 @@ class _OverlapLoss(nn.Module):
             return 1 - ((intersection + self.smooth) / (
                 intersection + alpha * fp + beta * fn + self.smooth
             )).mean()
-        denominator = probs.sum(dims) + onehot.sum(dims)
+        prediction, truth = probs.sum(dims), onehot.sum(dims)
+        generalized = self._generalized_config()
+        if generalized is not None:
+            numerator, denominator, _ = generalized_dice_terms(
+                intersection, prediction, truth, weight_type=generalized[0],
+                empty_target=generalized[1], smooth=self.smooth,
+            )
+            return (1 - (numerator / denominator).mean()).to(input.dtype)
+        denominator = prediction + truth
         return 1 - ((2 * intersection + self.smooth) / (denominator + self.smooth)).mean()
 
     def _fused(
@@ -106,6 +118,7 @@ class _OverlapLoss(nn.Module):
             lambda_ce=lambda_ce,
             cross_entropy=cross_entropy,
             tversky=self._tversky_weights(),
+            generalized=self._generalized_config(),
         )
 
 
@@ -154,6 +167,54 @@ class TverskyLoss(_OverlapLoss):
 
     def _tversky_weights(self) -> tuple[float, float]:
         return self.alpha, self.beta
+
+
+class GeneralizedDiceLoss(_OverlapLoss):
+    """Class-volume-weighted Dice following Sudre et al. (2017).
+
+    ``1 - (2 Σ_c w_c Σ p_c*g_c + smooth) / (Σ_c w_c Σ (p_c+g_c) + smooth)``,
+    averaged over cases. ``weight_type="square"`` (default) uses inverse squared target
+    volume; ``"simple"`` uses inverse volume and ``"uniform"`` uses unit weights.
+    This is a ratio of class-weighted sums, unlike DiceLoss's mean of classwise ratios.
+    With ``batch_dice=True``, accumulate volumes over the batch before computing weights
+    and one ratio. Smoothing is added after class weighting.
+
+    Absent classes receive the largest weight of the present selected classes, as in MONAI.
+    With inverse-volume weighting, ``empty_target="zero"`` (default) gives zero loss and
+    gradient if every selected class is absent, even with false-positive predictions.
+    Use ``empty_target="uniform"`` to assign unit weights to those cases and penalize
+    false positives. Zero-weight cases return zero also with ``smooth=0``. Other zero
+    denominators remain NaN. Empty-target cases still count in the batch mean.
+
+    Soft targets use the same product-based formula, including their volume-dependent
+    weights; no implicit background channel is added for single-channel sigmoid inputs.
+    Activation, target format, background selection and backends follow :class:`DiceLoss`.
+    """
+
+    def __init__(
+        self,
+        *,
+        weight_type: WeightType = "square",
+        empty_target: EmptyTarget = "zero",
+        activation: Activation = "softmax",
+        target_format: TargetFormat = "index",
+        include_background: bool = True,
+        batch_dice: bool = False,
+        smooth: float = 1e-5,
+        backend: Backend = "auto",
+    ) -> None:
+        super().__init__(
+            activation=activation, target_format=target_format, include_background=include_background,
+            batch_dice=batch_dice, smooth=smooth, backend=backend,
+        )
+        if weight_type not in ("square", "simple", "uniform"):
+            raise ValueError("weight_type must be 'square', 'simple' or 'uniform'")
+        if empty_target not in ("zero", "uniform"):
+            raise ValueError("empty_target must be 'zero' or 'uniform'")
+        self.weight_type, self.empty_target = weight_type, empty_target
+
+    def _generalized_config(self) -> tuple[WeightType, EmptyTarget]:
+        return self.weight_type, self.empty_target
 
 
 class FocalLoss(nn.Module):

@@ -16,9 +16,10 @@ import time
 
 import torch
 
-from exacta.losses import DiceCELoss, FocalLoss, TverskyLoss
+from exacta.losses import DiceCELoss, FocalLoss, GeneralizedDiceLoss, TverskyLoss
 
-LOSSES = {"dice_ce": DiceCELoss, "tversky": TverskyLoss, "focal": FocalLoss}
+LOSSES = {"dice_ce": DiceCELoss, "tversky": TverskyLoss, "focal": FocalLoss,
+          "generalized_dice": GeneralizedDiceLoss}
 DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float64": torch.float64}
 
 

@@ -6,7 +6,7 @@ on:
       version:
         description: Exact package version to publish (must match the source)
         required: true
-        default: 0.0.1a1
+        default: 0.0.1a2
         type: string
 
 permissions:

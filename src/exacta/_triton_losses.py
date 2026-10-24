@@ -10,6 +10,8 @@ reads them again, recomputes the activation and writes the gradient from a close
             where D = Σp + Σg + s, I = Σ p·g and E is the number of averaged entries.
     Tversky: A = [D - (1-alpha-beta)·N] / (E·D²), B = alpha·N / (E·D²),
              where N=I+s and D=I+alpha·FP+beta·FN+s. FP/FN are accumulated directly.
+    Generalized Dice: A_c = 2·w_c / (E·D), B_c = w_c·N / (E·D²), where the numerator
+                      N and denominator D are class-weighted sums and E counts cases.
     softmax CE:  dL/dz = (p·Σg - g) / (cases·voxels)
     sigmoid BCE: dL/dz = (p - g) / (cases·classes·voxels)
 
@@ -31,6 +33,8 @@ from __future__ import annotations
 
 import torch
 from torch import Tensor
+
+from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms
 
 try:
     import triton
@@ -59,11 +63,12 @@ def seg_loss(
     lambda_ce: float,
     cross_entropy: bool,
     tversky: tuple[float, float] | None = None,
+    generalized: tuple[WeightType, EmptyTarget] | None = None,
 ) -> Tensor:
-    """Dice plus optional CE, or Tversky when its weights are supplied by TverskyLoss."""
+    """Overlap losses share volume passes; only their small final reductions differ."""
     config = (
         activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce,
-        cross_entropy, tversky,
+        cross_entropy, tversky, generalized,
     )
     return _SegLoss.apply(logits, target, config)
 
@@ -81,7 +86,8 @@ def _layout(logits: Tensor) -> tuple[int, int, int, int, int]:
 class _SegLoss(torch.autograd.Function):
     @staticmethod
     def forward(ctx, logits: Tensor, target: Tensor, config: tuple) -> Tensor:  # type: ignore[override]
-        activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce, ce, tversky = config
+        (activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce,
+         ce, tversky, generalized) = config
         logits, target = logits.contiguous(), target.contiguous()
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
@@ -102,7 +108,12 @@ class _SegLoss(torch.autograd.Function):
         inter, prob, truth = inter[:, first:], prob[:, first:], truth[:, first:]
         if batch_dice:
             inter, prob, truth = inter.sum(0), prob.sum(0), truth.sum(0)
-        if tversky is None:
+        if generalized is not None:
+            num, den, weights = generalized_dice_terms(
+                inter, prob, truth, weight_type=generalized[0], empty_target=generalized[1],
+                smooth=smooth,
+            )
+        elif tversky is None:
             den = prob + truth + smooth
             num = 2 * inter + smooth
         else:
@@ -121,7 +132,10 @@ class _SegLoss(torch.autograd.Function):
 
         entries = dice.numel()
         coef = torch.zeros((batch, 2, c_pad), dtype=torch.float64, device=logits.device)
-        if tversky is None:
+        if generalized is not None:
+            coef[:, 0, first:classes] = lambda_dice * 2 * weights / (entries * den)
+            coef[:, 1, first:classes] = lambda_dice * weights * num / (entries * den * den)
+        elif tversky is None:
             coef[:, 0, first:classes] = lambda_dice * 2 / (entries * den)
             coef[:, 1, first:classes] = lambda_dice * num / (entries * den * den)
         else:
@@ -140,7 +154,8 @@ class _SegLoss(torch.autograd.Function):
                 "use backend='torch'"
             )
         logits, target, coef, ce_scale = ctx.saved_tensors
-        activation, one_hot, *_, ce, tversky = ctx.config
+        activation, one_hot = ctx.config[:2]
+        ce = ctx.config[7]
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
         coef = (coef * grad_out).to(compute)

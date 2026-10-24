@@ -11,7 +11,20 @@ implementations (SciPy, MONAI, MedPy, DeepMind's surface-distance, MeshMetrics, 
 Panoptica and the BraTS 2023 evaluation code), and where they disagree with each other, exacta
 can reproduce each of them through an explicit argument.
 
-Status: early development (v0.0.1a1). The first release targets 3D medical image segmentation.
+Status: early development (v0.0.1a2). Current releases target 3D medical image segmentation.
+
+## Installation
+
+Install the alpha from PyPI with Python 3.10 or newer:
+
+```bash
+python -m pip install exacta==0.0.1a2
+```
+
+This release is a **source distribution**. Installation builds the native extension locally
+and requires a C++17 compiler and Python development headers; OpenMP is optional. On
+Debian/Ubuntu, install `build-essential` and the development headers matching your Python
+version first. Portable binary wheels are planned.
 
 ## Usage
 
@@ -126,6 +139,7 @@ For probabilities `p` and targets `g`, the definitions and reductions are explic
 | `DiceLoss` | `1 - (2 Σ p·g + s) / (Σ p + Σ g + s)`, averaged over cases and classes. |
 | `DiceCELoss` | `lambda_dice * DiceLoss + lambda_ce * CE`; CE is ordinary cross-entropy for softmax, BCE for sigmoid, and always includes every channel. |
 | `TverskyLoss` | `1 - (TP+s)/(TP+alpha*FP+beta*FN+s)`, with `TP=Σ p·g`, `FP=Σ p·(1-g)`, `FN=Σ (1-p)·g`. Average over cases and classes. |
+| `GeneralizedDiceLoss` | `1 - (2 Σ_c w_c Σ p_c·g_c + s)/(Σ_c w_c Σ (p_c+g_c) + s)`, averaged over cases; weights derive from target class volumes. |
 | `FocalLoss`, softmax | `-Σ_c w_c*g_c*(1-p_c)^gamma*log(p_c)`, averaged over cases and voxels. |
 | `FocalLoss`, sigmoid | `-w_pos*g*(1-p)^gamma*log(p) - w_neg*(1-g)*p^gamma*log(1-p)`, averaged over cases, channels and voxels. |
 
@@ -136,6 +150,28 @@ need not sum to one. At those defaults, Tversky equals Dice with **twice** the s
 constant. The asymmetric overlap objective follows
 [Salehi et al. (2017)](https://arxiv.org/abs/1706.05721).
 
+`GeneralizedDiceLoss` follows [Sudre et al. (2017)](https://arxiv.org/abs/1707.03237) with
+`weight_type="square"` (inverse squared target volume), `"simple"` (inverse volume), or
+`"uniform"` (unit weights). It computes a ratio of weighted sums over classes, rather than
+DiceLoss's mean of classwise ratios. With `batch_dice=True`, volumes and weights cover the
+whole local batch. Smoothing is added **after** weighting and can materially affect the result
+when inverse-volume weights are small.
+
+Absent classes receive the largest weight among present selected classes. For inverse-volume
+weighting, `empty_target="zero"` follows MONAI: cases with no selected target class contribute
+zero loss, including when predictions contain false positives. `empty_target="uniform"`
+instead assigns unit weights to these cases; use positive smoothing for a useful gradient on
+an entirely empty target. Zero-weight cases return zero even with `smooth=0`; other zero
+denominators remain NaN. Soft targets use the product-based formula above. No background
+channel is added implicitly for single-channel sigmoid inputs.
+
+```python
+from exacta.losses import GeneralizedDiceLoss
+
+loss_fn = GeneralizedDiceLoss(include_background=False, empty_target="uniform")
+loss = loss_fn(logits, labels)
+```
+
 Focal loss downweights easy examples using `gamma` (default `2`), following
 [Lin et al. (2017)](https://arxiv.org/abs/1708.02002). `alpha=None` gives unit weights. A scalar
 `alpha` in `[0, 1]` assigns sigmoid positive/negative weights `alpha`/`1-alpha`; for softmax,
@@ -145,11 +181,20 @@ default mean for the same hard targets. The formulas above define soft targets a
 sums of hard-label losses; sigmoid soft-target behavior differs from MONAI's modulation of a
 single soft-label BCE term. Focal loss expects finite logits and includes every channel.
 
-All four losses compute half/bfloat16 inputs in float32 and retain float64 precision.
+All losses compute half/bfloat16 inputs in float32 and retain float64 precision.
 `backend="auto"` uses fused Triton on CUDA when available and PyTorch elsewhere. Use
 `backend="torch"` for higher-order derivatives; the fused backward explicitly rejects them.
 Targets requiring gradients automatically select PyTorch. Eager execution rejects out-of-range
 indices; compiled Triton execution returns NaN for them without a host synchronization.
+
+For repeated CPU training steps, `torch.compile` can reduce allocations and fuse native
+PyTorch operations. Compilation adds startup cost; benchmark the warmed-up loss on your shapes:
+
+```python
+import torch
+
+loss_fn = torch.compile(DiceCELoss(backend="torch"), fullgraph=True)
+```
 
 ## Architecture
 
@@ -162,13 +207,13 @@ indices; compiled Triton execution returns NaN for them without a host synchroni
   plain C interface and receive arrays through DLPack, so the extension never links against
   PyTorch and one wheel works across PyTorch versions. They are built without fused
   multiply-adds, which would round reference expressions differently.
-- GPU kernels in Triton, compiled at run time, so installing exacta needs no CUDA toolkit or host
-  compiler. `backend="auto"` (the default everywhere) picks them on GPU; `backend="torch"`
+- GPU kernels in Triton, compiled at run time without the CUDA toolkit.
+  `backend="auto"` (the default everywhere) picks them on GPU; `backend="torch"`
   remains as a fallback.
   - The distance transform runs the same algorithm as the CPU kernel and gives the same values,
     bit for bit. Labelling gives the same labels as the CPU kernel and SciPy.
   - The overlap metrics count voxels in per-block histograms, checking the values as they go.
-  - Dice, Dice-plus-CE, Tversky and focal losses fuse voxel operations in forward and backward,
+  - Dice, Dice-plus-CE, Tversky, generalized Dice and focal losses fuse voxel operations in forward and backward,
     retaining the inputs and small reduction statistics instead of full-volume activations or
     one-hot intermediates. They work under `torch.compile` without graph breaks. CPU losses
     use PyTorch's compiled operators and autograd; `torch.compile` can fuse them further.
@@ -225,6 +270,7 @@ softmax activation, integer targets, float32 logits of shape `2×4×128³`, RTX 
 | Dice + CE | 5.643 | 3.105 | 0.847 | 320 / 144 / <0.1 |
 | Tversky | 6.980 | 1.918 | 0.818 | 256 / 80 / <0.1 |
 | Focal | 8.628 | 2.056 | 0.614 | 560 / 128 / <0.1 |
+| Generalized Dice | 4.184 | 3.521 | 0.938 | 256 / 128 / <0.1 |
 
 Extra memory is the peak allocation during the step beyond its inputs and logits' gradient;
 small scratch buffers can fit below that baseline. These are local synthetic measurements,
@@ -236,6 +282,7 @@ not end-to-end training speedups. CPU measurements on the same system, with 16 t
 | Dice + CE | 15.746 | 10.248 |
 | Tversky | 13.157 | 9.574 |
 | Focal | 30.743 | 6.378 |
+| Generalized Dice | 10.541 | 4.985 |
 
 Reproduce these tables with:
 
@@ -293,35 +340,7 @@ updates using Gloo; their NCCL variants require two GPUs and are skipped otherwi
 Loss checks include independent NumPy formulas, MONAI comparisons with explicit reduction
 adjustments, float64 finite-difference gradient checks, higher-order PyTorch gradients,
 CPU/GPU agreement, mixed precision, extreme logits and full-graph compilation:
-`python -m pytest tests/test_losses.py tests/test_weighted_losses.py`.
-
-## Publishing
-
-The initial alpha publishes the working library as a **source distribution**. Installation
-builds the native extension locally and requires a C++17 compiler and Python development
-headers; OpenMP is optional. Portable binary wheels are still to come. On Debian/Ubuntu,
-install `build-essential` and the development headers matching your Python version before
-installing the package. After the first successful upload, install this alpha with
-`python -m pip install exacta==0.0.1a1`.
-
-`.github/workflows/publish.yml` is triggered manually, only from `main`. It builds the source
-archive, checks its metadata and requested version, installs that artifact with PyTorch 2.4.1
-and NumPy 1.x, and runs the tests before publishing. Publishing uses short-lived OIDC credentials;
-no PyPI password or API-token repository secret is needed. Follow
-[PyPI's Trusted Publishing guide](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
-
-The account owner must configure the external services once:
-
-1. In GitHub repository settings, create an environment named `pypi`, restrict deployment
-   to `main`, and add yourself as a required reviewer. Allow yourself to approve the run.
-2. Under PyPI account **Publishing**, add a pending GitHub publisher with project `exacta`,
-   owner `rodolfo-viana`, repository `exacta`, workflow `publish.yml`, and environment `pypi`.
-3. In GitHub **Actions → Publish to PyPI → Run workflow**, select `main` and enter `0.0.1a1`.
-   Review the build/test result and approve the `pypi` deployment when prompted.
-
-The name is claimed only after the first upload succeeds. Registering a pending publisher
-alone does not reserve it. For subsequent releases, update `__version__` and the workflow's
-default version, commit the change, then repeat the manual run with that exact version.
+`python -m pytest tests/test_losses.py tests/test_weighted_losses.py tests/test_generalized_dice.py`.
 
 ## License
 
