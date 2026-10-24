@@ -55,8 +55,9 @@ def label(mask: Tensor, connectivity: int) -> tuple[Tensor, int]:
     index = torch.arange(total, dtype=torch.int32, device=mask.device)
     parent = torch.where(fg, index, -1)
     grid = (triton.cdiv(total, _BLOCK),)
-    _merge[grid](parent, table, len(offsets), shape[0], shape[1], shape[2], total, BLOCK=_BLOCK)
-    _compress[grid](parent, total, BLOCK=_BLOCK)
+    with torch.cuda.device(mask.device):  # Triton launches on the current device
+        _merge[grid](parent, table, len(offsets), shape[0], shape[1], shape[2], total, BLOCK=_BLOCK)
+        _compress[grid](parent, total, BLOCK=_BLOCK)
 
     roots = fg & (parent == index)
     number = torch.cumsum(roots, 0, dtype=torch.int32)  # components in order of first voxel

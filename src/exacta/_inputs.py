@@ -5,12 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import numpy as np
 import torch
 from torch import Tensor
 
 from exacta import _native
 
 InputFormat = Literal["index", "one-hot"]
+
+# Voxel sizes beyond these overflow (or make subnormal) the squared distances the exact distance
+# transforms compute; any physical unit is far inside them.
+MIN_SPACING, MAX_SPACING = 1e-100, 1e100
 
 
 def to_torch(x: Any) -> Tensor:
@@ -22,7 +27,10 @@ def to_torch(x: Any) -> Tensor:
             return torch.from_dlpack(x)
         except (BufferError, RuntimeError, TypeError):
             pass  # e.g. read-only NumPy arrays
-    return torch.as_tensor(x)
+    try:
+        return torch.as_tensor(x)
+    except ValueError:  # NumPy arrays with negative strides (e.g. a[::-1]) need a copy
+        return torch.as_tensor(np.ascontiguousarray(x))
 
 
 def like_input(result: Tensor, original: Any) -> Any:
@@ -205,6 +213,9 @@ def as_spacing(spacing: Any, *, batch: int, ndim: int) -> list[tuple[float, ...]
         raise ValueError(
             f"spacing must be a scalar, shape ({ndim},) or ({batch}, {ndim}); got {tuple(s.shape)}"
         )
-    if not bool(torch.isfinite(s).all() and (s > 0).all()):
-        raise ValueError("spacing values must be positive and finite")
+    if not bool(torch.isfinite(s).all() and (s >= MIN_SPACING).all() and (s <= MAX_SPACING).all()):
+        raise ValueError(
+            f"spacing values must lie in [{MIN_SPACING:g}, {MAX_SPACING:g}]; outside, squared distances "
+            "overflow or lose precision and exact distances cannot be guaranteed"
+        )
     return [tuple(row) for row in s.tolist()]

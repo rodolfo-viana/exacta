@@ -161,8 +161,9 @@ extern "C" int exacta_edt_sq_f64(const uint8_t *features, double *out, const int
   for (int axis = 0; axis < ndim; ++axis) {
     if (shape[axis] < 0) return EXACTA_INVALID_ARGUMENT;
     if (axis >= batch_ndim) {
+      // Beyond these, squared distances overflow or turn subnormal and stop being exact.
       const double h = spacing[axis - batch_ndim];
-      if (!(h > 0.0) || !std::isfinite(h)) return EXACTA_INVALID_ARGUMENT;
+      if (!(h >= 1e-100 && h <= 1e100)) return EXACTA_INVALID_ARGUMENT;
     }
     empty = empty || shape[axis] == 0;
   }

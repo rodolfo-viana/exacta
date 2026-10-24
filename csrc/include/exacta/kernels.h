@@ -26,8 +26,8 @@ const char *exacta_status_string(int status);
  *
  * The first `batch_ndim` axes of the `ndim`-dimensional array described by `shape` index
  * independent images. For every element, writes to `out` the squared distance, in the physical
- * units of `spacing` (one positive value per remaining axis), to the nearest nonzero element of
- * `features` in the same image; +inf if that image has none. `num_threads` <= 0 uses the OpenMP
+ * units of `spacing` (one value in [1e-100, 1e100] per remaining axis), to the nearest nonzero
+ * element of `features` in the same image; +inf if that image has none. `num_threads` <= 0 uses the OpenMP
  * default.
  */
 int exacta_edt_sq_f64(const uint8_t *features, double *out, const int64_t *shape, int ndim,

@@ -44,6 +44,11 @@ def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> T
     """
     if triton is None:
         raise RuntimeError("Triton is not installed")
+    with torch.cuda.device(features.device):  # Triton launches on the current device
+        return _transform(features, spacing, batch_ndim)
+
+
+def _transform(features: Tensor, spacing: Sequence[float], batch_ndim: int) -> Tensor:
     out = torch.empty(features.shape, dtype=torch.float64, device=features.device)
     if out.numel() == 0:
         return out
@@ -64,7 +69,9 @@ def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> T
         stride = math.prod(out.shape[axis + 1 :])
         lines = total // n
         programs = min(triton.cdiv(lines, _BLOCK), max(1, _SCRATCH_BYTES // (_BLOCK * (n + 1) * 12)))
-        lanes = programs * _BLOCK
+        # Scratch only for lanes that have a line: a few very long lines would otherwise get a full
+        # block of stacks each. Lanes past the last line never touch their (absent) column.
+        lanes = min(programs * _BLOCK, lines)
         v = torch.empty((n + 1) * lanes, dtype=torch.int32, device=out.device)
         z = torch.empty((n + 1) * lanes, dtype=torch.float64, device=out.device)
         # h, and 64 epsilon for the tie tolerance, as float64

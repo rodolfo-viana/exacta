@@ -153,3 +153,16 @@ def test_batch_axes_transform_each_image_separately(edt_sq, shape, spacing):
         features.cuda(), spacing, batch_ndim
     ).cpu()
     assert torch.equal(got, expected)
+
+
+@needs_gpu
+def test_triton_scratch_scales_with_lines_not_blocks():
+    # Three lines of 400 000: scratch for three lanes, not for a whole block of them.
+    features = torch.from_numpy(_features((3, 400_000), 0.0001))
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    got = _triton(features, (1.0, 0.5))
+    peak = torch.cuda.max_memory_allocated() - base
+    assert torch.equal(got, _native.edt_sq(features, (1.0, 0.5)))
+    assert peak < 64 << 20, f"{peak / 2**20:.0f} MiB"

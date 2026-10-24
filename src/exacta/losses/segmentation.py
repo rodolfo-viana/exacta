@@ -6,7 +6,10 @@ Inputs are raw network outputs of shape (B, C, *spatial). Targets are class indi
 
 ``backend="auto"`` runs fused Triton kernels on GPU (one pass forward, one backward, nothing of
 the input's size kept for the backward pass but the input itself) and plain PyTorch elsewhere.
-Both give the same loss and gradients up to floating-point rounding.
+Both give the same loss and gradients up to floating-point rounding. The fused kernels do not
+differentiate their own backward pass (double backward raises; use ``backend="torch"`` for
+gradient penalties) and do not propagate gradients into the target (``"auto"`` then uses
+PyTorch).
 """
 
 from __future__ import annotations
@@ -64,7 +67,7 @@ class DiceLoss(nn.Module):
         self.backend = backend
 
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
-        if _use_triton(self.backend, input):
+        if _use_triton(self.backend, input, target):
             return self._fused(input, target, lambda_dice=1.0, lambda_ce=0.0, cross_entropy=False)
         input = _upcast(input)
         if self.activation == "softmax":
@@ -150,7 +153,7 @@ class DiceCELoss(nn.Module):
         self.lambda_ce = lambda_ce
 
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
-        if _use_triton(self.dice.backend, input):
+        if _use_triton(self.dice.backend, input, target):
             return self.dice._fused(
                 input, target, lambda_dice=self.lambda_dice, lambda_ce=self.lambda_ce, cross_entropy=True
             )
@@ -172,17 +175,24 @@ def _check_backend(backend: str) -> None:
         raise ValueError(f"backend must be 'auto', 'triton' or 'torch', got {backend!r}")
 
 
-def _use_triton(backend: Backend, input: Tensor) -> bool:
+def _use_triton(backend: Backend, input: Tensor, target: Tensor) -> bool:
     if backend == "torch":
         return False
     on_gpu = input.device.type == "cuda" and _triton_losses.available()
+    floating = input.dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64)
     if backend == "triton":
         if not on_gpu:
             raise NotImplementedError("backend='triton' needs a CUDA input and Triton")
-        if input.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+        if not floating:
             raise TypeError(f"backend='triton' needs floating-point logits, got {input.dtype}")
-        return True
-    return on_gpu and input.dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64)
+        if target.requires_grad:
+            raise NotImplementedError(
+                "backend='triton' does not propagate gradients into the target; use backend='torch'"
+            )
+    elif not (on_gpu and floating) or target.requires_grad:
+        return False
+    # Empty inputs have nothing to fuse; the PyTorch path returns NaN for them.
+    return input.numel() > 0
 
 
 def _check_index_values(target: Tensor, num_classes: int) -> None:

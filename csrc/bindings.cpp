@@ -41,7 +41,7 @@ void edt_sq(nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig> featu
                                spacing.data(), num_threads);
   }
   if (status == EXACTA_INVALID_ARGUMENT) {
-    throw std::invalid_argument("edt_sq: spacing must be positive and finite");
+    throw std::invalid_argument("edt_sq: spacing values must lie in [1e-100, 1e100]");
   }
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }

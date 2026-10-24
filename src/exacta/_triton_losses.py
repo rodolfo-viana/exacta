@@ -15,6 +15,10 @@ Each block of voxels writes its own partial sums, which are then reduced with ``
 results do not depend on scheduling (atomic adds would). Half-precision logits are read as they
 are and computed in float32; float64 logits are computed in float64. Class indices outside
 [0, classes) make the loss NaN; the loss modules also raise on them, outside torch.compile.
+
+The backward pass is not itself differentiable: double backward (``create_graph=True``, as in
+gradient penalties) raises rather than silently dropping the second-order term. Gradients do not
+flow into the target; the loss modules use the PyTorch path when the target requires them.
 """
 
 from __future__ import annotations
@@ -75,11 +79,12 @@ class _SegLoss(torch.autograd.Function):
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
         blocks = triton.cdiv(voxels, block)
         partial = torch.empty((batch, blocks, 5, c_pad), dtype=compute, device=logits.device)
-        _forward[(blocks, batch)](
-            logits, target, partial, voxels, classes, blocks,
-            ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, C_PAD=c_pad, BLOCK=block,
-            COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
-        )  # fmt: skip
+        with torch.cuda.device(logits.device):  # Triton launches on the current device
+            _forward[(blocks, batch)](
+                logits, target, partial, voxels, classes, blocks,
+                ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, C_PAD=c_pad, BLOCK=block,
+                COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
+            )  # fmt: skip
         sums = partial.sum(1, dtype=torch.float64)  # (batch, 5, c_pad)
         inter, prob, truth, ce_terms = (sums[:, r, :classes] for r in range(4))
         invalid = sums[:, 4, 0].sum()  # class indices out of range
@@ -109,6 +114,11 @@ class _SegLoss(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out: Tensor):  # type: ignore[override]
+        if torch.is_grad_enabled():  # autograd enables grad mode here exactly for create_graph=True
+            raise RuntimeError(
+                "the fused Triton loss does not support double backward (create_graph=True); "
+                "use backend='torch'"
+            )
         logits, target, coef, ce_scale = ctx.saved_tensors
         activation, one_hot, *_, ce = ctx.config
         batch, classes, voxels, c_pad, block = _layout(logits)
@@ -116,11 +126,12 @@ class _SegLoss(torch.autograd.Function):
         coef = (coef * grad_out).to(compute)
         ce_scale = (ce_scale * grad_out).to(compute).reshape(1)
         grad = torch.empty_like(logits)
-        _backward[(triton.cdiv(voxels, block), batch)](
-            logits, target, coef, ce_scale, grad, voxels, classes,
-            ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, CE=ce, C_PAD=c_pad, BLOCK=block,
-            COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
-        )  # fmt: skip
+        with torch.cuda.device(logits.device):
+            _backward[(triton.cdiv(voxels, block), batch)](
+                logits, target, coef, ce_scale, grad, voxels, classes,
+                ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, CE=ce, C_PAD=c_pad, BLOCK=block,
+                COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
+            )  # fmt: skip
         return grad, None, None
 
 
@@ -152,7 +163,8 @@ if triton is not None:
         if ONE_HOT:
             g = tl.load(target + row, mask=mask, other=0).to(COMPUTE)
         else:
-            t = tl.load(target + b * voxels + offs, mask=in_voxels, other=0).to(tl.int32)
+            # int64 so that indices of 2^31 or more are not truncated into the class range
+            t = tl.load(target + b * voxels + offs, mask=in_voxels, other=0).to(tl.int64)
             g = (ch[:, None] == t[None, :]).to(COMPUTE)
         return p, g, z, lse, mask, row, ch, offs
 
@@ -168,10 +180,12 @@ if triton is not None:
             logits, target, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT, C_PAD, BLOCK, COMPUTE
         )
         w = mask.to(COMPUTE)
+        # Terms with g = 0 are left out rather than multiplied by 0: a class masked with a -inf
+        # logit would otherwise make 0 * inf = NaN.
         if ACT == 0:  # cross-entropy -Σ g log p, per class
-            ce = g * (lse[None, :] - z)
-        else:  # binary cross-entropy with logits, as PyTorch computes it
-            ce = tl.maximum(z, 0.0) - z * g + libdevice.log1p(tl.exp(-tl.abs(z)))
+            ce = tl.where(g != 0, g * (lse[None, :] - z), 0.0)
+        else:  # binary cross-entropy with logits
+            ce = tl.maximum(z, 0.0) - tl.where(g != 0, z * g, 0.0) + libdevice.log1p(tl.exp(-tl.abs(z)))
         out = partial + ((b * blocks + blk) * 5) * C_PAD + ch
         tl.store(out, tl.sum(p * g * w, axis=1))
         tl.store(out + C_PAD, tl.sum(p * w, axis=1))
@@ -179,7 +193,7 @@ if triton is not None:
         tl.store(out + 3 * C_PAD, tl.sum(ce * w, axis=1))
         invalid = tl.zeros([C_PAD], dtype=COMPUTE)
         if not ONE_HOT:
-            t = tl.load(target + b * voxels + offs, mask=offs < voxels, other=0).to(tl.int32)
+            t = tl.load(target + b * voxels + offs, mask=offs < voxels, other=0).to(tl.int64)
             bad = tl.sum(((offs < voxels) & ((t < 0) | (t >= classes))).to(COMPUTE), axis=0)
             invalid = tl.where(ch == 0, bad, 0.0)
         tl.store(out + 4 * C_PAD, invalid)

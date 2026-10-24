@@ -96,3 +96,26 @@ def test_metrics_on_zero_size_volumes(device):
     empty = torch.zeros(2, 0, 5, 6, dtype=torch.long, device=device)
     assert EF.hd95(empty, empty, spacing=1, num_classes=3).isnan().all()
     assert EF.nsd(empty, empty, spacing=1, tolerance=1, num_classes=3, surface="surfels").isnan().all()
+
+
+@pytest.mark.parametrize("spacing", [1e-160, 1e160, (1.0, 1.0, 1e101)])
+def test_spacing_outside_the_exact_range_is_rejected(spacing):
+    x = torch.zeros(1, 4, 4, 4, dtype=torch.long)
+    with pytest.raises(ValueError, match="spacing values must lie in"):
+        EF.hd95(x, x, spacing=spacing, num_classes=2)
+
+
+def test_negative_stride_arrays_are_accepted():
+    from scipy import ndimage
+
+    from exacta import components
+
+    rng = np.random.default_rng(1)
+    mask = rng.random((12, 13, 14)) < 0.4
+    labels, count = components.label(mask[::-1], connectivity=1)
+    expected, n = ndimage.label(mask[::-1])
+    assert count == n
+    np.testing.assert_array_equal(labels, expected)
+    pred, target = rng.integers(0, 3, (2, 9, 10, 11)), rng.integers(0, 3, (2, 9, 10, 11))
+    flipped, copied = (pred[:, ::-1], target[:, ::-1]), (pred[:, ::-1].copy(), target[:, ::-1].copy())
+    np.testing.assert_array_equal(EF.dice(*flipped, num_classes=3), EF.dice(*copied, num_classes=3))

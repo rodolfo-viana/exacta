@@ -259,3 +259,64 @@ def test_fused_out_of_range_classes_give_nan_when_compiled():
     target[1, 2, 3, 4] = 4
     loss_fn = DiceLoss(backend="triton")
     assert torch.compile(lambda x, t: loss_fn(x, t), fullgraph=True)(logits, target).isnan()
+
+
+# --- Regressions from code review ---------------------------------------------------------------
+
+
+@needs_gpu
+def test_fused_handles_classes_masked_with_neg_inf_logits():
+    # Masking absent classes with -inf logits is common; 0 * inf must not reach the loss.
+    logits, target = _fused_inputs("softmax", "index", shape=(2, 4, 8, 9, 10))
+    logits[:, 3] = float("-inf")
+    target = target % 3
+    (loss_t, grad_t), (loss_f, grad_f) = _both_backends(lambda b: DiceCELoss(backend=b), logits, target)
+    assert torch.isfinite(loss_f)
+    torch.testing.assert_close(loss_f, loss_t)
+    torch.testing.assert_close(grad_f, grad_t)
+    one_hot = F.one_hot(target, 4).movedim(-1, 1)
+    torch.testing.assert_close(DiceCELoss(target_format="one-hot", backend="triton")(logits, one_hot), loss_f)
+
+
+@needs_gpu
+@pytest.mark.parametrize("loss_cls", [DiceLoss, DiceCELoss])
+def test_gradients_reach_a_soft_target(loss_cls):
+    logits, target = _fused_inputs("softmax", "index", shape=(2, 3, 6, 7, 8))
+    teacher = torch.randn_like(logits).softmax(1).requires_grad_()
+    grads = []
+    for backend in ("torch", "auto"):
+        teacher.grad = None
+        loss_cls(target_format="one-hot", backend=backend)(logits, teacher).backward()
+        grads.append(teacher.grad)
+    assert grads[1] is not None  # "auto" falls back to PyTorch rather than dropping the gradient
+    torch.testing.assert_close(grads[1], grads[0])
+    with pytest.raises(NotImplementedError, match="gradients into the target"):
+        loss_cls(target_format="one-hot", backend="triton")(logits, teacher)
+
+
+@needs_gpu
+def test_fused_double_backward_raises():
+    logits, target = _fused_inputs("softmax", "index", shape=(2, 3, 6, 7, 8))
+    x = logits.requires_grad_()
+    loss = DiceCELoss(backend="triton")(x, target)
+    # A gradient penalty needs create_graph=True; the fused backward cannot provide it and must
+    # say so instead of returning a gradient without a graph (the penalty would silently vanish).
+    with pytest.raises(RuntimeError, match="does not support double backward"):
+        torch.autograd.grad(loss, x, create_graph=True)
+    assert torch.autograd.grad(DiceCELoss(backend="triton")(x, target), x)[0].isfinite().all()
+
+
+@needs_gpu
+@pytest.mark.parametrize("shape", [(0, 3, 4, 5, 6), (2, 3, 0, 5, 6)])
+def test_fused_path_returns_nan_on_empty_inputs(shape):
+    logits, target = _fused_inputs("softmax", "index", shape=shape)
+    assert DiceCELoss(backend="auto")(logits, target).isnan()
+    assert DiceCELoss(backend="torch")(logits, target).isnan()
+
+
+@needs_gpu
+def test_compiled_indices_beyond_int32_give_nan():
+    logits, target = _fused_inputs("softmax", "index", shape=(2, 4, 8, 9, 10))
+    target[0, 1, 2, 3] = 2**32 + 1  # would wrap to class 1 in 32 bits
+    loss_fn = DiceLoss(backend="triton")
+    assert torch.compile(lambda x, t: loss_fn(x, t), fullgraph=True)(logits, target).isnan()
