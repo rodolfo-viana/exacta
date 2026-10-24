@@ -445,24 +445,35 @@ NB_MODULE(_C, m) {
   const char *confusion_doc =
       "Write into `out` (int64, (C, C)) the confusion matrix of the label maps `pred` and `target` "
       "(N,); returns False if a label lies outside [0, C).";
-  m.def("confusion", &confusion<std::uint8_t, exacta_confusion_u8>, nb::arg("pred"),
-        nb::arg("target"), nb::arg("out"), nb::arg("num_threads") = 0, confusion_doc);
-  m.def("confusion", &confusion<std::int32_t, exacta_confusion_i32>, nb::arg("pred"),
-        nb::arg("target"), nb::arg("out"), nb::arg("num_threads") = 0, confusion_doc);
-  m.def("confusion", &confusion<std::int64_t, exacta_confusion_i64>, nb::arg("pred"),
-        nb::arg("target"), nb::arg("out"), nb::arg("num_threads") = 0, confusion_doc);
+  // Never let overload resolution narrow labels or validate a converted copy of a mask.
+  m.def("confusion", &confusion<std::uint8_t, exacta_confusion_u8>, nb::arg("pred").noconvert(),
+        nb::arg("target").noconvert(), nb::arg("out").noconvert(),
+        nb::arg("num_threads") = 0, confusion_doc);
+  m.def("confusion", &confusion<std::int32_t, exacta_confusion_i32>, nb::arg("pred").noconvert(),
+        nb::arg("target").noconvert(), nb::arg("out").noconvert(),
+        nb::arg("num_threads") = 0, confusion_doc);
+  m.def("confusion", &confusion<std::int64_t, exacta_confusion_i64>, nb::arg("pred").noconvert(),
+        nb::arg("target").noconvert(), nb::arg("out").noconvert(),
+        nb::arg("num_threads") = 0, confusion_doc);
   const char *counts_doc =
       "Write into `both`, `in_pred` and `in_target` (int64, (C,)) the elements of each pair of "
       "binary masks `pred`, `target` (C, N) in both, in pred and in target; returns False if a "
       "value is not 0 or 1.";
   m.def("channel_counts", &channel_counts<std::uint8_t, exacta_channel_counts_u8>,
-        nb::arg("pred"), nb::arg("target"), nb::arg("both"), nb::arg("in_pred"),
-        nb::arg("in_target"), nb::arg("num_threads") = 0, counts_doc);
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("both").noconvert(),
+        nb::arg("in_pred").noconvert(), nb::arg("in_target").noconvert(),
+        nb::arg("num_threads") = 0, counts_doc);
   m.def("channel_counts", &channel_counts<std::int64_t, exacta_channel_counts_i64>,
-        nb::arg("pred"), nb::arg("target"), nb::arg("both"), nb::arg("in_pred"),
-        nb::arg("in_target"), nb::arg("num_threads") = 0, counts_doc);
-  m.def("channel_counts", &channel_counts<float, exacta_channel_counts_f32>, nb::arg("pred"),
-        nb::arg("target"), nb::arg("both"), nb::arg("in_pred"), nb::arg("in_target"),
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("both").noconvert(),
+        nb::arg("in_pred").noconvert(), nb::arg("in_target").noconvert(),
+        nb::arg("num_threads") = 0, counts_doc);
+  m.def("channel_counts", &channel_counts<float, exacta_channel_counts_f32>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("both").noconvert(),
+        nb::arg("in_pred").noconvert(), nb::arg("in_target").noconvert(),
+        nb::arg("num_threads") = 0, counts_doc);
+  m.def("channel_counts", &channel_counts<double, exacta_channel_counts_f64>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("both").noconvert(),
+        nb::arg("in_pred").noconvert(), nb::arg("in_target").noconvert(),
         nb::arg("num_threads") = 0, counts_doc);
   const char *binary_doc =
       "Write into `out` (uint8, (N,)) whether each of `values` (N,) is nonzero; returns False if "

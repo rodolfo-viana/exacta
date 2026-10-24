@@ -139,7 +139,11 @@ if triton is not None:
 
     @triton.jit
     def _tile(logits, target, b, voxel0, voxels, classes, ACT, ONE_HOT, C_PAD, BLOCK, COMPUTE):
-        """Activation p, target g, logits z and the log-sum-exp of a (classes, voxels) tile."""
+        """Activation p, target g, logits z and log-normalizer of a (classes, voxels) tile.
+
+        For softmax, z and the log-normalizer remain shifted by the maximum logit, so their
+        difference does not lose precision when all logits share a large offset.
+        """
         offs = voxel0 + tl.arange(0, BLOCK)
         ch = tl.arange(0, C_PAD)
         in_voxels = offs < voxels
@@ -148,12 +152,12 @@ if triton is not None:
         row = b * classes * voxels + ch[:, None].to(tl.int64) * voxels + offs[None, :]
         z = tl.load(logits + row, mask=mask, other=0.0).to(COMPUTE)
         if ACT == 0:  # softmax over classes
-            shifted = tl.where(in_classes[:, None], z, float("-inf"))
-            top = tl.max(shifted, axis=0)
-            e = tl.exp(shifted - top[None, :])
+            top = tl.max(tl.where(in_classes[:, None], z, float("-inf")), axis=0)
+            z = z - top[None, :]
+            e = tl.exp(tl.where(in_classes[:, None], z, float("-inf")))
             total = tl.sum(e, axis=0)
             p = e / total[None, :]
-            lse = top + tl.log(total)
+            lse = tl.log(total)
         elif ACT == 1:
             p = tl.sigmoid(z)
             lse = tl.zeros([BLOCK], dtype=COMPUTE)

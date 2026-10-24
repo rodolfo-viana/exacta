@@ -133,7 +133,10 @@ def evaluate(
         num_classes=num_classes,
         include_background=include_background,
     )
-    spacings = as_spacing(spacing, batch=seg.batch, ndim=seg.ndim) if spacing is not None else None
+    spacings = (
+        as_spacing(spacing, batch=seg.batch, ndim=seg.ndim, area_weighted=surface != "voxels")
+        if spacing is not None else None
+    )
     shape = (seg.batch, len(seg.classes))
     out = {f.name: torch.full(shape, math.nan, dtype=torch.float64) for f in fields(LesionScores)}
     for b in range(seg.batch):
@@ -291,7 +294,8 @@ def _evaluate_pair(
         dice[i] = 2.0 * overlap / (size_target[i] + predicted)
         iou[i] = overlap / (size_target[i] + predicted - overlap)
 
-    instances = n_pred + len(kept) > 0
+    # Predictions matched only to ignored targets are excluded, just like those targets.
+    instances = fp + len(kept) > 0
     f1 = (tp / (tp + 0.5 * fp + 0.5 * fn) if tp else 0.0) if instances else math.nan
     sq_iou = (sum(iou[i] for i in kept if matches[i]) / tp if tp else 0.0) if instances else math.nan
     sq_dice = (sum(dice[i] for i in kept if matches[i]) / tp if tp else 0.0) if instances else math.nan
@@ -313,7 +317,7 @@ def _evaluate_pair(
     if spacing is not None:
         # Each lesion's HD95 only needs the box around it and its matched predictions.
         boxes_pred, boxes_target = _boxes(pred_labels, n_pred), _boxes(target_labels, n_target)
-        total = fp * missed_distance
+        total = fp * missed_distance if fp else 0.0  # 0 * the default infinity is NaN
         for i in kept:
             if not matches[i]:
                 total += missed_distance

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -16,6 +17,9 @@ InputFormat = Literal["index", "one-hot"]
 # Voxel sizes beyond these overflow (or make subnormal) the squared distances the exact distance
 # transforms compute; any physical unit is far inside them.
 MIN_SPACING, MAX_SPACING = 1e-100, 1e100
+# Areas and point-to-triangle predicates involve fourth powers of physical coordinates.
+# Leave headroom for image extents and sums, rather than applying the EDT's wider range.
+MIN_SURFACE_SPACING, MAX_SURFACE_SPACING = 1e-50, 1e50
 
 
 def to_torch(x: Any) -> Tensor:
@@ -37,6 +41,14 @@ def like_input(result: Tensor, original: Any) -> Any:
     """Return ``result`` in the array library ``original`` came from (NumPy, CuPy, JAX, ...)."""
     if isinstance(original, Tensor):
         return result
+    if isinstance(original, np.ndarray):
+        # NumPy < 2 has no __array_namespace__; NumPy < 1.23 also lacks from_dlpack.
+        return result.detach().cpu().numpy()
+    # An existing CuPy array implies CuPy is loaded. Do not import an optional dependency on
+    # every call (or classify unrelated CUDA-array-interface providers as CuPy).
+    cupy = sys.modules.get("cupy")
+    if cupy is not None and isinstance(original, cupy.ndarray):
+        return cupy.from_dlpack(result)
     namespace = getattr(original, "__array_namespace__", None)
     if namespace is None:
         return result
@@ -204,10 +216,13 @@ def _binary(x: Tensor, name: str) -> Tensor:
     return mask
 
 
-def as_spacing(spacing: Any, *, batch: int, ndim: int) -> list[tuple[float, ...]]:
+def as_spacing(
+    spacing: Any, *, batch: int, ndim: int, area_weighted: bool = False
+) -> list[tuple[float, ...]]:
     """Normalise voxel spacing to one tuple of ``ndim`` values per case.
 
     Accepts a scalar (isotropic), ``ndim`` values shared by the batch, or a (batch, ndim) array.
+    Area-weighted surfel/mesh metrics use a narrower range than squared voxel distances.
     """
     if spacing is None:
         raise ValueError(
@@ -225,9 +240,11 @@ def as_spacing(spacing: Any, *, batch: int, ndim: int) -> list[tuple[float, ...]
         raise ValueError(
             f"spacing must be a scalar, shape ({ndim},) or ({batch}, {ndim}); got {tuple(s.shape)}"
         )
-    if not bool(torch.isfinite(s).all() and (s >= MIN_SPACING).all() and (s <= MAX_SPACING).all()):
+    low, high = (MIN_SURFACE_SPACING, MAX_SURFACE_SPACING) if area_weighted else (MIN_SPACING, MAX_SPACING)
+    if not bool(torch.isfinite(s).all() and (s >= low).all() and (s <= high).all()):
+        quantities = "surface areas and mesh geometry" if area_weighted else "squared distances"
         raise ValueError(
-            f"spacing values must lie in [{MIN_SPACING:g}, {MAX_SPACING:g}]; outside, squared distances "
+            f"spacing values must lie in [{low:g}, {high:g}]; outside, {quantities} "
             "overflow or lose precision and exact distances cannot be guaranteed"
         )
     return [tuple(row) for row in s.tolist()]

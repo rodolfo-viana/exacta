@@ -90,6 +90,16 @@ Each convention is an explicit argument, because this is where libraries disagre
 | Lesion matching | `matching="greedy"`: one-to-one, best-scoring pairs first, above `threshold` (Panoptica's `NaiveThresholdMatching`). `"hungarian"`: optimal one-to-one (`MaxBipartiteMatching`). `"merge"`: a lesion predicted in pieces is merged when the union scores higher (`MaximizeMergeMatching`). `"overlap"`: every prediction touching a target lesion grown by `dilation` steps, many-to-many (BraTS 2023). F1/SQ/PQ are Panoptica's RQ/SQ/PQ; `lesion_dice`/`lesion_hd95` are BraTS's lesion-wise scores. Panoptica labels 3-D images with 26-connectivity but 2-D ones with 4-connectivity; exacta's `connectivity` is explicit. |
 | Connectivity | Required for connected components: 1 = faces (6 neighbours in 3-D, SciPy's default), 2 = and edges (18), 3 = and corners (26, MONAI's default). |
 
+Spacing components must lie in `[1e-100, 1e100]` for voxel surfaces and `[1e-50, 1e50]` for
+surfels and meshes. The latter need a narrower range because area calculations and triangle
+predicates involve fourth powers of physical coordinates. Unsupported values raise `ValueError`,
+including for empty masks.
+
+Under `torch.distributed`, every rank must call `compute()`, including ranks without any local
+updates. All ranks receive the gathered scores; if no rank has cases, all raise `RuntimeError`.
+Use an evaluation sampler without padding so repeated cases do not bias the average. With NCCL,
+set each rank's current CUDA device before computing.
+
 ## Architecture
 
 - Compiled CPU kernels (`csrc/`), multithreaded with OpenMP, for every pass over the voxels that
@@ -193,6 +203,10 @@ Lesion-wise evaluation is tested against fixtures produced by Panoptica 2.1.7 an
 `tests/fixtures/regenerate.sh` rebuilds those environments with `uv`, reruns both tools and
 reports whether their results changed (set `PANOPTICA_VERSION` or `BRATS_COMMIT` to try other
 releases).
+
+Array-library round-trip tests run for NumPy, and for CuPy and JAX when installed:
+`python -m pytest tests/test_inputs.py -k round_trip`. Distributed tests exercise ranks without
+updates using Gloo; their NCCL variants require two GPUs and are skipped otherwise.
 
 ## License
 

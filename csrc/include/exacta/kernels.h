@@ -119,6 +119,8 @@ int exacta_channel_counts_i64(const int64_t *pred, const int64_t *target, int64_
                               int num_threads);
 int exacta_channel_counts_f32(const float *pred, const float *target, int64_t count, int64_t n,
                               int64_t *both, int64_t *in_pred, int64_t *in_target, int num_threads);
+int exacta_channel_counts_f64(const double *pred, const double *target, int64_t count, int64_t n,
+                              int64_t *both, int64_t *in_pred, int64_t *in_target, int num_threads);
 
 int exacta_class_extents_u8(const uint8_t *labels, const int64_t *shape, int ndim,
                             int64_t num_classes, int64_t *lo, int64_t *hi, int num_threads);

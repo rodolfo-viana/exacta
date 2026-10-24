@@ -8,6 +8,48 @@ from _data import pair
 from exacta import _triton_counts
 
 
+@pytest.mark.parametrize("pred_dtype", [torch.bool, torch.uint8, torch.int16, torch.int32, torch.int64])
+@pytest.mark.parametrize("target_dtype", [torch.bool, torch.uint8, torch.int16, torch.int32, torch.int64])
+def test_mixed_index_dtypes_preserve_scores(device, pred_dtype, target_dtype):
+    pred = torch.tensor([[[[0, 1], [1, 1]]]], device=device)
+    target = torch.tensor([[[[0, 0], [1, 1]]]], device=device)
+    expected = torch.tensor([[2 / 3, 4 / 5]], dtype=torch.float64, device=device)
+    got = EF.dice(pred.to(pred_dtype), target.to(target_dtype), num_classes=2)
+    torch.testing.assert_close(got, expected)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_mixed_index_dtypes_do_not_truncate_large_labels(device, reverse):
+    pred = torch.zeros((1, 1, 1, 1), dtype=torch.int32, device=device)
+    target = torch.full(pred.shape, 256, dtype=torch.int64, device=device)
+    if reverse:
+        pred, target = target, pred
+    got = EF.dice(pred, target, num_classes=257)[:, [0, 256]]
+    torch.testing.assert_close(got, torch.zeros((1, 2), dtype=torch.float64, device=device))
+    with pytest.raises(ValueError, match="class indices must lie in"):
+        EF.dice(pred, target, num_classes=2)
+
+
+@pytest.mark.parametrize("pred_dtype", [torch.bool, torch.int64, torch.float32, torch.float64])
+@pytest.mark.parametrize("target_dtype", [torch.bool, torch.int64, torch.float32, torch.float64])
+def test_mixed_one_hot_dtypes_preserve_scores(device, pred_dtype, target_dtype):
+    pred = torch.tensor([[[[[0, 1], [1, 1]]]]], device=device)
+    target = torch.tensor([[[[[0, 0], [1, 1]]]]], device=device)
+    got = EF.dice(pred.to(pred_dtype), target.to(target_dtype), input_format="one-hot")
+    torch.testing.assert_close(got, torch.tensor([[4 / 5]], dtype=torch.float64, device=device))
+
+
+@pytest.mark.parametrize("invalid", [1 + 1e-9, 1 - 1e-9, 1e-100, float("nan")])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_binary_values_checked_before_casting(device, invalid, reverse):
+    pred = torch.full((1, 1, 2, 2, 2), invalid, dtype=torch.float64, device=device)
+    target = torch.ones(pred.shape, dtype=torch.bool, device=device)
+    if reverse:
+        pred, target = target, pred
+    with pytest.raises(ValueError, match="must be binary"):
+        EF.dice(pred, target, input_format="one-hot")
+
+
 @pytest.mark.parametrize("shape", [(32, 40), (24, 28, 20)])
 @pytest.mark.parametrize(("fn", "ref"), [(EF.dice, reference.dice), (EF.iou, reference.iou)])
 def test_matches_reference(device, shape, fn, ref):

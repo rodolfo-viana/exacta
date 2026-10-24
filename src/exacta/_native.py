@@ -140,9 +140,10 @@ def confusion(pred: Tensor, target: Tensor, classes: int) -> Tensor | None:
     pass; None if a label lies outside [0, classes)."""
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
-    if pred.dtype == torch.bool:
+    if pred.dtype == target.dtype == torch.bool:
         pred, target = pred.view(torch.uint8), target.view(torch.uint8)
-    elif pred.dtype not in (torch.uint8, torch.int32, torch.int64):
+    elif pred.dtype != target.dtype or pred.dtype not in (torch.uint8, torch.int32, torch.int64):
+        # Both operands must select the same binding overload, without narrowing either label.
         pred, target = pred.long(), target.long()
     out = torch.empty((classes, classes), dtype=torch.int64)
     ok = _C.confusion(pred.contiguous().reshape(-1), target.contiguous().reshape(-1), out)
@@ -244,10 +245,19 @@ def channel_counts(pred: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor
     target (int64, (C,)), counted in one pass; None if a value is not 0 or 1."""
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
-    if pred.dtype == torch.bool:
+    if pred.dtype == target.dtype == torch.bool:
         pred, target = pred.view(torch.uint8), target.view(torch.uint8)
-    elif pred.dtype not in (torch.uint8, torch.int64, torch.float32):
-        dtype = torch.float32 if pred.dtype.is_floating_point else torch.int64
+    elif pred.dtype != target.dtype or pred.dtype not in (
+        torch.uint8, torch.int64, torch.float32, torch.float64
+    ):
+        # Preserve every floating-point value that could round to 0 or 1 before validation.
+        # Integer-to-float conversion can round large integers, but never turns them into 0/1.
+        if torch.float64 in (pred.dtype, target.dtype):
+            dtype = torch.float64
+        elif pred.dtype.is_floating_point or target.dtype.is_floating_point:
+            dtype = torch.float32
+        else:
+            dtype = torch.int64
         pred, target = pred.to(dtype), target.to(dtype)
     count = pred.shape[0]
     flat = [x.contiguous().reshape(count, -1) for x in (pred, target)]

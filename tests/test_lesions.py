@@ -10,6 +10,40 @@ import torch
 
 from exacta import lesions
 
+
+@pytest.mark.parametrize("matching", ["greedy", "hungarian", "merge", "overlap"])
+@pytest.mark.parametrize("case", ["perfect", "missed", "false_positive", "empty"])
+def test_default_lesion_distance_penalty(device, matching, case):
+    if matching == "hungarian":
+        pytest.importorskip("scipy.optimize")
+    target = torch.zeros((1, 1, 3, 3, 3), dtype=torch.bool, device=device)
+    target[0, 0, 1, 1, 1] = True
+    pred = target.clone()
+    if case in ("missed", "empty"):
+        pred.zero_()
+    if case in ("false_positive", "empty"):
+        target.zero_()
+    got = lesions.evaluate(pred, target, matching=matching, connectivity=1,
+                           input_format="one-hot", spacing=1.0).lesion_hd95.item()
+    if case == "empty":
+        assert math.isnan(got)
+    else:
+        assert got == (0.0 if case == "perfect" else math.inf)
+
+
+@pytest.mark.parametrize("matching", ["greedy", "hungarian", "merge", "overlap"])
+def test_ignored_lesions_do_not_change_empty_scores(device, matching):
+    if matching == "hungarian":
+        pytest.importorskip("scipy.optimize")
+    target = torch.zeros((1, 1, 3, 3, 3), dtype=torch.bool, device=device)
+    target[0, 0, 1, 1, 1] = True
+    kw = dict(matching=matching, connectivity=1, input_format="one-hot", min_target_volume=1)
+    for pred in (target, torch.zeros_like(target)):
+        got = lesions.evaluate(pred, target, **kw)
+        assert (got.tp.item(), got.fp.item(), got.fn.item()) == (0, 0, 0)
+        for name in ("f1", "sq_iou", "sq_dice", "pq_iou", "pq_dice"):
+            assert getattr(got, name).isnan().all(), name
+
 FIXTURES = Path(__file__).parent / "fixtures"
 CASES = np.load(FIXTURES / "lesion_cases.npz")
 MATCHING = {"naive": "greedy", "bipartite": "hungarian", "merge": "merge"}

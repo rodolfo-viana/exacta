@@ -1,4 +1,5 @@
 import math
+from datetime import timedelta
 
 import numpy as np
 import pytest
@@ -122,3 +123,44 @@ def test_ddp_gathers_all_ranks(tmp_path):
     expected = torch.cat([EF.dice(*batches[i], num_classes=3) for i in order]).numpy()
     np.testing.assert_allclose(gathered, expected)
     assert not math.isnan(gathered[0, 1])
+
+
+def _ddp_empty_worker(rank, init_file, owner, backend, out):
+    if backend == "nccl":
+        torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank) if backend == "nccl" else torch.device("cpu")
+    dist.init_process_group(backend, init_method=f"file://{init_file}", rank=rank, world_size=2,
+                            timeout=timedelta(seconds=15))
+    try:
+        # No num_classes: empty ranks must learn the channel count from their peers.
+        metric = Dice(input_format="one-hot")
+        if rank == owner:
+            x = torch.ones((1, 2, 2, 2), dtype=torch.bool, device=device)
+            metric.update(x, x)
+        if owner < 0:
+            with pytest.raises(RuntimeError, match="before update"):
+                metric.compute()
+        else:
+            got = metric.compute()
+            torch.testing.assert_close(got.per_case, torch.ones((1, 2), dtype=torch.float64, device=device))
+            assert got.mean.item() == 1
+            # Gathering must not overwrite local state or duplicate the next compute's rows.
+            torch.testing.assert_close(metric.compute().per_case, got.per_case)
+        metric.reset()
+        with pytest.raises(RuntimeError, match="before update"):
+            metric.compute()
+        out.put(rank)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("owner", [0, 1, -1])
+@pytest.mark.parametrize("backend", ["gloo", "nccl"])
+def test_ddp_allows_ranks_without_updates(tmp_path, owner, backend):
+    if not dist.is_available() or not dist.is_backend_available(backend):
+        pytest.skip(f"{backend} unavailable")
+    if backend == "nccl" and torch.cuda.device_count() < 2:
+        pytest.skip("NCCL needs two GPUs")
+    out = mp.get_context("spawn").Queue()
+    mp.spawn(_ddp_empty_worker, args=(tmp_path / "init", owner, backend, out), nprocs=2)
+    assert sorted(out.get(timeout=15) for _ in range(2)) == [0, 1]

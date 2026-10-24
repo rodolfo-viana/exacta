@@ -320,3 +320,18 @@ def test_compiled_indices_beyond_int32_give_nan():
     target[0, 1, 2, 3] = 2**32 + 1  # would wrap to class 1 in 32 bits
     loss_fn = DiceLoss(backend="triton")
     assert torch.compile(lambda x, t: loss_fn(x, t), fullgraph=True)(logits, target).isnan()
+
+
+@needs_gpu
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16])
+@pytest.mark.parametrize("offset", [1e4, 1e8, -1e8])
+@pytest.mark.parametrize("target_format", ["index", "one-hot"])
+def test_fused_ce_stable_under_logit_offsets(dtype, offset, target_format):
+    logits, target = _fused_inputs("softmax", target_format, shape=(2, 4, 2, 3, 5), dtype=dtype)
+    logits = logits + offset
+    (loss_t, grad_t), (loss_f, grad_f) = _both_backends(
+        lambda b: DiceCELoss(backend=b, lambda_dice=0.0, target_format=target_format), logits, target
+    )
+    tol = dict(rtol=1e-12, atol=1e-15) if dtype == torch.float64 else dict(rtol=1e-5, atol=1e-7)
+    torch.testing.assert_close(loss_f, loss_t, **tol)
+    torch.testing.assert_close(grad_f, grad_t, **tol)

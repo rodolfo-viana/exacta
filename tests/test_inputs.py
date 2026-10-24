@@ -6,6 +6,67 @@ import exacta.functional as EF
 from exacta._inputs import as_spacing
 
 
+@pytest.mark.parametrize("library", ["numpy", "cupy", "jax"])
+def test_array_library_round_trip(library):
+    from exacta import components
+
+    if library == "numpy":
+        xp = np
+    elif library == "cupy":
+        if not torch.cuda.is_available():
+            pytest.skip("CuPy round trip needs CUDA")
+        xp = pytest.importorskip("cupy")
+    else:
+        xp = pytest.importorskip("jax.numpy")
+    mask = xp.asarray([[[1, 0], [0, 0]]], dtype=xp.int32)
+    score = EF.dice(mask, mask, num_classes=2)
+    assert isinstance(score, type(mask))
+    np.testing.assert_array_equal(np.asarray(score.get() if library == "cupy" else score), [[1, 1]])
+    labels, count = components.label(mask[0], connectivity=1)
+    kept = components.largest(mask[0], connectivity=1)
+    assert isinstance(labels, type(mask)) and isinstance(kept, type(mask))
+    assert count == 1
+    if library == "cupy":
+        assert score.device.id == mask.device.id == labels.device.id == kept.device.id
+
+
+@pytest.mark.parametrize("surface", ["surfels", "mesh"])
+@pytest.mark.parametrize("spacing", [1e-100, 1e100])
+@pytest.mark.parametrize("empty", [False, True])
+def test_area_surfaces_reject_unsupported_spacing(device, surface, spacing, empty):
+    from exacta import lesions
+
+    pred = torch.zeros((1, 1, 3, 3, 3), dtype=torch.bool, device=device)
+    target = pred.clone()
+    if not empty:
+        pred[0, 0, 1, 1, 1] = True
+        target[0, 0, 2, 1, 1] = True
+    for fn, extra in [(EF.hd95, {}), (EF.assd, {}), (EF.nsd, {"tolerance": 1.0})]:
+        with pytest.raises(ValueError, match="spacing values must lie in"):
+            fn(pred, target, spacing=spacing, surface=surface, input_format="one-hot", **extra)
+    with pytest.raises(ValueError, match="spacing values must lie in"):
+        lesions.evaluate(pred, target, matching="overlap", connectivity=1, spacing=spacing,
+                         surface=surface, input_format="one-hot")
+
+
+@pytest.mark.parametrize("surface", ["voxels", "surfels", "mesh"])
+@pytest.mark.parametrize("scale", [1e-50, 1e50])
+def test_surface_metrics_scale_at_supported_limits(device, surface, scale):
+    pred = torch.zeros((1, 1, 3, 3, 3), dtype=torch.bool, device=device)
+    target = pred.clone()
+    pred[0, 0, 1, 1, 1] = True
+    target[0, 0, 2, 1, 1] = True
+    kw = dict(input_format="one-hot", surface=surface)
+    for fn in (EF.hd95, EF.assd):
+        expected = fn(pred, target, spacing=1.0, **kw)
+        actual = fn(pred, target, spacing=scale, **kw) / scale
+        torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(
+        EF.nsd(pred, target, spacing=scale, tolerance=1.1 * scale, **kw),
+        EF.nsd(pred, target, spacing=1.0, tolerance=1.1, **kw),
+    )
+
+
 def test_index_rejects_float():
     x = torch.zeros(1, 4, 4, 4)
     with pytest.raises(TypeError, match="argmax"):

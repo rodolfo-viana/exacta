@@ -120,6 +120,7 @@ def hausdorff_distance(
         spacing: Voxel size in physical units, in the axis order of the tensor's spatial
             dimensions (a SimpleITK array is (z, y, x) while ``GetSpacing()`` is (x, y, z)).
             A scalar, one value per spatial axis, or a (B, ndim) array for per-case spacing.
+            Values must lie in [1e-100, 1e100] for voxels and [1e-50, 1e50] for surfels/mesh.
         percentile: 100 gives the Hausdorff distance, 95 gives HD95.
         combine: How the two directions are joined: ``"max"`` (MONAI, DeepMind), ``"pooled"``
             (MedPy) or ``"mean"``.
@@ -275,7 +276,7 @@ def _per_case(
         elements = _mesh_distances
     else:
         raise ValueError(f"surface must be 'voxels', 'surfels' or 'mesh', got {surface!r}")
-    spacings = as_spacing(spacing, batch=seg.batch, ndim=seg.ndim)
+    spacings = as_spacing(spacing, batch=seg.batch, ndim=seg.ndim, area_weighted=surface != "voxels")
     edt_sq = _edt_function(backend, seg.pred.device)
 
     out = torch.full((seg.batch, len(seg.classes)), both_empty, dtype=torch.float64)
