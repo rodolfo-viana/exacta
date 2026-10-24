@@ -26,6 +26,12 @@ def to_torch(x: Any) -> Tensor:
     """Return ``x`` as a tensor, sharing memory through DLPack when the source allows it."""
     if isinstance(x, Tensor):
         return x
+    # Older PyTorch versions abort, rather than raising, on negative DLPack strides.
+    # NumPy and CuPy views must be copied before entering either importer. ascontiguousarray
+    # is insufficient: a singleton axis can have a negative stride and still be contiguous.
+    strides = getattr(x, "strides", None)
+    if strides is not None and any(stride < 0 for stride in strides):
+        x = x.copy()
     if hasattr(x, "__dlpack__"):
         try:
             return torch.from_dlpack(x)

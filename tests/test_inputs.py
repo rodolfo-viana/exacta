@@ -181,3 +181,29 @@ def test_negative_stride_arrays_are_accepted():
     pred, target = rng.integers(0, 3, (2, 9, 10, 11)), rng.integers(0, 3, (2, 9, 10, 11))
     flipped, copied = (pred[:, ::-1], target[:, ::-1]), (pred[:, ::-1].copy(), target[:, ::-1].copy())
     np.testing.assert_array_equal(EF.dice(*flipped, num_classes=3), EF.dice(*copied, num_classes=3))
+
+
+@pytest.mark.parametrize("library", ["numpy", "cupy"])
+def test_negative_strides_on_contiguous_singleton_axes(library):
+    from exacta._inputs import to_torch
+
+    xp = np if library == "numpy" else pytest.importorskip("cupy")
+    if library == "cupy" and not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    x = xp.arange(12).reshape(1, 3, 4)[::-1]
+    assert x.flags.c_contiguous and x.strides[0] < 0
+    got = to_torch(x)
+    torch.testing.assert_close(got.cpu(), torch.arange(12).reshape(1, 3, 4))
+
+
+def test_negative_strides_without_dlpack():
+    from exacta._inputs import to_torch
+
+    class LegacyArray(np.ndarray):
+        @property
+        def __dlpack__(self):
+            raise AttributeError("NumPy 1.22 does not expose DLPack")
+
+    x = np.arange(12).reshape(1, 3, 4).view(LegacyArray)[::-1]
+    assert not hasattr(x, "__dlpack__") and x.flags.c_contiguous
+    torch.testing.assert_close(to_torch(x), torch.arange(12).reshape(1, 3, 4))
