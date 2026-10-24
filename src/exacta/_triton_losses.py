@@ -31,10 +31,12 @@ and negative focal terms separately. Stable log probabilities avoid log(0) for f
 
 from __future__ import annotations
 
+import math
 import torch
 from torch import Tensor
 
 from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms, masked_overlap_terms
+from exacta._distributed import sum_ranks
 
 try:
     import triton
@@ -66,18 +68,21 @@ def seg_loss(
     generalized: tuple[WeightType, EmptyTarget] | None = None,
     mask: Tensor | None = None,
     ignore_index: int | None = None,
+    class_weight: Tensor | None = None,
+    focal: tuple[float, float | None] | None = None,
+    distributed: bool = False,
 ) -> Tensor:
     """Overlap losses share volume passes; only their small final reductions differ."""
     config = (
         activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce,
-        cross_entropy, tversky, generalized, ignore_index,
+        cross_entropy, tversky, generalized, ignore_index, focal, distributed,
     )
-    return _SegLoss.apply(logits, target, mask, config)
+    return _SegLoss.apply(logits, target, mask, class_weight, config)
 
 
 def _layout(logits: Tensor) -> tuple[int, int, int, int, int]:
     batch, classes = logits.shape[:2]
-    voxels = logits[0, 0].numel()
+    voxels = math.prod(logits.shape[2:])
     if voxels >= 2**31:
         raise ValueError("the fused loss supports fewer than 2^31 voxels per case")
     c_pad = triton.next_power_of_2(classes)
@@ -87,30 +92,40 @@ def _layout(logits: Tensor) -> tuple[int, int, int, int, int]:
 
 class _SegLoss(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, logits: Tensor, target: Tensor, mask: Tensor | None, config: tuple) -> Tensor:  # type: ignore[override]
+    def forward(ctx, logits: Tensor, target: Tensor, mask: Tensor | None, class_weight: Tensor | None,
+                config: tuple) -> Tensor:  # type: ignore[override]
         (activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce,
-         ce, tversky, generalized, ignore_index) = config
+         ce, tversky, generalized, ignore_index, focal, distributed) = config
         logits, target = logits.contiguous(), target.contiguous()
         mask = None if mask is None else mask.contiguous()
-        masked = mask is not None or ignore_index is not None
+        masked = mask is not None or ignore_index is not None or distributed
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
         blocks = triton.cdiv(voxels, block)
         rows = 6 if masked else 5
         partial = torch.empty((batch, blocks, rows, c_pad), dtype=compute, device=logits.device)
         with torch.cuda.device(logits.device):  # Triton launches on the current device
-            _forward[(blocks, batch)](
-                logits, target, mask if mask is not None else target, partial, voxels, classes, blocks,
-                ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, C_PAD=c_pad, BLOCK=block,
-                TVERSKY=tversky is not None, CE=ce, HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
-                COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
-            )  # fmt: skip
+            if batch and blocks:
+                _forward[(blocks, batch)](
+                    logits, target, mask if mask is not None else target,
+                    class_weight if class_weight is not None else target, partial, voxels, classes, blocks,
+                    ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, C_PAD=c_pad, BLOCK=block,
+                    TVERSKY=tversky is not None, CE=ce, HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
+                    WEIGHTED=class_weight is not None, FOCAL=focal is not None,
+                    GAMMA=focal[0] if focal else 0.0, ALPHA=focal[1] if focal else None,
+                    COUNTS=masked,
+                    COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
+                )  # fmt: skip
         sums = partial.sum(1, dtype=torch.float64)
+        if distributed:
+            sums = sum_ranks(sums.sum(0)).unsqueeze(0)
         inter, prob, truth, ce_terms = (sums[:, r, :classes] for r in range(4))
         invalid = sums[:, 4, 0].sum()  # class indices out of range
         if masked and not one_hot and not torch.compiler.is_compiling():
             _raise_invalid_indices(invalid, classes)
         valid_counts = sums[:, 5, 0] if masked else None
+        weighted_count = ((truth * class_weight).sum() if class_weight is not None
+                          and activation == "softmax" and not one_hot else None)
 
         first = 0 if include_background else 1
         inter, prob, truth = inter[:, first:], prob[:, first:], truth[:, first:]
@@ -130,7 +145,11 @@ class _SegLoss(torch.autograd.Function):
             # cancellation from subtracting almost equal sums near a perfect prediction.
             den = inter + alpha * prob + beta * truth + smooth
             num = inter + smooth
-        if valid_counts is not None:
+        if lambda_dice == 0:
+            num, den = torch.zeros_like(num), torch.ones_like(den)
+            scale = 0.0
+            loss = torch.zeros((), dtype=torch.float64, device=logits.device)
+        elif valid_counts is not None:
             num, den, scale = masked_overlap_terms(
                 num, den, valid_counts.sum() if batch_dice else valid_counts,
             )
@@ -143,6 +162,8 @@ class _SegLoss(torch.autograd.Function):
             elements = (batch * voxels * (classes if activation == "sigmoid" else 1)
                         if valid_counts is None else
                         (valid_counts.sum() * (classes if activation == "sigmoid" else 1)).clamp_min(1))
+            if weighted_count is not None:
+                elements = torch.where(weighted_count > 0, weighted_count, 1)
             loss = loss + lambda_ce * ce_terms.sum() / elements
             ce_scale = ce_scale + lambda_ce / elements
 
@@ -156,7 +177,7 @@ class _SegLoss(torch.autograd.Function):
         else:
             coef[:, 0, first:classes] = scale * (den - (1 - alpha - beta) * num) / (den * den)
             coef[:, 1, first:classes] = scale * alpha * num / (den * den)
-        ctx.save_for_backward(logits, target, coef, ce_scale, mask)
+        ctx.save_for_backward(logits, target, coef, ce_scale, mask, class_weight)
         ctx.config = config
         loss = torch.where(invalid > 0, torch.nan, loss)
         return loss.to(compute)
@@ -168,64 +189,76 @@ class _SegLoss(torch.autograd.Function):
                 "the fused Triton loss does not support double backward (create_graph=True); "
                 "use backend='torch'"
             )
-        logits, target, coef, ce_scale, mask = ctx.saved_tensors
+        logits, target, coef, ce_scale, mask, class_weight = ctx.saved_tensors
         activation, one_hot = ctx.config[:2]
         ce = ctx.config[7]
-        ignore_index = ctx.config[-1]
+        ignore_index, focal, distributed = ctx.config[-3:]
+        if distributed:
+            grad_out = sum_ranks(grad_out)
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
         coef = (coef * grad_out).to(compute)
         ce_scale = (ce_scale * grad_out).to(compute).reshape(1)
         grad = torch.empty_like(logits)
+        if not logits.numel():
+            return grad, None, None, None, None
         with torch.cuda.device(logits.device):
             _backward[(triton.cdiv(voxels, block), batch)](
-                logits, target, mask if mask is not None else target, coef, ce_scale, grad, voxels, classes,
+                logits, target, mask if mask is not None else target,
+                class_weight if class_weight is not None else target, coef, ce_scale, grad, voxels, classes,
                 ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, CE=ce, C_PAD=c_pad, BLOCK=block,
                 HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
+                WEIGHTED=class_weight is not None, FOCAL=focal is not None,
+                GAMMA=focal[0] if focal else 0.0, ALPHA=focal[1] if focal else None,
                 COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
             )  # fmt: skip
-        return grad, None, None, None
+        return grad, None, None, None, None
 
 
 def focal_loss(
     logits: Tensor, target: Tensor, *, activation: str, one_hot: bool,
     gamma: float, alpha: float | None,
     mask: Tensor | None = None, ignore_index: int | None = None,
+    distributed: bool = False,
 ) -> Tensor:
     """Mean focal CE/BCE, recomputing activations in backward instead of saving them."""
-    return _FocalLoss.apply(logits, target, mask, (activation, one_hot, gamma, alpha, ignore_index))
+    return _FocalLoss.apply(logits, target, mask, (activation, one_hot, gamma, alpha, ignore_index, distributed))
 
 
 class _FocalLoss(torch.autograd.Function):
     @staticmethod
     def forward(ctx, logits: Tensor, target: Tensor, mask: Tensor | None, config: tuple) -> Tensor:
-        activation, one_hot, gamma, alpha, ignore_index = config
+        activation, one_hot, gamma, alpha, ignore_index, distributed = config
         logits, target = logits.contiguous(), target.contiguous()
         mask = None if mask is None else mask.contiguous()
-        masked = mask is not None or ignore_index is not None
+        masked = mask is not None or ignore_index is not None or distributed
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
         blocks = triton.cdiv(voxels, block)
         partial = torch.empty((batch, 3 if masked else 1, blocks), device=logits.device, dtype=compute)
         elements = batch * voxels * (classes if activation == "sigmoid" else 1)
         with torch.cuda.device(logits.device):
-            _focal_kernel[(blocks, batch)](
-                logits, target, mask if mask is not None else target, partial, partial, partial, partial,
-                voxels, classes, blocks,
-                ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, GAMMA=gamma, ALPHA=alpha,
-                HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
-                BACKWARD=False, ELEMENTS=elements, C_PAD=c_pad, BLOCK=block,
-                COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
-            )
+            if batch and blocks:
+                _focal_kernel[(blocks, batch)](
+                    logits, target, mask if mask is not None else target, partial, partial, partial, partial,
+                    voxels, classes, blocks,
+                    ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, GAMMA=gamma, ALPHA=alpha,
+                    HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
+                    COUNTS=masked,
+                    BACKWARD=False, ELEMENTS=elements, C_PAD=c_pad, BLOCK=block,
+                    COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
+                )
         normalizer = None
+        sums = partial.sum((0, 2), dtype=torch.float64)
+        if distributed:
+            sums = sum_ranks(sums)
         if masked:
-            normalizer = (partial[:, 1].sum(dtype=torch.float64)
-                          * (classes if activation == "sigmoid" else 1)).clamp_min(1)
+            normalizer = (sums[1] * (classes if activation == "sigmoid" else 1)).clamp_min(1)
             if not one_hot and not torch.compiler.is_compiling():
-                _raise_invalid_indices(partial[:, 2].sum(), classes)
+                _raise_invalid_indices(sums[2], classes)
         ctx.save_for_backward(logits, target, mask, normalizer)
         ctx.config = config
-        return (partial[:, 0].sum(dtype=torch.float64)
+        return (sums[0]
                 / (elements if normalizer is None else normalizer)).to(compute)
 
     @staticmethod
@@ -236,18 +269,23 @@ class _FocalLoss(torch.autograd.Function):
                 "use backend='torch'"
             )
         logits, target, mask, normalizer = ctx.saved_tensors
-        activation, one_hot, gamma, alpha, ignore_index = ctx.config
+        activation, one_hot, gamma, alpha, ignore_index, distributed = ctx.config
+        if distributed:
+            grad_out = sum_ranks(grad_out)
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
         blocks = triton.cdiv(voxels, block)
         elements = batch * voxels * (classes if activation == "sigmoid" else 1)
         grad = torch.empty_like(logits)
+        if not logits.numel():
+            return grad, None, None, None
         with torch.cuda.device(logits.device):
             _focal_kernel[(blocks, batch)](
                 logits, target, mask if mask is not None else target, grad, grad, grad_out,
                 normalizer if normalizer is not None else grad_out, voxels, classes, blocks,
                 ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, GAMMA=gamma, ALPHA=alpha,
                 HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
+                COUNTS=normalizer is not None,
                 BACKWARD=True, ELEMENTS=elements, C_PAD=c_pad, BLOCK=block,
                 COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
             )
@@ -312,9 +350,11 @@ if triton is not None:
 
     @triton.jit
     def _forward(
-        logits, target, voxel_mask, partial, voxels, classes, blocks,
+        logits, target, voxel_mask, class_weight, partial, voxels, classes, blocks,
         ACT: tl.constexpr, ONE_HOT: tl.constexpr, C_PAD: tl.constexpr, BLOCK: tl.constexpr,
         TVERSKY: tl.constexpr, CE: tl.constexpr,
+        WEIGHTED: tl.constexpr, FOCAL: tl.constexpr, GAMMA: tl.constexpr, ALPHA: tl.constexpr,
+        COUNTS: tl.constexpr,
         HAS_MASK: tl.constexpr, IGNORE_INDEX: tl.constexpr,
         COMPUTE: tl.constexpr,
     ):  # fmt: skip
@@ -329,11 +369,15 @@ if triton is not None:
         # logit would otherwise make 0 * inf = NaN.
         if not CE:
             ce = tl.full((C_PAD, BLOCK), 0.0, COMPUTE)
+        elif FOCAL:
+            ce = _focal_terms(p, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, False, C_PAD, BLOCK, COMPUTE)
         elif ACT == 0:  # cross-entropy -Σ g log p, per class
             ce = tl.where(g != 0, g * (lse[None, :] - z), 0.0)
         else:  # binary cross-entropy with logits
             ce = tl.maximum(z, 0.0) - tl.where(g != 0, z * g, 0.0) + libdevice.log1p(tl.exp(-tl.abs(z)))
-        rows: tl.constexpr = 6 if HAS_MASK or IGNORE_INDEX is not None else 5
+        if CE and WEIGHTED:
+            ce *= tl.load(class_weight + ch, mask=ch < classes, other=0).to(COMPUTE)[:, None]
+        rows: tl.constexpr = 6 if COUNTS else 5
         out = partial + ((b * blocks + blk) * rows) * C_PAD + ch
         tl.store(out, tl.sum(p * g * w, axis=1))
         if TVERSKY:
@@ -347,14 +391,15 @@ if triton is not None:
         if not ONE_HOT:
             invalid = tl.where(ch == 0, tl.sum(bad.to(COMPUTE), axis=0), 0.0)
         tl.store(out + 4 * C_PAD, invalid)
-        if HAS_MASK or IGNORE_INDEX is not None:
+        if COUNTS:
             tl.store(out + 5 * C_PAD, tl.where(ch == 0, tl.sum(valid.to(COMPUTE), axis=0), 0.0))
 
     @triton.jit
     def _backward(
-        logits, target, voxel_mask, coef, ce_scale, grad, voxels, classes,
+        logits, target, voxel_mask, class_weight, coef, ce_scale, grad, voxels, classes,
         ACT: tl.constexpr, ONE_HOT: tl.constexpr, CE: tl.constexpr, C_PAD: tl.constexpr, BLOCK: tl.constexpr,
         HAS_MASK: tl.constexpr, IGNORE_INDEX: tl.constexpr,
+        WEIGHTED: tl.constexpr, FOCAL: tl.constexpr, GAMMA: tl.constexpr, ALPHA: tl.constexpr,
         COMPUTE: tl.constexpr,
     ):  # fmt: skip
         blk = tl.program_id(0)
@@ -366,32 +411,30 @@ if triton is not None:
         a = tl.load(coef + (b * 2) * C_PAD + ch)
         c = tl.load(coef + (b * 2 + 1) * C_PAD + ch)
         d_p = c[:, None] - a[:, None] * g  # dLdice/dp
+        weight = tl.full((C_PAD, 1), 1.0, COMPUTE)
+        if WEIGHTED:
+            weight = tl.load(class_weight + ch, mask=ch < classes, other=0).to(COMPUTE)[:, None]
         if ACT == 0:
             d_z = p * (d_p - tl.sum(p * d_p, axis=0)[None, :])
-            if CE:
-                d_z += tl.load(ce_scale) * (p * tl.sum(g, axis=0)[None, :] - g)
+            if CE and not FOCAL:
+                wg = weight * g
+                d_z += tl.load(ce_scale) * (p * tl.sum(wg, axis=0)[None, :] - wg)
         elif ACT == 1:
             d_z = d_p * p * (1.0 - p)
-            if CE:
-                d_z += tl.load(ce_scale) * (p - g)
+            if CE and not FOCAL:
+                d_z += tl.load(ce_scale) * weight * (p - g)
         else:
             d_z = d_p
+        if CE and FOCAL:
+            d_z += tl.load(ce_scale) * _focal_terms(
+                p, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, True, C_PAD, BLOCK, COMPUTE,
+            )
         tl.store(grad + row, tl.where(valid[None, :], d_z, 0).to(grad.dtype.element_ty), mask=mask)
 
     @triton.jit
-    def _focal_kernel(
-        logits, target, voxel_mask, partial, grad, grad_out, normalizer, voxels, classes, blocks,
-        ACT: tl.constexpr, ONE_HOT: tl.constexpr, GAMMA: tl.constexpr, ALPHA: tl.constexpr,
-        BACKWARD: tl.constexpr, ELEMENTS: tl.constexpr, C_PAD: tl.constexpr, BLOCK: tl.constexpr,
-        HAS_MASK: tl.constexpr, IGNORE_INDEX: tl.constexpr,
-        COMPUTE: tl.constexpr,
-    ):
-        blk = tl.program_id(0)
-        b = tl.program_id(1).to(tl.int64)
-        p, g, z, lse, mask, row, ch, valid, bad = _tile(
-            logits, target, voxel_mask, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT,
-            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE
-        )
+    def _focal_terms(p, g, z, lse, ch, mask, ACT: tl.constexpr, GAMMA: tl.constexpr,
+                     ALPHA: tl.constexpr, BACKWARD: tl.constexpr, C_PAD: tl.constexpr,
+                     BLOCK: tl.constexpr, COMPUTE: tl.constexpr):
         if ACT == 0:
             logp = z - lse[None, :]
             # expm1 retains 1-p near p=1. Use exp(logp) consistently in its derivative.
@@ -435,7 +478,32 @@ if triton is not None:
             else:
                 terms = pos_weight * pos_mod * pos_ce + neg_weight * neg_mod * neg_ce
         if BACKWARD:
-            if HAS_MASK or IGNORE_INDEX is not None:
+            return dz
+        else:
+            return terms
+
+    @triton.jit
+    def _focal_kernel(
+        logits, target, voxel_mask, partial, grad, grad_out, normalizer, voxels, classes, blocks,
+        ACT: tl.constexpr, ONE_HOT: tl.constexpr, GAMMA: tl.constexpr, ALPHA: tl.constexpr,
+        BACKWARD: tl.constexpr, ELEMENTS: tl.constexpr, C_PAD: tl.constexpr, BLOCK: tl.constexpr,
+        HAS_MASK: tl.constexpr, IGNORE_INDEX: tl.constexpr,
+        COUNTS: tl.constexpr,
+        COMPUTE: tl.constexpr,
+    ):
+        blk = tl.program_id(0)
+        b = tl.program_id(1).to(tl.int64)
+        p, g, z, lse, mask, row, ch, valid, bad = _tile(
+            logits, target, voxel_mask, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT,
+            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE
+        )
+        result = _focal_terms(p, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, BACKWARD, C_PAD, BLOCK, COMPUTE)
+        if BACKWARD:
+            dz = result
+        else:
+            terms = result
+        if BACKWARD:
+            if COUNTS:
                 dz *= tl.load(grad_out).to(COMPUTE) / tl.load(normalizer).to(COMPUTE)
             else:
                 dz *= tl.load(grad_out).to(COMPUTE) / ELEMENTS
@@ -446,7 +514,7 @@ if triton is not None:
             invalid = tl.sum(bad.to(tl.int32), axis=0)
             if not ONE_HOT:
                 loss = tl.where(invalid > 0, float("nan"), loss)
-            if HAS_MASK or IGNORE_INDEX is not None:
+            if COUNTS:
                 out = partial + b * 3 * blocks + blk
                 tl.store(out, loss)
                 tl.store(out + blocks, tl.sum(valid.to(COMPUTE), axis=0))

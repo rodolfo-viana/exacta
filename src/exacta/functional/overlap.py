@@ -49,8 +49,8 @@ def dice(
     Returns:
         A float64 array of shape (B, C), in the array library of ``pred``.
     """
-    tp, fp, fn, _ = _confusion_counts(pred, target, input_format, num_classes, include_background)
-    return like_input(_ratio(2 * tp, 2 * tp + fp + fn, both_empty), pred)
+    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_score_counts("dice", counts, both_empty=both_empty), pred)
 
 
 def iou(
@@ -66,8 +66,8 @@ def iou(
 
     Arguments and return value as in :func:`dice`.
     """
-    tp, fp, fn, _ = _confusion_counts(pred, target, input_format, num_classes, include_background)
-    return like_input(_ratio(tp, tp + fp + fn, both_empty), pred)
+    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_score_counts("iou", counts, both_empty=both_empty), pred)
 
 
 def sensitivity(
@@ -85,8 +85,8 @@ def sensitivity(
         zero_division: Value when the class is absent from the target.
         Others: As in :func:`dice`.
     """
-    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
-    return like_input(_ratio(tp, tp + fn, zero_division), pred)
+    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_score_counts("sensitivity", counts, zero_division=zero_division), pred)
 
 
 def precision(
@@ -104,8 +104,8 @@ def precision(
         zero_division: Value when the class is absent from the prediction.
         Others: As in :func:`dice`.
     """
-    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
-    return like_input(_ratio(tp, tp + fp, zero_division), pred)
+    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_score_counts("precision", counts, zero_division=zero_division), pred)
 
 
 def specificity(
@@ -123,8 +123,8 @@ def specificity(
         zero_division: Value when the target covers the whole image (no negatives).
         Others: As in :func:`dice`.
     """
-    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
-    return like_input(_ratio(tn, tn + fp, zero_division), pred)
+    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_score_counts("specificity", counts, zero_division=zero_division), pred)
 
 
 def volume_similarity(
@@ -150,16 +150,8 @@ def volume_similarity(
         zero_division: Value when the class is absent from both prediction and target.
         Others: As in :func:`dice`.
     """
-    if convention not in ("taha", "itk"):
-        raise ValueError(f"convention must be 'taha' or 'itk', got {convention!r}")
-    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
-    size_p, size_t = tp + fp, tp + fn
-    if convention == "taha":
-        similarity = 1 - (size_p - size_t).abs().double() / (size_p + size_t).clamp_min(1)
-    else:
-        similarity = 2 * (size_p - size_t).double() / (size_p + size_t).clamp_min(1)
-    both_empty = size_p + size_t == 0
-    return like_input(torch.where(both_empty, torch.full_like(similarity, zero_division), similarity), pred)
+    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_score_counts("volume_similarity", counts, zero_division=zero_division, convention=convention), pred)
 
 
 def relative_volume_difference(
@@ -181,14 +173,51 @@ def relative_volume_difference(
         zero_division: Value when the class is absent from the target (MedPy raises).
         Others: As in :func:`dice`.
     """
-    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
-    difference = fp - fn  # = |P| - |T|
-    return like_input(_ratio(difference.abs() if absolute else difference, tp + fn, zero_division), pred)
+    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_score_counts("relative_volume_difference", counts, zero_division=zero_division, absolute=absolute), pred)
+
+
+def _score_counts(
+    name: str, counts: tuple[Tensor, Tensor, Tensor, Tensor], *,
+    both_empty: float = math.nan, zero_division: float = math.nan,
+    convention: str = "taha", absolute: bool = False,
+) -> Tensor:
+    """Reduce shared integer statistics without rescanning a segmentation."""
+    tp, fp, fn, tn = counts
+    if name == "dice":
+        return _ratio(2 * tp, 2 * tp + fp + fn, both_empty)
+    if name == "iou":
+        return _ratio(tp, tp + fp + fn, both_empty)
+    if name == "sensitivity":
+        return _ratio(tp, tp + fn, zero_division)
+    if name == "precision":
+        return _ratio(tp, tp + fp, zero_division)
+    if name == "specificity":
+        return _ratio(tn, tn + fp, zero_division)
+    if name == "relative_volume_difference":
+        difference = fp - fn
+        return _ratio(difference.abs() if absolute else difference, tp + fn, zero_division)
+    if name == "volume_similarity":
+        if convention not in ("taha", "itk"):
+            raise ValueError(f"convention must be 'taha' or 'itk', got {convention!r}")
+        size_p, size_t = tp + fp, tp + fn
+        if convention == "taha":
+            value = 1 - (size_p - size_t).abs().double() / (size_p + size_t).clamp_min(1)
+        else:
+            value = 2 * (size_p - size_t).double() / (size_p + size_t).clamp_min(1)
+        return torch.where(size_p + size_t == 0, torch.full_like(value, zero_division), value)
+    raise ValueError(f"unknown overlap metric {name!r}")
 
 
 def _confusion_counts(
     pred: Any, target: Any, input_format: InputFormat, num_classes: int | None, include_background: bool
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    return _confusion_counts_and_seg(pred, target, input_format, num_classes, include_background)[0]
+
+
+def _confusion_counts_and_seg(
+    pred: Any, target: Any, input_format: InputFormat, num_classes: int | None, include_background: bool,
+) -> tuple[tuple[Tensor, Tensor, Tensor, Tensor], Segmentations]:
     """TP, FP, FN and TN, each (B, C).
 
     Native kernels (CPU) and Triton kernels (GPU) count in one pass and check values as they go
@@ -214,13 +243,16 @@ def _confusion_counts(
         raise AssertionError("validation accepted values that the counting kernels rejected")
     tp, fp, fn = counts
     voxels = math.prod(seg.pred.shape[seg.pred.ndim - seg.ndim :])
-    return tp, fp, fn, voxels - tp - fp - fn
+    return (tp, fp, fn, voxels - tp - fp - fn), seg
 
 
 def _native_counts(seg: Segmentations) -> tuple[Tensor, Tensor, Tensor] | None:
     """TP, FP, FN (each (B, C)) from the native kernels, or None if they reject a value."""
     if seg.one_hot:
         return _from_channels(seg, _native.channel_counts(seg.pred.flatten(0, 1), seg.target.flatten(0, 1)))
+    if seg.batch == 0:
+        empty = torch.empty((0, len(seg.classes)), dtype=torch.int64, device=seg.pred.device)
+        return empty, empty.clone(), empty.clone()
     matrices = []
     for b in range(seg.batch):
         cm = _native.confusion(seg.pred[b], seg.target[b], seg.num_classes)

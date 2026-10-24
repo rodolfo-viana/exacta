@@ -268,6 +268,18 @@ def _per_case(
     backend: Backend,
 ) -> Tensor:
     """Apply ``score(d(P -> T), d(T -> P), class position)`` to every case and class."""
+    return _per_case_many(seg, spacing, [(score, both_empty, one_empty)], surface=surface, backend=backend)[..., 0]
+
+
+def _per_case_many(
+    seg: Segmentations,
+    spacing: Any,
+    scores: Sequence[tuple[Callable[[_Distances, _Distances, int], float], float, float]],
+    *,
+    surface: Surface,
+    backend: Backend,
+) -> Tensor:
+    """Reduce several metrics immediately, retaining distance buffers only for one chunk."""
     if surface == "voxels":
         elements = _voxel_distances
     elif surface == "surfels":
@@ -279,7 +291,8 @@ def _per_case(
     spacings = as_spacing(spacing, batch=seg.batch, ndim=seg.ndim, area_weighted=surface != "voxels")
     edt_sq = _edt_function(backend, seg.pred.device)
 
-    out = torch.full((seg.batch, len(seg.classes)), both_empty, dtype=torch.float64)
+    out = torch.tensor([s[1] for s in scores], dtype=torch.float64).expand(seg.batch, len(seg.classes), -1).clone()
+    one_empty = torch.tensor([s[2] for s in scores], dtype=torch.float64)
     for b in range(seg.batch):
         # Bounding boxes of every class at once, read back in one sync. Working inside the box of
         # both masks is exact: outside it both are background, as outside the image.
@@ -302,7 +315,8 @@ def _per_case(
         for chunk in _chunks(jobs, _BATCH_BYTES if seg.pred.device.type == "cuda" else 0):
             masks = [seg.masks(b, cls, box) for _, cls, box in chunk]
             for (k, _, _), distances in zip(chunk, elements(masks, spacings[b], edt_sq)):
-                out[b, k] = score(*distances, k)
+                for j, (score, _, _) in enumerate(scores):
+                    out[b, k, j] = score(*distances, k)
     return out.to(seg.pred.device)
 
 

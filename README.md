@@ -29,7 +29,8 @@ python -m pip install exacta==0.0.1a2
 This release is a **source distribution**. Installation builds the native extension locally
 and requires a C++17 compiler and Python development headers; OpenMP is optional. On
 Debian/Ubuntu, install `build-essential` and the development headers matching your Python
-version first. Portable binary wheels are planned.
+version first. Portable Linux x86-64 wheel builds are available in development CI; they
+will be published with the next release.
 
 ## Usage
 
@@ -353,7 +354,7 @@ CPU/GPU agreement, mixed precision, extreme logits and full-graph compilation:
 
 ### Unreleased: ignored labels and voxel masks
 
-On `dev`, all five losses accept constructor argument `ignore_index` for integer targets
+On `dev`, all segmentation losses accept constructor argument `ignore_index` for integer targets
 and a keyword-only boolean `mask=` in forward:
 
 ```python
@@ -367,6 +368,24 @@ only included voxels; overlap averages omit entirely ignored cases. An entirely 
 batch returns zero loss and gradients. Annotated background remains valid. GPU kernels
 apply exclusions during their existing passes without full-volume masked intermediates.
 See the [loss guide](https://github.com/rodolfo-viana/exacta/wiki/Losses) for a complete example.
+
+### Unreleased: shared evaluation and training composition
+
+The `dev` branch also provides these APIs, pending the next PyPI release:
+
+| API | Purpose |
+|---|---|
+| `functional.evaluate`, `metrics.MetricCollection` | Share counts and surface distances across several requested metrics |
+| `losses.DeepSupervisionLoss` | Weighted loss over explicitly paired prediction/target resolutions and optional masks |
+| `losses.DiceFocalLoss`, `losses.GeneralizedDiceCELoss` | Combinations with shared GPU passes and explicit term coefficients |
+| `class_weight` in Dice–CE and generalized Dice–CE | CE class weights with explicit index/soft-target normalization |
+| `distributed=True` in segmentation losses | Global statistics and DDP-correct parameter gradients; overlap also requires `batch_dice=True` |
+
+See the Wiki's [metrics](https://github.com/rodolfo-viana/exacta/wiki/Metrics) and
+[losses](https://github.com/rodolfo-viana/exacta/wiki/Losses) guides for examples, reduction
+definitions and distributed participation requirements. Run
+`python -m pytest tests/test_collection.py tests/test_deep_supervision.py tests/test_composed_losses.py tests/test_distributed_losses.py`
+to exercise these additions; CUDA/NCCL tests require suitable hardware.
 
 ## License
 

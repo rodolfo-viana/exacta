@@ -13,6 +13,17 @@ Development now takes place on `dev`; `main` is reserved for releases.
 - Add reproducible masked/unmasked loss benchmarks and record CPU/GPU latency and GPU memory.
 - Prepare the GitHub Wiki with installation, runnable examples, metric/loss conventions,
   lesion evaluation, performance guidance and a versioned source in `docs/wiki`.
+- Add `functional.evaluate` and `MetricCollection`, sharing counts and compatible surface
+  distances across requested metrics. Stateful collections gather scores in one payload.
+- Add `DeepSupervisionLoss` with explicit per-resolution targets, masks and weights.
+- Add Dice–focal and generalized Dice–CE combinations, sharing GPU forward/backward passes,
+  and explicit CE class weights with PyTorch-compatible index/soft-target normalization.
+  Zero coefficients skip disabled terms; zero target-weight sums return zero CE.
+- Add opt-in distributed loss reductions over the global batch, with DDP-correct gradients,
+  including uneven batches and empty or entirely ignored ranks.
+- Add automatic development CI and installed-artifact tests for portable Linux x86-64
+  wheels, including stable-ABI checks on newer Python versions. Future releases publish
+  these wheels alongside the source distribution; no new PyPI release is made on `dev`.
 
 ## 0.0.1a2
 

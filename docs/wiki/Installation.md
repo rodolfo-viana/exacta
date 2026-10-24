@@ -14,6 +14,11 @@ a C++17 compiler and Python development headers; OpenMP is optional. On Debian/U
 install `build-essential` and development headers matching your Python interpreter.
 Portable prebuilt wheels are not yet published.
 
+The `dev` CI workflow builds portable Linux x86-64 wheel artifacts for glibc 2.28 or newer.
+It covers Python 3.10 and 3.11 and a stable-ABI wheel built on 3.12, also tested on 3.13/3.14.
+These are development artifacts; PyPI will gain wheels in the next release. Other platforms
+continue to require a source build.
+
 ## CPU and GPU
 
 CPU kernels compile during installation. CUDA loss and metric kernels use Triton at runtime;
@@ -30,7 +35,8 @@ describes test environments.
 
 ## Development checkout
 
-Unreleased features, including ignored labels and voxel masks for losses, live on `dev`.
+Unreleased features, including shared metric evaluation, loss combinations, deep supervision,
+global distributed losses, ignored labels and voxel masks, live on `dev`.
 Install that branch explicitly when evaluating those features:
 
 ```bash

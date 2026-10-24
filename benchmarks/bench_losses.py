@@ -17,11 +17,24 @@ import time
 import torch
 
 from exacta import __version__
-from exacta.losses import DiceCELoss, DiceLoss, FocalLoss, GeneralizedDiceLoss, TverskyLoss
+from exacta.losses import DiceCELoss, DiceFocalLoss, DiceLoss, FocalLoss, GeneralizedDiceCELoss, GeneralizedDiceLoss, TverskyLoss
 
 LOSSES = {"dice": DiceLoss, "dice_ce": DiceCELoss, "tversky": TverskyLoss, "focal": FocalLoss,
-          "generalized_dice": GeneralizedDiceLoss}
+          "generalized_dice": GeneralizedDiceLoss, "dice_focal": DiceFocalLoss,
+          "generalized_dice_ce": GeneralizedDiceCELoss}
 DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float64": torch.float64}
+
+
+class SeparateDiceFocal(torch.nn.Module):
+    """Two existing auto-dispatched loss calls, to measure the value of fusion."""
+
+    def __init__(self, *, activation, ignore_index):
+        super().__init__()
+        self.dice = DiceLoss(activation=activation, ignore_index=ignore_index)
+        self.focal = FocalLoss(activation=activation, ignore_index=ignore_index)
+
+    def forward(self, input, target, *, mask=None):
+        return self.dice(input, target, mask=mask) + self.focal(input, target, mask=mask)
 
 
 def step(loss_fn, logits, target, mask) -> None:
@@ -62,7 +75,7 @@ def main() -> None:
     parser.add_argument("--classes", type=int, nargs="+", default=[4, 14])
     parser.add_argument("--sizes", type=int, nargs="+", default=[128, 160])
     parser.add_argument("--losses", choices=list(LOSSES), nargs="+", default=list(LOSSES))
-    parser.add_argument("--backends", choices=["torch", "compiled", "triton"], nargs="+",
+    parser.add_argument("--backends", choices=["torch", "compiled", "triton", "separate"], nargs="+",
                         default=["torch", "compiled", "triton"])
     parser.add_argument("--dtypes", choices=list(DTYPES), nargs="+", default=["float32", "bfloat16"])
     parser.add_argument("--activation", choices=["softmax", "sigmoid"], default="softmax")
@@ -70,6 +83,8 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=None)
+    parser.add_argument("--class-weight", type=float, nargs="+", default=None,
+                        help="CE class weights for dice_ce and generalized_dice_ce only")
     parser.add_argument("--ignore-fraction", type=float, default=0.0,
                         help="fraction assigned label -100; enables ignore_index when positive")
     parser.add_argument("--mask-fraction", type=float, default=0.0,
@@ -79,6 +94,8 @@ def main() -> None:
         parser.error("--device cuda needs a CUDA device")
     if args.device == "cpu" and "triton" in args.backends:
         parser.error("use --backends torch compiled for CPU runs")
+    if "separate" in args.backends and args.losses != ["dice_focal"]:
+        parser.error("--backends separate requires --losses dice_focal")
     if min(args.batch, args.repeat, args.warmup, *args.classes, *args.sizes) < 1:
         parser.error("batch, repeat, warmup, classes and sizes must be positive")
     if any(not 0 <= fraction <= 1 for fraction in (args.ignore_fraction, args.mask_fraction)):
@@ -116,8 +133,14 @@ def main() -> None:
                 del valid
                 for name in args.losses:
                     for backend in args.backends:
-                        loss_fn = LOSSES[name](backend="torch" if backend == "compiled" else backend,
-                                               activation=args.activation, ignore_index=ignore_index)
+                        options = {}
+                        if args.class_weight is not None and name in ("dice_ce", "generalized_dice_ce"):
+                            options["class_weight"] = args.class_weight
+                        if backend == "separate":
+                            loss_fn = SeparateDiceFocal(activation=args.activation, ignore_index=ignore_index)
+                        else:
+                            loss_fn = LOSSES[name](backend="torch" if backend == "compiled" else backend,
+                                                   activation=args.activation, ignore_index=ignore_index, **options)
                         if backend == "compiled":
                             torch._dynamo.reset()
                             loss_fn = torch.compile(loss_fn, fullgraph=True)

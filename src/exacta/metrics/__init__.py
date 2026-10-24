@@ -1,6 +1,7 @@
 """Stateful metrics that accumulate per-case values across batches and processes."""
 
 from exacta.metrics.base import MetricResult, PerCaseMetric
+from exacta.metrics.collection import MetricCollection
 from exacta.metrics.segmentation import (
     ASSD,
     HD95,
@@ -23,6 +24,7 @@ __all__ = [
     "HausdorffDistance",
     "IoU",
     "MetricResult",
+    "MetricCollection",
     "PerCaseMetric",
     "Precision",
     "RelativeVolumeDifference",

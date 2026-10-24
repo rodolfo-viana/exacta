@@ -35,24 +35,28 @@ return zero. GPU kernels read exclusions directly in their existing passes. This
 add masking to surface metrics: cropping a mask can create artificial surfaces and needs
 a separate definition.
 
-## Next implementation priorities
+## Implemented on dev
 
-The largest remaining general-purpose gaps are training semantics and composition. Implement
-them with exact reduction definitions and tests before adding specialized objectives.
+The following additions are available on `dev` (`0.0.1a3.dev0`). They have explicit reduction
+definitions and tests; see the Wiki's unreleased sections for examples and constraints.
 
-1. **Shared metric calculations.** Compute counts once for overlap/volume metrics and surface
-   distances once for HD95, ASSD and NSD requested together. Preserve each metric's conventions
-   while avoiding repeated volume scans, extraction and distance transforms.
-2. **Deep supervision.** Apply a loss to explicitly paired predictions and targets at several
-   resolutions, with declared weights and validation of lengths. Avoid implicit label
-   interpolation. Check against nnU-Net's
+1. **Shared metric calculations.** `functional.evaluate` and `MetricCollection` compute counts
+   once and share distances for compatible surface metrics. Each metric retains its options.
+2. **Deep supervision.** `DeepSupervisionLoss` pairs predictions and targets explicitly at each
+   resolution, applies declared weights without normalization and skips zero-weight levels.
+   There is no implicit label interpolation, consistent with nnU-Net's
    [deep-supervision implementation](https://github.com/MIC-DKFZ/nnUNet/blob/master/nnunetv2/training/loss/deep_supervision.py).
-3. **Loss combinations and weighting.** Dice plus focal, generalized Dice plus CE, and explicit
-   per-class CE weights. Use composition as a correctness baseline; fuse only where measured
-   time or memory justifies it. Separate class weighting from spatial and batch reductions.
-4. **Distributed training reductions.** Evaluation already gathers per-case results. Losses'
-   `batch_dice=True` currently means the local batch, not all distributed ranks. Offer an
-   explicit differentiable global reduction with empty-rank and uneven-batch tests.
+3. **Loss combinations and weighting.** `DiceFocalLoss` and `GeneralizedDiceCELoss` share GPU
+   passes. CE class weighting follows PyTorch's distinct index and soft-target reductions.
+   Independent compositions validate values and gradients.
+4. **Distributed training reductions.** `distributed=True` reduces loss statistics globally.
+   Overlap losses also require `batch_dice=True`; the default still means the local batch.
+   Two-rank DDP tests compare values and parameter gradients with one concatenated batch,
+   including uneven, empty and fully ignored ranks. NCCL coverage requires two GPUs.
+
+Development CI also builds and tests installed sdists and portable Linux wheels. `main`
+remains reserved for releases. GPU performance and multi-GPU transport need their own
+hardware measurements; CPU CI cannot establish either.
 
 ## Task-dependent extensions
 

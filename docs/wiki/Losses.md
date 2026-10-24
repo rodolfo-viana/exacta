@@ -17,7 +17,7 @@ Let `p` be activated predictions, `g` the target and `s` smoothing. The released
 
 Overlap losses support `activation="softmax"`, `"sigmoid"` or `"none"`. Dice-CE and focal
 require logits and use softmax or sigmoid. `batch_dice=True` pools overlap statistics across
-the local batch before division; it does not communicate between distributed training ranks.
+the local batch before division. The unreleased explicit global option is documented below.
 `include_background=False` excludes channel zero from overlap only. CE/BCE and focal include
 all channels.
 
@@ -42,7 +42,9 @@ Definitions differ across libraries, so select parameters intentionally:
 `backend="auto"` selects fused Triton for supported CUDA inputs and PyTorch otherwise.
 Half/bfloat16 inputs compute in float32; float64 inputs retain their precision. Fused losses
 support first derivatives. Use `backend="torch"` for higher-order derivatives; `auto` also
-selects PyTorch when targets require gradients. Full-graph `torch.compile` is supported.
+selects PyTorch when targets require gradients. Full-graph `torch.compile` is tested for
+local losses. Distributed losses are tested in eager execution; compiled collectives are
+not part of the current compatibility guarantee.
 
 ## Unreleased: ignored labels and voxel masks
 
@@ -74,3 +76,84 @@ raise eagerly; compiled Triton returns NaN. Soft/one-hot targets use `mask`, not
 
 The GPU kernels read exclusion information directly and count valid voxels in their existing
 passes. They do not create full-volume masked probability or one-hot buffers.
+
+## Unreleased: loss combinations and CE weights
+
+`DiceFocalLoss` adds Dice and focal terms; `GeneralizedDiceCELoss` adds generalized Dice and
+CE/BCE. Their GPU implementations share one activation/target pass forward and one backward.
+The corresponding native PyTorch compositions provide a reference and higher-order gradients.
+Coefficients must be finite and nonnegative, with at least one positive term. A coefficient
+of zero skips that term, including otherwise undefined zero-smoothing overlap ratios.
+
+```python
+from exacta.losses import DiceFocalLoss, GeneralizedDiceCELoss
+
+dice_focal = DiceFocalLoss(include_background=False, gamma=2, alpha=0.25,
+                          lambda_dice=1, lambda_focal=0.5)
+gdl_ce = GeneralizedDiceCELoss(include_background=False, empty_target="uniform",
+                              class_weight=[0.2, 1.0, 2.0])
+```
+
+`DiceCELoss` and `GeneralizedDiceCELoss` accept `class_weight`, one nonnegative finite value
+per input channel, stored as a module buffer. These weights apply only to CE/BCE. Normalization
+matches [PyTorch's cross-entropy definition](https://docs.pytorch.org/docs/2.14/generated/torch.nn.CrossEntropyLoss.html)
+and depends on target format:
+
+| Pointwise term | Weighted numerator | Denominator |
+|---|---|---|
+| Softmax, index target | Sum of `-w[y] log p[y]` over included voxels | Sum of included `w[y]` |
+| Softmax, soft/one-hot target | Sum of `-w[c] g[c] log p[c]` | Number of included voxels |
+| Sigmoid BCE | Class weight multiplies both positive and negative terms | Included voxels × channels |
+
+Zero total target weight returns zero CE and zero CE gradient. Exact one-hot and index labels
+therefore produce different weighted CE scales, as in PyTorch. `include_background=False`
+still affects only the overlap term. Use focal's `alpha` for its documented positive/negative
+or background/foreground weighting.
+
+## Unreleased: deep supervision
+
+`DeepSupervisionLoss` applies one scalar loss to explicitly paired resolutions. Weights are
+used as supplied, without normalization; zero-weight levels are not evaluated and receive
+no gradient. Targets and optional masks must already match each prediction's spatial shape.
+The wrapper does not resize labels or choose downsampling conventions.
+
+```python
+from exacta.losses import DeepSupervisionLoss, DiceCELoss
+
+loss_fn = DeepSupervisionLoss(DiceCELoss(ignore_index=-100), weights=[1.0, 0.5, 0.25])
+# Sequences of three tensors, ordered consistently from fine to coarse:
+loss = loss_fn(predictions, targets, masks=voxel_masks)
+```
+
+## Unreleased: global distributed losses
+
+Set `distributed=True` to pool statistics over the default `torch.distributed` process group.
+Overlap losses and their combinations also require `batch_dice=True`. This computes the
+objective for the concatenated global batch, including generalized-Dice class weights and
+weighted CE denominators. It differs from averaging independently computed rank-local Dice.
+
+```python
+# After initializing the process group and wrapping the model in ordinary DDP:
+loss_fn = GeneralizedDiceCELoss(batch_dice=True, distributed=True,
+                               include_background=False, ignore_index=-100)
+loss = loss_fn(ddp_model(images), labels, mask=annotated)
+loss.backward()
+```
+
+Every rank must use identical loss configuration and backend, and call forward and backward
+in the same order, including ranks with zero cases or entirely ignored data. An entirely
+ignored or empty global batch returns zero. Do not multiply the loss by local batch size or
+divide by world size: the differentiable statistics sum and DDP's gradient averaging together
+produce concatenated-batch **parameter gradients**; see
+[DDP's gradient-averaging convention](https://docs.pytorch.org/docs/2.14/generated/torch.nn.parallel.DistributedDataParallel.html).
+Logit/target gradients before DDP averaging
+carry a world-size factor; custom gradient communication hooks need their own scaling analysis.
+Gradient accumulation across microbatches averages microbatch objectives; it does not pool
+their nonlinear Dice ratios into one larger-batch ratio.
+
+Only small statistics communicate. NCCL keeps these on the rank's CUDA device. Gloo uses CPU
+buffers, also allowing two CUDA workers on a single GPU for correctness tests. Local tests
+cover CPU and fused CUDA with two Gloo ranks, uneven batches, empty ranks, ignored ranks and
+all-ignored batches. The two-GPU NCCL test is hardware-dependent; Gloo timings do not establish
+multi-GPU training throughput. Loss configuration and valid input shapes must agree across
+ranks; as with ordinary distributed training, a rank-local error can interrupt its peers.

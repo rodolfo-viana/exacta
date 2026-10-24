@@ -55,3 +55,36 @@ cases. If no rank has any cases, `compute()` raises `RuntimeError`.
 See [Conventions](https://github.com/rodolfo-viana/exacta/wiki/Conventions) for empty masks,
 surface representations and reference-library differences. Loss masking on `dev` does not
 add masking to these metrics; excluding a region from a surface metric needs its own definition.
+
+## Unreleased: shared metric evaluation
+
+On `dev`, `functional.evaluate` shares confusion counts across overlap/volume metrics and
+surface distances across compatible boundary metrics. It returns a dictionary of `(B, K)`
+arrays. Choose names as a sequence, or map names to their individual options:
+
+```python
+selection = {"dice": {}, "hd95": {"combine": "pooled"}, "assd": {},
+             "nsd": {"tolerance": 1.0, "surface": "voxels"}}
+scores = EF.evaluate(prediction, target, metrics=selection, num_classes=2,
+                     include_background=False, spacing=(1.5, 0.8, 0.8))
+```
+
+Each metric keeps its standalone defaults and empty-mask rules. Input layout, class selection
+and spacing are shared; different surface representations form separate calculation groups.
+Distances are reduced immediately per chunk, and no volume cache survives the call.
+
+`MetricCollection` provides the same sharing during stateful evaluation, retaining only
+detached scores and gathering them in one distributed payload:
+
+```python
+from exacta.metrics import MetricCollection
+
+metrics = MetricCollection(metrics=selection, num_classes=2, include_background=False)
+metrics.update(prediction, target, spacing=(1.5, 0.8, 0.8))
+results = metrics.compute()
+mean_hd95 = results["hd95"].mean
+metrics.reset()
+```
+
+All ranks must use identical metric order and configuration, and must call `compute()`,
+including ranks without updates. The usual sampler and aggregation rules above still apply.

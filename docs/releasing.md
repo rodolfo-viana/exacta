@@ -5,14 +5,25 @@ keep release procedures here and installation and usage instructions in the READ
 
 The manual [publishing workflow](../.github/workflows/publish.yml) runs only from `main`.
 It builds a source distribution, checks the metadata and requested version, installs that
-artifact with PyTorch 2.4.1 and NumPy 1.x, and runs the tests before publishing. Binary wheels
-are not yet part of the release workflow.
+artifact with PyTorch 2.4.1 and NumPy 1.x, and runs the tests before publishing. The reusable
+Linux wheel workflow builds and repairs manylinux_2_28 x86-64 wheels for Python 3.10, 3.11
+and the Python 3.12 stable ABI. Each wheel is tested after installation; the stable-ABI
+wheel is also tested on Python 3.13 and 3.14. Publishing waits for all these jobs.
+These wheels enter PyPI with the next release; 0.0.1a2 remains source-only.
 
 ## Branch policy
 
 Ongoing development belongs on `dev`. `main` contains releases only; do not push ordinary
 feature work there. Use Rodolfo Viana's Git identity for commits and SSH for pushes on both
 branches. Development versions may use a `.devN` suffix and are not published by this workflow.
+
+Development CI runs on `dev` pushes and pull requests targeting `dev` or `main`. It tests
+an installed sdist with Python 3.10, Torch 2.4.1 and NumPy 1.x, checks types, and builds/tests
+the same portable wheels. It never uploads to PyPI. Download wheel artifacts from the
+workflow run for pre-release installation checks. CI is CPU-only; run the CUDA and NCCL
+tests separately on suitable hardware before release. The minimum-Torch test jobs clear
+the `CI` variable to avoid a Torch 2.4 internal decomposition assertion; full-graph
+compilation tests remain enabled.
 
 ## Trusted Publisher configuration
 
