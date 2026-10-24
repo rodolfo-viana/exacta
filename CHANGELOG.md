@@ -2,6 +2,10 @@
 
 Release notes for Exacta's alpha versions.
 
+## Unreleased (`dev`)
+
+Development toward the next alpha release.
+
 ## 0.0.1a3 — 2026-10-24
 
 This release adds shared metric evaluation, masked and composed losses, deep supervision,
