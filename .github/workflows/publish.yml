@@ -1,16 +1,8 @@
 name: Publish to PyPI
 
 on:
-  push:
-    branches: [main]
-    paths: [src/exacta/__init__.py]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Exact package version to publish (must match the source)
-        required: true
-        default: 0.0.1a3
-        type: string
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -20,12 +12,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release:
+    if: github.repository == 'rodolfo-viana/exacta'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Install release validation dependency
+        run: python -m pip install build==1.6.1
+      - name: Verify the release tag, version and main history
+        id: check
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/check_release.py --ref "$GITHUB_REF" --tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
   build:
-    if: github.repository == 'rodolfo-viana/exacta' && github.ref == 'refs/heads/main'
+    needs: release
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      EXPECTED_VERSION: ${{ inputs.version }}
+      EXPECTED_VERSION: ${{ needs.release.outputs.version }}
       OMP_NUM_THREADS: "2"
       MKL_NUM_THREADS: "2"
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
@@ -58,7 +72,7 @@ jobs:
               metadata = source.extractfile(f"{archive.name.removesuffix('.tar.gz')}/PKG-INFO")
               assert metadata is not None
               message = email.message_from_bytes(metadata.read())
-          expected = os.environ["EXPECTED_VERSION"] or message["Version"]
+          expected = os.environ["EXPECTED_VERSION"]
           version = Version(expected)
           assert str(version) == expected, "Use a canonical package version"
           assert not version.is_devrelease and version.local is None, "Development versions cannot be published"
@@ -107,5 +121,5 @@ jobs:
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
 
   wheels:
-    if: github.repository == 'rodolfo-viana/exacta' && github.ref == 'refs/heads/main'
+    needs: release
     uses: ./.github/workflows/wheels.yml

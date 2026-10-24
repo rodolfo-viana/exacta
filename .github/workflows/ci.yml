@@ -2,9 +2,9 @@ name: Development CI
 
 on:
   push:
-    branches: [dev]
+    branches: ["**"]
   pull_request:
-    branches: [dev, main]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -64,7 +64,7 @@ jobs:
         run: |
           log="$RUNNER_TEMP/source-types.log"
           trap 'cat "$log"' EXIT
-          python -m mypy src/exacta > "$log" 2>&1
+          python -m mypy src/exacta scripts/check_release.py > "$log" 2>&1
       - name: Expose failure details in the check annotations
         if: failure()
         run: |

@@ -52,7 +52,7 @@ steps and 20 measured forward/backward steps, median times were:
 | Generalized Dice | 5.760 ms | 2.620 ms | 1.158 ms |
 
 On CPU, masked Dice + CE with `2×4×64³` logits took 23.432 ms eager and 11.087 ms compiled,
-using 16 threads. The [complete measurement record](https://github.com/rodolfo-viana/exacta/blob/dev/benchmarks/results/masking-2026-10-24.md)
+using 16 threads. The [complete measurement record](https://github.com/rodolfo-viana/exacta/blob/v0.0.1a3/benchmarks/results/masking-2026-10-24.md)
 includes unmasked runs, allocation measurements, environment versions, commands and limitations.
 
 ## Compiled CPU losses
@@ -81,7 +81,7 @@ cuboid cases took 6.714 ms versus 27.696 ms for separate CPU calls, and 5.659 ms
 15.260 ms for separate CUDA calls. Spacing was anisotropic and background was excluded.
 All figures are medians of 20 repetitions after five warm-ups, using 16 threads.
 
-The [measurement record](https://github.com/rodolfo-viana/exacta/blob/dev/benchmarks/results/composition-collection-2026-10-24.md)
+The [measurement record](https://github.com/rodolfo-viana/exacta/blob/v0.0.1a3/benchmarks/results/composition-collection-2026-10-24.md)
 contains the full environment, code revision, CPU results, bfloat16 runs, masked class-weighted
 CE combinations, exact commands and limitations. The scripts are `bench_losses.py` and
 `bench_collection.py`. Distributed correctness tests do not establish multi-GPU throughput;

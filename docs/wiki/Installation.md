@@ -33,12 +33,13 @@ describes test environments.
 
 ## Development checkout
 
-Use `dev` to contribute or evaluate changes beyond the published release. Shared metric
+Use `main` to evaluate merged changes beyond the published release. Create a feature branch
+from it when contributing. Shared metric
 evaluation, loss combinations, deep supervision, global distributed losses, ignored labels
 and voxel masks are included in 0.0.1a3; they do not require a development checkout.
 
 ```bash
-git clone --branch dev https://github.com/rodolfo-viana/exacta.git
+git clone --branch main https://github.com/rodolfo-viana/exacta.git
 cd exacta
 python -m pip install -e ".[test]"
 ```

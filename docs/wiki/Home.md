@@ -4,8 +4,8 @@ Exacta provides reference-validated segmentation metrics and differentiable loss
 and GPU. Its current focus is 3D medical image segmentation, including MRI anatomy and lesions.
 Definitions, empty-mask behavior and aggregation are explicit so results can be reproduced.
 
-These pages document **PyPI 0.0.1a3**. Feature development takes place on **`dev`**;
-**`main` is reserved for releases**.
+These pages document **PyPI 0.0.1a3**. Feature branches merge into **`main`**, which may
+contain newer work. Version tags preserve released snapshots.
 
 Start with the pages that match your task:
 

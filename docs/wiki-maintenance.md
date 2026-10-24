@@ -1,8 +1,9 @@
 # Maintaining the GitHub Wiki
 
 The Markdown files in `docs/wiki/` are the reviewed source for Exacta's GitHub Wiki. They
-include a home page, task guides, sidebar and footer. Develop them on `dev`; `main` remains
-reserved for releases. Publishing Wiki pages does not change the code repository's `main`.
+include a home page, task guides, sidebar and footer. Develop them alongside features on
+short-lived branches and merge into `main`. Publishing Wiki pages does not change the code
+repository's `main`. Keep the Wiki's public version aligned with the latest PyPI release.
 
 GitHub requires an initial page to be saved through its website before the Wiki can be cloned.
 If the wiki repository is unavailable, enable Wikis in the repository's settings, open
