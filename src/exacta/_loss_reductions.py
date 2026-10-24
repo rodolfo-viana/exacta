@@ -11,6 +11,17 @@ WeightType = Literal["square", "simple", "uniform"]
 EmptyTarget = Literal["zero", "uniform"]
 
 
+def masked_overlap_terms(
+    numerator: Tensor, denominator: Tensor, valid_counts: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Safe ratios and averaging scales, excluding entirely unannotated cases."""
+    active = (valid_counts > 0).unsqueeze(-1)
+    numerator = torch.where(active, numerator, 1)
+    denominator = torch.where(active, denominator, 1)
+    scale = active.to(numerator.dtype) / (active.sum() * numerator.shape[-1]).clamp_min(1)
+    return numerator, denominator, scale
+
+
 def generalized_dice_terms(
     intersection: Tensor,
     prediction: Tensor,

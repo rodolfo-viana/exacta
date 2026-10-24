@@ -2,6 +2,6 @@
 
 from exacta import components, functional, lesions, losses, metrics
 
-__version__ = "0.0.1a2"
+__version__ = "0.0.1a3.dev0"
 
 __all__ = ["components", "functional", "lesions", "losses", "metrics", "__version__"]

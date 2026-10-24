@@ -15,6 +15,7 @@ PyTorch).
 from __future__ import annotations
 
 import math
+from numbers import Integral
 from typing import Literal
 
 import torch
@@ -22,7 +23,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from exacta import _triton_losses
-from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms
+from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms, masked_overlap_terms
 
 Activation = Literal["softmax", "sigmoid", "none"]
 TargetFormat = Literal["index", "one-hot"]
@@ -40,6 +41,7 @@ class _OverlapLoss(nn.Module):
         include_background: bool = True,
         batch_dice: bool = False,
         smooth: float = 1e-5,
+        ignore_index: int | None = None,
         backend: Backend = "auto",
     ) -> None:
         super().__init__()
@@ -53,6 +55,7 @@ class _OverlapLoss(nn.Module):
         self.include_background = include_background
         self.batch_dice = batch_dice
         self.smooth = smooth
+        self.ignore_index = _check_ignore_index(ignore_index, target_format)
         self.backend = backend
 
     def _tversky_weights(self) -> tuple[float, float] | None:
@@ -61,10 +64,13 @@ class _OverlapLoss(nn.Module):
     def _generalized_config(self) -> tuple[WeightType, EmptyTarget] | None:
         return None
 
-    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+    def forward(self, input: Tensor, target: Tensor, *, mask: Tensor | None = None) -> Tensor:
+        mask = _check_mask(mask, input)
         if _use_triton(self.backend, input, target):
-            return self._fused(input, target, lambda_dice=1.0, lambda_ce=0.0, cross_entropy=False)
-        input = _upcast(input)
+            return self._fused(input, target, mask=mask, lambda_dice=1.0, lambda_ce=0.0, cross_entropy=False)
+        input, target, valid = _prepare_masked_input(
+            input, target, self.target_format, self.ignore_index, mask,
+        )
         if self.activation == "softmax":
             probs = input.softmax(1)
         elif self.activation == "sigmoid":
@@ -72,6 +78,9 @@ class _OverlapLoss(nn.Module):
         else:
             probs = input
         onehot = _one_hot(target, input, self.target_format).to(probs.dtype)
+        if valid is not None:
+            probs = torch.where(valid[:, None], probs, 0)
+            onehot = torch.where(valid[:, None], onehot, 0)
         if not self.include_background:
             if probs.shape[1] < 2:
                 raise ValueError("include_background=False needs at least 2 channels")
@@ -81,13 +90,15 @@ class _OverlapLoss(nn.Module):
             dims = (0, *dims)
         intersection = (probs * onehot).sum(dims)
         weights = self._tversky_weights()
+        valid_counts = None if valid is None else valid.flatten(1).sum(1)
+        if valid_counts is not None and self.batch_dice:
+            valid_counts = valid_counts.sum()
         if weights is not None:
             alpha, beta = weights
             fp = (probs * (1 - onehot)).sum(dims)
             fn = ((1 - probs) * onehot).sum(dims)
-            return 1 - ((intersection + self.smooth) / (
-                intersection + alpha * fp + beta * fn + self.smooth
-            )).mean()
+            return _overlap_mean(intersection + self.smooth,
+                                 intersection + alpha * fp + beta * fn + self.smooth, valid_counts)
         prediction, truth = probs.sum(dims), onehot.sum(dims)
         generalized = self._generalized_config()
         if generalized is not None:
@@ -95,15 +106,16 @@ class _OverlapLoss(nn.Module):
                 intersection, prediction, truth, weight_type=generalized[0],
                 empty_target=generalized[1], smooth=self.smooth,
             )
-            return (1 - (numerator / denominator).mean()).to(input.dtype)
+            return _overlap_mean(numerator, denominator, valid_counts).to(input.dtype)
         denominator = prediction + truth
-        return 1 - ((2 * intersection + self.smooth) / (denominator + self.smooth)).mean()
+        return _overlap_mean(2 * intersection + self.smooth, denominator + self.smooth, valid_counts)
 
     def _fused(
-        self, input: Tensor, target: Tensor, *, lambda_dice: float, lambda_ce: float, cross_entropy: bool
+        self, input: Tensor, target: Tensor, *, lambda_dice: float, lambda_ce: float, cross_entropy: bool,
+        mask: Tensor | None = None,
     ) -> Tensor:
         _check_input(input)
-        _check_fused_target(target, input, self.target_format)
+        _check_fused_target(target, input, self.target_format, masked=mask is not None or self.ignore_index is not None)
         if not self.include_background and input.shape[1] < 2:
             raise ValueError("include_background=False needs at least 2 channels")
         return _triton_losses.seg_loss(
@@ -119,6 +131,8 @@ class _OverlapLoss(nn.Module):
             cross_entropy=cross_entropy,
             tversky=self._tversky_weights(),
             generalized=self._generalized_config(),
+            mask=mask,
+            ignore_index=self.ignore_index,
         )
 
 
@@ -132,6 +146,13 @@ class DiceLoss(_OverlapLoss):
     ``"one-hot"`` (also accepts soft labels). ``smooth=1e-5`` adds the same nonnegative value
     to numerator and denominator, matching MONAI's equal ``smooth_nr`` and ``smooth_dr``.
     ``backend`` selects ``"auto"``, ``"torch"`` or ``"triton"``.
+
+    ``ignore_index`` excludes that integer label. All losses also accept a keyword-only
+    boolean ``mask`` of shape ``(B, *spatial)`` or ``(B, 1, *spatial)`` in forward; True
+    includes a voxel. Both exclusions combine. Excluded values have zero gradient, including
+    nonfinite logits or soft targets there. Entirely ignored cases are omitted from overlap
+    averages; an entirely ignored batch returns differentiable zero, also with smooth=0.
+    An annotated but empty foreground remains governed by the ordinary loss definition.
     """
 
 
@@ -155,11 +176,12 @@ class TverskyLoss(_OverlapLoss):
         include_background: bool = True,
         batch_dice: bool = False,
         smooth: float = 1e-5,
+        ignore_index: int | None = None,
         backend: Backend = "auto",
     ) -> None:
         super().__init__(
             activation=activation, target_format=target_format, include_background=include_background,
-            batch_dice=batch_dice, smooth=smooth, backend=backend,
+            batch_dice=batch_dice, smooth=smooth, ignore_index=ignore_index, backend=backend,
         )
         _nonnegative_finite("alpha", alpha)
         _nonnegative_finite("beta", beta)
@@ -201,11 +223,12 @@ class GeneralizedDiceLoss(_OverlapLoss):
         include_background: bool = True,
         batch_dice: bool = False,
         smooth: float = 1e-5,
+        ignore_index: int | None = None,
         backend: Backend = "auto",
     ) -> None:
         super().__init__(
             activation=activation, target_format=target_format, include_background=include_background,
-            batch_dice=batch_dice, smooth=smooth, backend=backend,
+            batch_dice=batch_dice, smooth=smooth, ignore_index=ignore_index, backend=backend,
         )
         if weight_type not in ("square", "simple", "uniform"):
             raise ValueError("weight_type must be 'square', 'simple' or 'uniform'")
@@ -230,7 +253,8 @@ class FocalLoss(nn.Module):
     a scalar in [0, 1] weights positive sigmoid labels by alpha and negatives by 1-alpha.
     For softmax it weights background (channel 0) by 1-alpha and each foreground class by
     alpha. Every channel participates. With ``gamma=0, alpha=None`` this is ordinary CE/BCE.
-    Target formats and backends follow :class:`DiceLoss`.
+    Target formats, masking and backends follow :class:`DiceLoss`. With exclusions, average
+    over included voxels (and channels for sigmoid); fully ignored batches return zero.
     """
 
     def __init__(
@@ -240,6 +264,7 @@ class FocalLoss(nn.Module):
         target_format: TargetFormat = "index",
         gamma: float = 2.0,
         alpha: float | None = None,
+        ignore_index: int | None = None,
         backend: Backend = "auto",
     ) -> None:
         super().__init__()
@@ -252,16 +277,20 @@ class FocalLoss(nn.Module):
             raise ValueError("alpha must be None or a finite number in [0, 1]")
         self.activation, self.target_format = activation, target_format
         self.gamma, self.alpha, self.backend = gamma, alpha, backend
+        self.ignore_index = _check_ignore_index(ignore_index, target_format)
 
-    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+    def forward(self, input: Tensor, target: Tensor, *, mask: Tensor | None = None) -> Tensor:
+        mask = _check_mask(mask, input)
         if _use_triton(self.backend, input, target):
             _check_input(input)
-            _check_fused_target(target, input, self.target_format)
+            _check_fused_target(target, input, self.target_format, masked=mask is not None or self.ignore_index is not None)
             return _triton_losses.focal_loss(
                 input, target, activation=self.activation, one_hot=self.target_format == "one-hot",
-                gamma=self.gamma, alpha=self.alpha,
+                gamma=self.gamma, alpha=self.alpha, mask=mask, ignore_index=self.ignore_index,
             )
-        input = _upcast(input)
+        input, target, valid = _prepare_masked_input(
+            input, target, self.target_format, self.ignore_index, mask,
+        )
         truth = _one_hot(target, input, self.target_format).to(input.dtype)
         if self.activation == "softmax":
             logp = input.log_softmax(1)
@@ -280,14 +309,14 @@ class FocalLoss(nn.Module):
                     input.new_tensor(1 - self.alpha), input.new_tensor(self.alpha),
                 )
                 terms = terms * weights.reshape(1, -1, *([1] * (input.ndim - 2)))
-            return terms.sum(1).mean()
+            return _voxel_mean(terms.sum(1), valid, channels=1)
         pos = F.logsigmoid(input)
         neg = F.logsigmoid(-input)
         positive = -truth * (self.gamma * neg).exp() * pos
         negative = -(1 - truth) * (self.gamma * pos).exp() * neg
         if self.alpha is not None:
             positive, negative = self.alpha * positive, (1 - self.alpha) * negative
-        return (positive + negative).mean()
+        return _voxel_mean(positive + negative, valid, channels=input.shape[1])
 
 
 class DiceCELoss(nn.Module):
@@ -295,7 +324,8 @@ class DiceCELoss(nn.Module):
 
     CE is cross-entropy with ``activation="softmax"`` and binary cross-entropy with
     ``"sigmoid"``. It always covers every class, whatever ``include_background`` says (as in
-    MONAI's ``DiceCELoss``). Other arguments as in :class:`DiceLoss`.
+    MONAI's ``DiceCELoss``). With exclusions, CE averages included voxels (and channels for
+    sigmoid). Other arguments as in :class:`DiceLoss`.
     """
 
     def __init__(
@@ -308,6 +338,7 @@ class DiceCELoss(nn.Module):
         smooth: float = 1e-5,
         lambda_dice: float = 1.0,
         lambda_ce: float = 1.0,
+        ignore_index: int | None = None,
         backend: Backend = "auto",
     ) -> None:
         super().__init__()
@@ -319,27 +350,99 @@ class DiceCELoss(nn.Module):
             include_background=include_background,
             batch_dice=batch_dice,
             smooth=smooth,
+            ignore_index=ignore_index,
             backend=backend,
         )
         self.lambda_dice = lambda_dice
         self.lambda_ce = lambda_ce
 
-    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+    def forward(self, input: Tensor, target: Tensor, *, mask: Tensor | None = None) -> Tensor:
+        mask = _check_mask(mask, input)
         if _use_triton(self.dice.backend, input, target):
             return self.dice._fused(
-                input, target, lambda_dice=self.lambda_dice, lambda_ce=self.lambda_ce, cross_entropy=True
+                input, target, mask=mask, lambda_dice=self.lambda_dice, lambda_ce=self.lambda_ce, cross_entropy=True
             )
-        dice = self.dice(input, target)
-        input = _upcast(input)
+        dice = self.dice(input, target, mask=mask)
+        input, target, valid = _prepare_masked_input(
+            input, target, self.dice.target_format, self.dice.ignore_index, mask,
+        )
+        reduction = "mean" if valid is None else "none"
         if self.dice.activation == "sigmoid":
             onehot = _one_hot(target, input, self.dice.target_format).to(input.dtype)
-            ce = F.binary_cross_entropy_with_logits(input, onehot)
+            ce = F.binary_cross_entropy_with_logits(input, onehot, reduction=reduction)
         elif self.dice.target_format == "index":
             _check_index_target(target, input)
-            ce = F.cross_entropy(input, target.long())
+            ce = F.cross_entropy(input, target.long(), reduction=reduction)
         else:
-            ce = F.cross_entropy(input, _one_hot(target, input, "one-hot").to(input.dtype))
+            ce = F.cross_entropy(input, _one_hot(target, input, "one-hot").to(input.dtype), reduction=reduction)
+        if valid is not None:
+            ce = _voxel_mean(ce, valid, channels=input.shape[1] if self.dice.activation == "sigmoid" else 1)
         return self.lambda_dice * dice + self.lambda_ce * ce
+
+
+def _overlap_mean(numerator: Tensor, denominator: Tensor, valid_counts: Tensor | None) -> Tensor:
+    if valid_counts is None:
+        return 1 - (numerator / denominator).mean()
+    numerator, denominator, scale = masked_overlap_terms(numerator, denominator, valid_counts)
+    return ((1 - numerator / denominator) * scale).sum()
+
+
+def _voxel_mean(terms: Tensor, valid: Tensor | None, *, channels: int) -> Tensor:
+    if valid is None:
+        return terms.mean()
+    included = valid[:, None] if terms.ndim == valid.ndim + 1 else valid
+    return torch.where(included, terms, 0).sum() / (valid.sum() * channels).clamp_min(1)
+
+
+def _check_ignore_index(ignore_index: int | None, target_format: TargetFormat) -> int | None:
+    if ignore_index is None:
+        return None
+    if isinstance(ignore_index, bool) or not isinstance(ignore_index, Integral):
+        raise TypeError("ignore_index must be an integer or None")
+    if not -(2**63) <= ignore_index < 2**63:
+        raise ValueError("ignore_index must fit in a signed 64-bit integer")
+    if target_format != "index":
+        raise ValueError("ignore_index requires target_format='index'; use mask for one-hot targets")
+    return int(ignore_index)
+
+
+def _check_mask(mask: Tensor | None, input: Tensor) -> Tensor | None:
+    if mask is None:
+        return None
+    _check_input(input)
+    if not isinstance(mask, Tensor) or mask.dtype != torch.bool:
+        raise TypeError("mask must be a boolean tensor")
+    if mask.device != input.device:
+        raise ValueError("mask and input must be on the same device")
+    shape = (input.shape[0], *input.shape[2:])
+    if mask.shape == (input.shape[0], 1, *input.shape[2:]):
+        mask = mask[:, 0]
+    if mask.shape != shape:
+        raise ValueError(f"mask must have shape {shape} or {(input.shape[0], 1, *input.shape[2:])}")
+    return mask
+
+
+def _prepare_masked_input(
+    input: Tensor, target: Tensor, target_format: TargetFormat, ignore_index: int | None,
+    mask: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor | None]:
+    input = _upcast(input)
+    valid = mask
+    if ignore_index is not None:
+        _check_index_target(target, input)
+        # Widen before scalar comparison: e.g. uint8 would wrap ignore_index=256 to label 0.
+        keep = target.long() != ignore_index
+        valid = keep if valid is None else valid & keep
+    if valid is None:
+        return input, target, None
+    if target_format == "index":
+        _check_index_target(target, input)
+        target = torch.where(valid, target, 0)
+    else:
+        target = _one_hot(target, input, target_format)  # Validate shape/device before broadcasting.
+        target = torch.where(valid[:, None], target, 0)
+    # Sanitize before activation: masking NaN afterward would still poison its backward.
+    return torch.where(valid[:, None], input, 0), target, valid
 
 
 def _check_backend(backend: str) -> None:
@@ -357,10 +460,10 @@ def _nonnegative_finite(name: str, value: float) -> None:
         raise ValueError(f"{name} must be finite and nonnegative, got {value!r}")
 
 
-def _check_fused_target(target: Tensor, input: Tensor, target_format: TargetFormat) -> None:
+def _check_fused_target(target: Tensor, input: Tensor, target_format: TargetFormat, *, masked: bool = False) -> None:
     if target_format == "index":
         _check_index_target(target, input)
-        if not torch.compiler.is_compiling():
+        if not masked and not torch.compiler.is_compiling():
             # Eager execution raises. Compiled kernels avoid a host sync and return NaN instead.
             _check_index_values(target, input.shape[1])
     else:
