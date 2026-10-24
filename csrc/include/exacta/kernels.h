@@ -155,6 +155,15 @@ int exacta_mesh_elements_f64(const uint8_t *code, const int64_t *shape, int ndim
                              double *centres, int64_t *block, int64_t *element_code,
                              int64_t *slot, int num_threads);
 
+/* out[i] = values[i] != 0 for `n` values, as bytes. Returns EXACTA_INVALID_ARGUMENT if a value
+ * is neither 0 nor 1 (NaN included); `out` is then still written.
+ */
+int exacta_binary_mask_u8(const uint8_t *values, int64_t n, uint8_t *out, int num_threads);
+int exacta_binary_mask_i32(const int32_t *values, int64_t n, uint8_t *out, int num_threads);
+int exacta_binary_mask_i64(const int64_t *values, int64_t n, uint8_t *out, int num_threads);
+int exacta_binary_mask_f32(const float *values, int64_t n, uint8_t *out, int num_threads);
+int exacta_binary_mask_f64(const double *values, int64_t n, uint8_t *out, int num_threads);
+
 #ifdef __cplusplus
 }
 #endif

@@ -4,6 +4,7 @@
 // channel_counts: per channel of two stacks of binary masks, |P & T|, |P| and |T|.
 // label_overlap: sizes of the labels of two label maps, and counts of the label pairs that meet.
 // histogram: elements of each value of a label map.
+// binary_mask: a 0/1 array as bytes, checking that it is 0/1.
 // All validate as they count (labels in range, masks binary), so the caller needs no extra pass.
 
 #include <algorithm>
@@ -213,7 +214,35 @@ int histogram(const std::int32_t *values, std::int64_t n, std::int64_t bins, std
   return out_of_range ? EXACTA_INVALID_ARGUMENT : EXACTA_OK;
 }
 
+template <typename T>
+int binary_mask(const T *values, std::int64_t n, std::uint8_t *out, int num_threads) {
+  bool not_binary = false;
+#pragma omp parallel for num_threads(threads_for(num_threads)) schedule(static) \
+    reduction(|| : not_binary)
+  for (std::int64_t i = 0; i < n; ++i) {
+    const T v = values[i];
+    if (v != T(0) && v != T(1)) not_binary = true;  // NaN included
+    out[i] = v != T(0);
+  }
+  return not_binary ? EXACTA_INVALID_ARGUMENT : EXACTA_OK;
+}
+
 }  // namespace
+
+#define EXACTA_BINARY_MASK(SUFFIX, TYPE)                                                       \
+  extern "C" int exacta_binary_mask_##SUFFIX(const TYPE *values, int64_t n, uint8_t *out,     \
+                                             int num_threads) {                               \
+    if (n < 0 || (n > 0 && (values == nullptr || out == nullptr))) {                          \
+      return EXACTA_INVALID_ARGUMENT;                                                          \
+    }                                                                                          \
+    return binary_mask(values, n, out, num_threads);                                           \
+  }
+
+EXACTA_BINARY_MASK(u8, uint8_t)
+EXACTA_BINARY_MASK(i32, int32_t)
+EXACTA_BINARY_MASK(i64, int64_t)
+EXACTA_BINARY_MASK(f32, float)
+EXACTA_BINARY_MASK(f64, double)
 
 extern "C" int exacta_histogram_i32(const int32_t *values, int64_t n, int64_t bins, int64_t *out,
                                     int num_threads) {

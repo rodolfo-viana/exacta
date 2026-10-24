@@ -149,6 +149,21 @@ def confusion(pred: Tensor, target: Tensor, classes: int) -> Tensor | None:
     return out if ok else None
 
 
+_BINARY_DTYPES = (torch.uint8, torch.int32, torch.int64, torch.float32, torch.float64)
+
+
+def binary_mask(values: Tensor) -> Tensor | None:
+    """``values != 0`` (bool) of a CPU tensor, in one parallel pass that also checks the values are
+    0 or 1; None if one is not. Dtypes without a kernel are converted first."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    if values.dtype not in _BINARY_DTYPES:
+        values = values.to(torch.float64 if values.dtype.is_floating_point else torch.int64)
+    out = torch.empty(values.shape, dtype=torch.bool)
+    ok = _C.binary_mask(values.contiguous().reshape(-1), out.view(torch.uint8).reshape(-1))
+    return out if ok else None
+
+
 def sort_pairs(keys: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
     """Copies of two float64 arrays with their (key, value) pairs sorted by key, then by value, as
     ``np.lexsort((values, keys))`` orders them; parallel. None if one is NaN."""

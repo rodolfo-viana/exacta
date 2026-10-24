@@ -77,6 +77,38 @@ void edt_1d(const double *f, double fmax, double *d, std::int64_t n, double h, s
   }
 }
 
+// The first transformed axis sees only 0 (feature) and +inf, where the lower envelope reduces to
+// the nearest feature p along the axis and the value (h * (q - p))^2: the minimum over features,
+// since rounding is monotonic. Two sweeps find it, row by row of the trailing axes, so the
+// memory is read in order. `outer` images of n x inner elements; columns [c0, c1) of one.
+void first_axis(const std::uint8_t *features, double *out, std::int64_t n, std::int64_t inner,
+                std::int64_t image, std::int64_t c0, std::int64_t c1, double h) {
+  const std::int64_t base = image * n * inner;
+  for (std::int64_t i = 0; i < n; ++i) {  // index distance to the nearest feature above
+    const std::int64_t row = base + i * inner;
+    for (std::int64_t c = c0; c < c1; ++c) {
+      out[row + c] = features[row + c] ? 0.0 : (i == 0 ? kInf : out[row - inner + c] + 1.0);
+    }
+  }
+  for (std::int64_t i = n - 2; i >= 0; --i) {  // or below
+    const std::int64_t row = base + i * inner;
+    for (std::int64_t c = c0; c < c1; ++c) {
+      out[row + c] = std::min(out[row + c], out[row + inner + c] + 1.0);
+    }
+  }
+  for (std::int64_t i = 0; i < n; ++i) {  // h * (q - p) rounds once, as in edt_1d
+    const std::int64_t row = base + i * inner;
+    for (std::int64_t c = c0; c < c1; ++c) {
+      const double dx = h * out[row + c];
+      out[row + c] = dx * dx;
+    }
+  }
+}
+
+// Lines along an axis are transformed in groups of adjacent ones (consecutive offsets within the
+// stride), so that gathering and scattering read and write whole cache lines.
+constexpr std::int64_t kGroup = 8;
+
 int edt_sq(const std::uint8_t *features, double *out, const std::int64_t *shape, int ndim,
            int batch_ndim, const double *spacing, int num_threads) {
   std::int64_t total = 1;
@@ -93,43 +125,69 @@ int edt_sq(const std::uint8_t *features, double *out, const std::int64_t *shape,
 #else
   (void)num_threads;
 #endif
-
+  if (batch_ndim == ndim) {  // no spatial axes: every element is its own image
 #pragma omp parallel for num_threads(threads) schedule(static)
-  for (std::int64_t i = 0; i < total; ++i) out[i] = features[i] ? 0.0 : kInf;
+    for (std::int64_t i = 0; i < total; ++i) out[i] = features[i] ? 0.0 : kInf;
+    return EXACTA_OK;
+  }
+
+  // Axes are transformed in order, so squared offsets add up in axis order, as SciPy sums them.
+  std::int64_t stride = total;
+  for (int axis = 0; axis <= batch_ndim; ++axis) stride /= shape[axis];
+  {
+    const std::int64_t n = shape[batch_ndim], images = total / (n * stride);
+    // Ranges of 64 columns: the three sweeps over a range then stay in the core's cache.
+    const std::int64_t width = 64;
+    const std::int64_t ranges = (stride + width - 1) / width;
+#pragma omp parallel for num_threads(threads) schedule(static)
+    for (std::int64_t task = 0; task < images * ranges; ++task) {
+      const std::int64_t c0 = task % ranges * width;
+      first_axis(features, out, n, stride, task / ranges, c0, std::min(stride, c0 + width),
+                 spacing[0]);
+    }
+  }
 
   // Per-thread line buffers, allocated once so no allocation happens inside parallel regions.
-  std::vector<double> f_buf(threads * max_n), d_buf(threads * max_n), z_buf(threads * (max_n + 1));
+  std::vector<double> f_buf(threads * kGroup * max_n), d_buf(threads * max_n);
+  std::vector<double> z_buf(threads * (max_n + 1));
   std::vector<std::int64_t> v_buf(threads * max_n);
 
-  std::int64_t stride = total;
-  for (int axis = 0; axis < ndim; ++axis) {
+  for (int axis = batch_ndim + 1; axis < ndim; ++axis) {
     const std::int64_t n = shape[axis];
     stride /= n;  // C order: stride of `axis` is the product of the trailing extents
-    if (axis < batch_ndim) continue;  // batch axes separate images; nothing to transform
-    const std::int64_t lines = total / n;
+    const std::int64_t groups_per_slab = (stride + kGroup - 1) / kGroup;
+    const std::int64_t groups = total / (n * stride) * groups_per_slab;
     const double h = spacing[axis - batch_ndim];
-
 #pragma omp parallel num_threads(threads)
     {
       int tid = 0;
 #ifdef _OPENMP
       tid = omp_get_thread_num();
 #endif
-      double *f = f_buf.data() + tid * max_n;
+      double *f = f_buf.data() + tid * kGroup * max_n;
       double *d = d_buf.data() + tid * max_n;
       double *z = z_buf.data() + tid * (max_n + 1);
       std::int64_t *v = v_buf.data() + tid * max_n;
 
 #pragma omp for schedule(static)
-      for (std::int64_t line = 0; line < lines; ++line) {
-        const std::int64_t base = (line / stride) * n * stride + line % stride;
-        double fmax = 0.0;
+      for (std::int64_t group = 0; group < groups; ++group) {
+        const std::int64_t c0 = group % groups_per_slab * kGroup;
+        const std::int64_t width = std::min(kGroup, stride - c0);
+        const std::int64_t base = group / groups_per_slab * n * stride + c0;
         for (std::int64_t i = 0; i < n; ++i) {
-          f[i] = out[base + i * stride];
-          if (f[i] != kInf) fmax = std::max(fmax, f[i]);
+          for (std::int64_t b = 0; b < width; ++b) f[b * n + i] = out[base + i * stride + b];
         }
-        edt_1d(f, fmax, d, n, h, v, z);
-        for (std::int64_t i = 0; i < n; ++i) out[base + i * stride] = d[i];
+        for (std::int64_t b = 0; b < width; ++b) {
+          double fmax = 0.0;
+          for (std::int64_t i = 0; i < n; ++i) {
+            if (f[b * n + i] != kInf) fmax = std::max(fmax, f[b * n + i]);
+          }
+          edt_1d(f + b * n, fmax, d, n, h, v, z);
+          std::copy(d, d + n, f + b * n);
+        }
+        for (std::int64_t i = 0; i < n; ++i) {
+          for (std::int64_t b = 0; b < width; ++b) out[base + i * stride + b] = f[b * n + i];
+        }
       }
     }
   }

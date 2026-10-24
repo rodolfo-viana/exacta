@@ -192,12 +192,16 @@ def _check_index(pred: Tensor, target: Tensor, num_classes: int | None, check_va
 def _binary(x: Tensor, name: str) -> Tensor:
     if x.dtype == torch.bool:
         return x
-    if x.numel() and bool(((x != 0) & (x != 1)).any()):
+    if x.device.type == "cpu" and _native.available():  # one multithreaded pass
+        mask = _native.binary_mask(x)
+    else:
+        mask = None if x.numel() and bool(((x != 0) & (x != 1)).any()) else x != 0
+    if mask is None:
         raise ValueError(
             f"{name} must be binary (0/1) per channel with input_format='one-hot'; "
             "threshold probabilities first"
         )
-    return x != 0
+    return mask
 
 
 def as_spacing(spacing: Any, *, batch: int, ndim: int) -> list[tuple[float, ...]]:

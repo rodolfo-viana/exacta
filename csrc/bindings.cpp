@@ -151,6 +151,23 @@ bool channel_counts(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_con
 using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
 using Indices = nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
 
+// Returns false when a value is neither 0 nor 1.
+template <typename T, int (*Kernel)(const T *, int64_t, uint8_t *, int)>
+bool binary_mask(Flat<T> values, nb::ndarray<std::uint8_t, nb::ndim<1>, nb::device::cpu,
+                                             nb::c_contig> out, int num_threads) {
+  if (out.shape(0) != values.shape(0)) throw std::invalid_argument("values and out differ in size");
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = Kernel(values.data(), static_cast<std::int64_t>(values.shape(0)), out.data(),
+                    num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT) {
+    throw std::runtime_error(exacta_status_string(status));
+  }
+  return status == EXACTA_OK;
+}
+
 // Returns false when a key or value is NaN.
 bool sort_pairs(nb::ndarray<double, nb::ndim<1>, nb::device::cpu, nb::c_contig> keys,
                 nb::ndarray<double, nb::ndim<1>, nb::device::cpu, nb::c_contig> values,
@@ -408,6 +425,19 @@ NB_MODULE(_C, m) {
   m.def("channel_counts", &channel_counts<float, exacta_channel_counts_f32>, nb::arg("pred"),
         nb::arg("target"), nb::arg("both"), nb::arg("in_pred"), nb::arg("in_target"),
         nb::arg("num_threads") = 0, counts_doc);
+  const char *binary_doc =
+      "Write into `out` (uint8, (N,)) whether each of `values` (N,) is nonzero; returns False if "
+      "one is neither 0 nor 1.";
+  m.def("binary_mask", &binary_mask<std::uint8_t, exacta_binary_mask_u8>, nb::arg("values"),
+        nb::arg("out"), nb::arg("num_threads") = 0, binary_doc);
+  m.def("binary_mask", &binary_mask<std::int32_t, exacta_binary_mask_i32>, nb::arg("values"),
+        nb::arg("out"), nb::arg("num_threads") = 0, binary_doc);
+  m.def("binary_mask", &binary_mask<std::int64_t, exacta_binary_mask_i64>, nb::arg("values"),
+        nb::arg("out"), nb::arg("num_threads") = 0, binary_doc);
+  m.def("binary_mask", &binary_mask<float, exacta_binary_mask_f32>, nb::arg("values"),
+        nb::arg("out"), nb::arg("num_threads") = 0, binary_doc);
+  m.def("binary_mask", &binary_mask<double, exacta_binary_mask_f64>, nb::arg("values"),
+        nb::arg("out"), nb::arg("num_threads") = 0, binary_doc);
   m.def("sort_pairs", &sort_pairs, nb::arg("keys"), nb::arg("values"), nb::arg("num_threads") = 0,
         "Sort the float64 pairs (keys[i], values[i]) in place by key, then value; returns False "
         "(arrays untouched) if one is NaN.");
