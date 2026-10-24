@@ -90,6 +90,11 @@ def test_all_features_is_zero(edt_sq):
     assert (got == 0).all()
 
 
+@pytest.mark.parametrize("edt_sq", [_native.edt_sq, _edt_sq_torch])
+def test_empty_array(edt_sq):
+    assert edt_sq(torch.zeros(0, 5, dtype=torch.bool), (1.0, 2.0)).shape == (0, 5)
+
+
 def test_single_thread_matches_default():
     features = torch.rand(20, 30, 40) < 0.01
     single = torch.empty(features.shape, dtype=torch.float64)

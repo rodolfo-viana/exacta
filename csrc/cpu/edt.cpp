@@ -67,8 +67,12 @@ void edt_1d(const double *f, double fmax, double *d, std::int64_t n, double h, s
     const double xq = h * static_cast<double>(q);
     while (z[j + 1] < xq) ++j;
     double best = parabola(q, v[j]);
-    for (std::int64_t i = j - 1; i >= 0 && z[i + 1] >= xq - tol; --i) best = std::min(best, parabola(q, v[i]));
-    for (std::int64_t i = j + 1; i <= k && z[i] <= xq + tol; ++i) best = std::min(best, parabola(q, v[i]));
+    for (std::int64_t i = j - 1; i >= 0 && z[i + 1] >= xq - tol; --i) {
+      best = std::min(best, parabola(q, v[i]));
+    }
+    for (std::int64_t i = j + 1; i <= k && z[i] <= xq + tol; ++i) {
+      best = std::min(best, parabola(q, v[i]));
+    }
     d[q] = best;
   }
 }
@@ -148,14 +152,16 @@ extern "C" const char *exacta_status_string(int status) {
 
 extern "C" int exacta_edt_sq_f64(const uint8_t *features, double *out, const int64_t *shape,
                                  int ndim, const double *spacing, int num_threads) {
-  if (features == nullptr || out == nullptr || shape == nullptr || spacing == nullptr || ndim < 1) {
-    return EXACTA_INVALID_ARGUMENT;
-  }
+  if (shape == nullptr || spacing == nullptr || ndim < 1) return EXACTA_INVALID_ARGUMENT;
+  bool empty = false;
   for (int axis = 0; axis < ndim; ++axis) {
     if (shape[axis] < 0 || !(spacing[axis] > 0.0) || !std::isfinite(spacing[axis])) {
       return EXACTA_INVALID_ARGUMENT;
     }
+    empty = empty || shape[axis] == 0;
   }
+  if (empty) return EXACTA_OK;  // the data pointers of an empty array may be null
+  if (features == nullptr || out == nullptr) return EXACTA_INVALID_ARGUMENT;
   try {
     return edt_sq(features, out, shape, ndim, spacing, num_threads);
   } catch (const std::bad_alloc &) {

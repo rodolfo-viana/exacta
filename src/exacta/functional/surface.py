@@ -438,6 +438,8 @@ def _edt_sq_torch(features: Tensor, spacing: Sequence[float]) -> Tensor:
     """
     out = torch.zeros(features.shape, dtype=torch.float64, device=features.device)
     out.masked_fill_(~features, math.inf)
+    if out.numel() == 0:
+        return out
     for axis, h in enumerate(spacing):
         n = out.shape[axis]
         lines = out.movedim(axis, -1)
