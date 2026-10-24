@@ -30,6 +30,7 @@ jobs:
           python-version: "3.10"
       - name: Build and test an installed sdist with minimum dependencies
         run: |
+          exec > >(tee source-test.log) 2>&1
           python -m pip install build==1.6.1 twine==7.0.0 mypy
           python -m build --sdist
           python -m twine check --strict dist/*
@@ -38,6 +39,17 @@ jobs:
           python -c 'import exacta, exacta._C; print(exacta.__file__, exacta._C.__file__)'
           python -m pytest -q
           python -m mypy src/exacta
+      - name: Expose failure details in the check annotations
+        if: failure()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          log = Path("source-test.log")
+          if log.exists():
+              message = "\n".join(log.read_text()[-12000:].splitlines()[-80:])
+              message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=Source build or test failure::{message}")
+          PY
 
   wheels:
     uses: ./.github/workflows/wheels.yml
