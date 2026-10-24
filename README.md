@@ -44,6 +44,12 @@ EF.hd95(pred_np, target_np, spacing=(1.5, 0.8, 0.8), num_classes=4)  # -> np.nda
 EF.hd95(pred, target, spacing=s, num_classes=4, combine="pooled")    # MedPy's hd95
 EF.assd(pred, target, spacing=s, num_classes=4, combine="mean")      # MedPy 0.4's assd
 EF.nsd(pred, target, spacing=s, num_classes=4, tolerance=1.0, surface="surfels")  # DeepMind's NSD
+
+# Connected components of one binary image (no batch or channel axis)
+from exacta import components
+labels, count = components.label(mask, connectivity=3)        # numbered exactly as scipy.ndimage.label
+kept = components.largest(mask, connectivity=3)                # e.g. nnU-Net-style post-processing
+cleaned = components.remove_small(mask, 50, connectivity=1)    # drop components under 50 voxels
 ```
 
 ## Conventions
@@ -61,14 +67,15 @@ Each convention is an explicit argument, because this is where libraries disagre
 | Class absent from both | `both_empty`, default NaN (skipped when averaging). |
 | Class absent from one | Dice/IoU give 0. Distance metrics give `one_empty`: default `inf` for HD/ASSD, 0 for NSD. |
 | Aggregation | Per case, then the NaN-ignoring mean over cases, then over classes. |
+| Connectivity | Required for connected components: 1 = faces (6 neighbours in 3-D, SciPy's default), 2 = and edges (18), 3 = and corners (26, MONAI's default). |
 
 ## Architecture
 
 - Pure PyTorch for anything that reduces to tensor operations (most losses and overlap metrics).
   Overlap metrics on label maps use a single confusion-matrix pass, so memory does not grow
   with the number of classes.
-- Compiled kernels (`csrc/`) for algorithms that don't, such as the exact Euclidean distance
-  transform behind HD95, ASSD and NSD. Kernels sit behind a plain C interface and receive arrays through
+- Compiled kernels (`csrc/`) for algorithms that don't: the exact Euclidean distance transform
+  behind HD95, ASSD and NSD, and run-based connected-component labelling. Kernels sit behind a plain C interface and receive arrays through
   DLPack, so the compiled extension never links against PyTorch and one wheel works across
   PyTorch versions.
 - On GPU, distance metrics currently use an exact distance transform written in PyTorch

@@ -1,0 +1,127 @@
+import numpy as np
+import pytest
+import torch
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from hypothesis.extra.numpy import array_shapes, arrays
+from scipy import ndimage
+
+from exacta import components
+
+
+def _scipy_label(mask, connectivity):
+    return ndimage.label(mask, ndimage.generate_binary_structure(mask.ndim, connectivity))
+
+
+@pytest.mark.parametrize("shape", [(200,), (37, 41), (17, 23, 29), (1, 9, 1)])
+@pytest.mark.parametrize("density", [0.05, 0.3, 0.6])
+def test_label_matches_scipy(shape, density):
+    mask = np.random.default_rng(0).random(shape) < density
+    for connectivity in range(1, len(shape) + 1):
+        expected, n = _scipy_label(mask, connectivity)
+        got, count = components.label(mask, connectivity=connectivity)
+        assert count == n
+        assert got.dtype == np.int32
+        np.testing.assert_array_equal(got, expected)
+
+
+@settings(max_examples=300, deadline=None)
+@given(arrays(np.bool_, array_shapes(min_dims=1, max_dims=3, min_side=0, max_side=9)), st.data())
+def test_label_matches_scipy_on_random_masks(mask, data):
+    connectivity = data.draw(st.integers(1, mask.ndim))
+    expected, n = _scipy_label(mask, connectivity)
+    got, count = components.label(mask, connectivity=connectivity)
+    assert count == n
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_numbering_follows_first_element_in_c_order():
+    mask = np.array(
+        [
+            [0, 0, 0, 1],
+            [1, 0, 0, 1],
+            [1, 0, 1, 0],
+        ]
+    )
+    labels, count = components.label(mask, connectivity=1)
+    # the right-hand component starts at (0, 3), before the left one at (1, 0)
+    np.testing.assert_array_equal(labels, [[0, 0, 0, 1], [2, 0, 0, 1], [2, 0, 3, 0]])
+    assert count == 3
+    labels, count = components.label(mask, connectivity=2)  # (2, 2) now touches (1, 3)
+    np.testing.assert_array_equal(labels, [[0, 0, 0, 1], [2, 0, 0, 1], [2, 0, 1, 0]])
+    assert count == 2
+
+
+def test_u_shape_merges_into_the_first_label():
+    # Two arms that start as separate provisional labels and meet at the bottom.
+    mask = np.zeros((5, 5), bool)
+    mask[:, 0] = mask[:, 4] = mask[4] = True
+    labels, count = components.label(mask, connectivity=1)
+    assert count == 1
+    assert set(np.unique(labels)) == {0, 1}
+
+
+def test_empty_full_and_zero_size():
+    labels, count = components.label(np.zeros((4, 5, 6), bool), connectivity=1)
+    assert count == 0 and not labels.any()
+    labels, count = components.label(np.ones((4, 5, 6), bool), connectivity=1)
+    assert count == 1 and (labels == 1).all()
+    labels, count = components.label(np.zeros((0, 5), bool), connectivity=2)
+    assert count == 0 and labels.shape == (0, 5)
+
+
+def test_nonzero_is_foreground():
+    mask = np.array([0.0, 0.5, -2.0, 0.0, 3.0])
+    labels, count = components.label(mask, connectivity=1)
+    np.testing.assert_array_equal(labels, [0, 1, 1, 0, 2])
+    assert count == 2
+
+
+def test_keeps_array_library_and_device(device):
+    mask = torch.from_numpy(np.random.default_rng(1).random((12, 13, 14)) < 0.4).to(device)
+    labels, count = components.label(mask, connectivity=3)
+    assert isinstance(labels, torch.Tensor) and labels.device.type == device.type
+    expected, n = _scipy_label(mask.cpu().numpy(), 3)
+    assert count == n
+    np.testing.assert_array_equal(labels.cpu().numpy(), expected)
+    assert components.largest(mask, connectivity=1).device.type == device.type
+    assert components.remove_small(mask, 3, connectivity=1).device.type == device.type
+
+
+@pytest.mark.parametrize("connectivity", [1, 2, 3])
+def test_largest_matches_reference(connectivity):
+    mask = np.random.default_rng(2).random((20, 22, 24)) < 0.3
+    labels, n = _scipy_label(mask, connectivity)
+    sizes = np.bincount(labels.ravel())
+    expected = labels == 1 + np.argmax(sizes[1:])
+    got = components.largest(mask, connectivity=connectivity)
+    assert got.dtype == np.bool_
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_largest_ties_go_to_the_first_component():
+    mask = np.array([1, 1, 0, 1, 1, 0, 1])
+    np.testing.assert_array_equal(components.largest(mask, connectivity=1), [1, 1, 0, 0, 0, 0, 0])
+    assert not components.largest(np.zeros((3, 3)), connectivity=2).any()
+
+
+@pytest.mark.parametrize("min_size", [0, 1, 2, 5, 50, 10**6])
+def test_remove_small_matches_reference(min_size):
+    mask = np.random.default_rng(3).random((20, 22, 24)) < 0.25
+    labels, n = _scipy_label(mask, 1)
+    sizes = np.bincount(labels.ravel())
+    expected = (sizes >= min_size)[labels] & mask
+    np.testing.assert_array_equal(components.remove_small(mask, min_size, connectivity=1), expected)
+
+
+def test_rejects_bad_arguments():
+    with pytest.raises(ValueError, match="connectivity must be"):
+        components.label(np.ones((3, 3)), connectivity=3)
+    with pytest.raises(ValueError, match="connectivity must be"):
+        components.label(np.ones((3, 3)), connectivity=0)
+    with pytest.raises(ValueError, match="1 to 3 dimensions"):
+        components.label(np.ones((2, 2, 2, 2)), connectivity=1)
+    with pytest.raises(ValueError, match="min_size"):
+        components.remove_small(np.ones(3), -1, connectivity=1)
+    with pytest.raises(TypeError):
+        components.label(np.ones(3))  # connectivity is required

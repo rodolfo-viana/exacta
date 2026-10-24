@@ -31,3 +31,18 @@ def edt_sq(features: Tensor, spacing: Sequence[float]) -> Tensor:
     out = torch.empty(features.shape, dtype=torch.float64)
     _C.edt_sq(features, out, [float(s) for s in spacing])
     return out
+
+
+def label(mask: Tensor, connectivity: int) -> tuple[Tensor, int]:
+    """Connected-component labels (int32) of a CPU mask and the number of components.
+
+    Components are numbered 1, 2, ... in C order of their first voxel, as scipy.ndimage.label
+    numbers them; see ``exacta_label_u8`` in ``kernels.h``.
+    """
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    # A bool tensor already holds one byte of 0 or 1 per element; viewing it avoids a copy.
+    mask = mask.contiguous().view(torch.uint8) if mask.dtype == torch.bool else (mask != 0).to(torch.uint8)
+    out = torch.empty(mask.shape, dtype=torch.int32)
+    count = _C.label(mask, out, int(connectivity))
+    return out, count

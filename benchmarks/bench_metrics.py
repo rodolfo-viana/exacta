@@ -20,6 +20,7 @@ import reference  # noqa: E402
 from _data import pair  # noqa: E402
 
 import exacta.functional as EF  # noqa: E402
+from exacta import components  # noqa: E402
 
 SLOW = 5.0  # seconds; slower methods run once instead of --repeat times
 
@@ -55,6 +56,14 @@ def methods(pred, target, classes: int, spacing):
          lambda: EF.nsd(pred, target, spacing=spacing, tolerance=1.0, num_classes=classes)),
         ("NSD surfels", "exacta native", "cpu",
          lambda: EF.nsd(pred, target, spacing=spacing, tolerance=1.0, num_classes=classes, surface="surfels")),
+    ]
+    from scipy import ndimage
+
+    fg = p_np[0] > 0
+    full = ndimage.generate_binary_structure(3, 3)
+    cases += [
+        ("label (26-conn.)", "exacta native", "cpu", lambda: components.label(fg, connectivity=3)),
+        ("label (26-conn.)", "scipy", "cpu", lambda: ndimage.label(fg, full)),
     ]
     try:
         import surface_distance

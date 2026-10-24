@@ -32,6 +32,18 @@ const char *exacta_status_string(int status);
 int exacta_edt_sq_f64(const uint8_t *features, double *out, const int64_t *shape, int ndim,
                       const double *spacing, int num_threads);
 
+/* Connected-component labelling of a binary image of 1 to 3 dimensions.
+ *
+ * Writes to `out` 0 for every zero element of `mask` and, for every nonzero element, the
+ * number of its connected component, components being numbered 1, 2, ... in C order of their
+ * first element (the numbering of scipy.ndimage.label). Two elements are neighbours when
+ * their indices differ by at most 1 along each axis, along at most `connectivity` axes
+ * (1 <= connectivity <= ndim). Stores the number of components in `num_labels`. Images of
+ * 2^31 elements or more are rejected.
+ */
+int exacta_label_u8(const uint8_t *mask, int32_t *out, const int64_t *shape, int ndim,
+                    int connectivity, int64_t *num_labels);
+
 #ifdef __cplusplus
 }
 #endif

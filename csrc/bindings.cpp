@@ -45,6 +45,35 @@ void edt_sq(nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig> featu
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }
 
+std::int64_t label(nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig> mask,
+                  nb::ndarray<std::int32_t, nb::device::cpu, nb::c_contig> out, int connectivity) {
+  const int ndim = static_cast<int>(mask.ndim());
+  if (out.ndim() != mask.ndim()) {
+    throw std::invalid_argument("mask and out must have the same shape");
+  }
+  std::vector<std::int64_t> shape(ndim);
+  for (int axis = 0; axis < ndim; ++axis) {
+    if (out.shape(axis) != mask.shape(axis)) {
+      throw std::invalid_argument("mask and out must have the same shape");
+    }
+    shape[axis] = static_cast<std::int64_t>(mask.shape(axis));
+  }
+  std::int64_t num_labels = 0;
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status =
+        exacta_label_u8(mask.data(), out.data(), shape.data(), ndim, connectivity, &num_labels);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) {
+    throw std::invalid_argument(
+        "label: mask must have 1 to 3 dimensions and fewer than 2^31 elements, with "
+        "1 <= connectivity <= ndim");
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+  return num_labels;
+}
+
 }  // namespace
 
 NB_MODULE(_C, m) {
@@ -53,4 +82,7 @@ NB_MODULE(_C, m) {
         nb::arg("num_threads") = 0,
         "Write into `out` (float64, same shape) the squared Euclidean distance from every element "
         "to the nearest nonzero element of `features` (uint8), with per-axis `spacing`.");
+  m.def("label", &label, nb::arg("mask"), nb::arg("out"), nb::arg("connectivity"),
+        "Write into `out` (int32, same shape) the connected-component labels of `mask` (uint8), "
+        "numbered as scipy.ndimage.label numbers them, and return the number of components.");
 }
