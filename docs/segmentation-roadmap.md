@@ -21,7 +21,7 @@ problem-dependent approach in [Metrics Reloaded](https://doi.org/10.1038/s41592-
 | Individual lesions | Matching, lesion F1, SQ/PQ, lesion Dice/HD95 and BraTS 2023 conventions |
 | Training baseline | Dice, Dice plus CE/BCE, Tversky and focal losses |
 | Class-volume imbalance | Generalized Dice, with inverse-square, inverse-volume and uniform weighting |
-| Partial annotations (unreleased, `dev`) | Ignored labels and boolean voxel masks in all five losses, including fused GPU paths |
+| Partial annotations (unreleased, `dev`) | Ignored labels and boolean voxel masks in all segmentation losses, including fused GPU paths |
 
 Generalized Dice follows [Sudre et al. (2017)](https://arxiv.org/abs/1707.03237).
 Its default absent-class weighting follows MONAI, while an explicit empty-target option

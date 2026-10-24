@@ -59,6 +59,20 @@ def test_disabled_overlap_is_not_nan(device, cls):
     assert torch.isfinite(x.grad).all()
 
 
+@pytest.mark.parametrize("cls", [DiceCELoss, GeneralizedDiceCELoss, DiceFocalLoss])
+def test_disabled_overlap_allows_single_sigmoid_channel(device, cls):
+    torch.manual_seed(344)
+    x = torch.randn(1, 1, 7, device=device, requires_grad=True)
+    y = torch.randint(2, x.shape, device=device).float()
+    actual = cls(lambda_dice=0, activation="sigmoid", target_format="one-hot", include_background=False)(x, y)
+    expected = (FocalLoss(activation="sigmoid", target_format="one-hot", backend="torch")(x, y)
+                if cls is DiceFocalLoss else F.binary_cross_entropy_with_logits(x, y))
+    torch.testing.assert_close(actual, expected)
+    ga, = torch.autograd.grad(actual, x)
+    ge, = torch.autograd.grad(expected, x)
+    torch.testing.assert_close(ga, ge)
+
+
 @pytest.mark.parametrize("cls", [DiceCELoss, GeneralizedDiceCELoss])
 def test_all_zero_class_weights_and_buffer(device, cls):
     x = torch.randn(2, 3, 7, device=device, requires_grad=True)

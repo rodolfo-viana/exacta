@@ -307,7 +307,7 @@ def _surface_areas(spacing: tuple[float, ...]) -> np.ndarray:
             scaled = np.array(
                 [n[0] * spacing[1] * spacing[2], n[1] * spacing[0] * spacing[2], n[2] * spacing[0] * spacing[1]]
             )
-            total += np.linalg.norm(scaled)
+            total += float(np.linalg.norm(scaled))
         out[code] = total
     return out
 

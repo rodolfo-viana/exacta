@@ -127,7 +127,7 @@ class _SegLoss(torch.autograd.Function):
         weighted_count = ((truth * class_weight).sum() if class_weight is not None
                           and activation == "softmax" and not one_hot else None)
 
-        first = 0 if include_background else 1
+        first = 0 if include_background or lambda_dice == 0 else 1
         inter, prob, truth = inter[:, first:], prob[:, first:], truth[:, first:]
         if batch_dice:
             inter, prob, truth = inter.sum(0), prob.sum(0), truth.sum(0)

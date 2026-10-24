@@ -130,7 +130,7 @@ class _OverlapLoss(nn.Module):
         _check_input(input)
         _check_fused_target(target, input, self.target_format,
                             masked=mask is not None or self.ignore_index is not None or self.distributed)
-        if not self.include_background and input.shape[1] < 2:
+        if lambda_dice != 0 and not self.include_background and input.shape[1] < 2:
             raise ValueError("include_background=False needs at least 2 channels")
         return _triton_losses.seg_loss(
             input,

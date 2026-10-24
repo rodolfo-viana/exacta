@@ -5,7 +5,6 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 from torch import Tensor
-from torch.distributed.nn.functional import all_reduce
 
 
 def sum_ranks(value: Tensor) -> Tensor:
@@ -18,6 +17,8 @@ def sum_ranks(value: Tensor) -> Tensor:
     """
     if not dist.is_available() or not dist.is_initialized():
         raise RuntimeError("distributed=True requires an initialized torch.distributed process group")
+    from torch.distributed.nn.functional import all_reduce
+
     if dist.get_world_size() == 1:
         return value
     device = value.device if dist.get_backend() == "nccl" else torch.device("cpu")
