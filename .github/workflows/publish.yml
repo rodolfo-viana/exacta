@@ -1,0 +1,94 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact package version to publish (must match the source)
+        required: true
+        default: 0.0.1a1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'rodolfo-viana/exacta' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXPECTED_VERSION: ${{ inputs.version }}
+      OMP_NUM_THREADS: "2"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Build and validate the source distribution
+        run: |
+          python -m pip install build twine
+          python -m build --sdist
+          python -m twine check --strict dist/*
+          python - <<'PY'
+          import email
+          import os
+          import tarfile
+          from pathlib import Path
+          from packaging.version import Version
+
+          expected = os.environ["EXPECTED_VERSION"]
+          Version(expected)  # Reject malformed version input before constructing a filename.
+          archives = list(Path("dist").glob("*.tar.gz"))
+          assert len(archives) == 1, "Expected exactly one source distribution"
+          archive = archives[0]
+          assert archive.name == f"exacta-{expected}.tar.gz", "Source version does not match requested release"
+          with tarfile.open(archive) as source:
+              metadata = source.extractfile(f"exacta-{expected}/PKG-INFO")
+              assert metadata is not None
+              message = email.message_from_bytes(metadata.read())
+          assert message["Name"] == "exacta" and message["Version"] == expected
+          PY
+      - name: Install the artifact with the minimum supported PyTorch
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1
+          python -m pip install "numpy<2" "dist/exacta-${EXPECTED_VERSION}.tar.gz[test]"
+      - name: Test the installed distribution
+        run: |
+          python - <<'PY'
+          import os
+          import exacta
+          assert exacta.__version__ == os.environ["EXPECTED_VERSION"]
+          print("Testing installed package:", exacta.__file__)
+          PY
+          python -m pytest -q
+      - name: Store the tested distribution
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: pypi-distributions
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/exacta/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: pypi-distributions
+          path: dist/
+      - name: Publish using PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1

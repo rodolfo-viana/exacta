@@ -11,7 +11,7 @@ implementations (SciPy, MONAI, MedPy, DeepMind's surface-distance, MeshMetrics, 
 Panoptica and the BraTS 2023 evaluation code), and where they disagree with each other, exacta
 can reproduce each of them through an explicit argument.
 
-Status: early development (v0.0.1). The first release targets 3D medical image segmentation.
+Status: early development (v0.0.1a1). The first release targets 3D medical image segmentation.
 
 ## Usage
 
@@ -294,6 +294,34 @@ Loss checks include independent NumPy formulas, MONAI comparisons with explicit 
 adjustments, float64 finite-difference gradient checks, higher-order PyTorch gradients,
 CPU/GPU agreement, mixed precision, extreme logits and full-graph compilation:
 `python -m pytest tests/test_losses.py tests/test_weighted_losses.py`.
+
+## Publishing
+
+The initial alpha publishes the working library as a **source distribution**. Installation
+builds the native extension locally and requires a C++17 compiler and Python development
+headers; OpenMP is optional. Portable binary wheels are still to come. On Debian/Ubuntu,
+install `build-essential` and the development headers matching your Python version before
+installing the package. After the first successful upload, install this alpha with
+`python -m pip install exacta==0.0.1a1`.
+
+`.github/workflows/publish.yml` is triggered manually, only from `main`. It builds the source
+archive, checks its metadata and requested version, installs that artifact with PyTorch 2.4.1
+and NumPy 1.x, and runs the tests before publishing. Publishing uses short-lived OIDC credentials;
+no PyPI password or API-token repository secret is needed. Follow
+[PyPI's Trusted Publishing guide](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
+
+The account owner must configure the external services once:
+
+1. In GitHub repository settings, create an environment named `pypi`, restrict deployment
+   to `main`, and add yourself as a required reviewer. Allow yourself to approve the run.
+2. Under PyPI account **Publishing**, add a pending GitHub publisher with project `exacta`,
+   owner `rodolfo-viana`, repository `exacta`, workflow `publish.yml`, and environment `pypi`.
+3. In GitHub **Actions → Publish to PyPI → Run workflow**, select `main` and enter `0.0.1a1`.
+   Review the build/test result and approve the `pypi` deployment when prompted.
+
+The name is claimed only after the first upload succeeds. Registering a pending publisher
+alone does not reserve it. For subsequent releases, update `__version__` and the workflow's
+default version, commit the change, then repeat the manual run with that exact version.
 
 ## License
 
