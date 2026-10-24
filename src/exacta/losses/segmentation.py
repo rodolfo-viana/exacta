@@ -85,7 +85,9 @@ class DiceLoss(nn.Module):
         denominator = probs.sum(dims) + onehot.sum(dims)
         return 1 - ((2 * intersection + self.smooth) / (denominator + self.smooth)).mean()
 
-    def _fused(self, input: Tensor, target: Tensor, **weights: float | bool) -> Tensor:
+    def _fused(
+        self, input: Tensor, target: Tensor, *, lambda_dice: float, lambda_ce: float, cross_entropy: bool
+    ) -> Tensor:
         _check_input(input)
         if self.target_format == "index":
             _check_index_target(target, input)
@@ -107,7 +109,9 @@ class DiceLoss(nn.Module):
             include_background=self.include_background,
             batch_dice=self.batch_dice,
             smooth=self.smooth,
-            **weights,
+            lambda_dice=lambda_dice,
+            lambda_ce=lambda_ce,
+            cross_entropy=cross_entropy,
         )
 
 
@@ -184,8 +188,8 @@ def _use_triton(backend: Backend, input: Tensor) -> bool:
 def _check_index_values(target: Tensor, num_classes: int) -> None:
     """The fused kernels cannot raise, so check what F.one_hot would."""
     if target.numel():
-        lo, hi = torch.aminmax(target)
-        lo, hi = int(lo), int(hi)
+        bounds = torch.aminmax(target)
+        lo, hi = int(bounds.min), int(bounds.max)
         if lo < 0 or hi >= num_classes:
             raise ValueError(f"class indices must lie in [0, {num_classes}), found values in [{lo}, {hi}]")
 

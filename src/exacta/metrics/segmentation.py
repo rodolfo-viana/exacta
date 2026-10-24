@@ -8,7 +8,7 @@ from typing import Any
 from torch import Tensor
 
 from exacta import functional
-from exacta._inputs import InputFormat
+from exacta._inputs import InputFormat, to_torch
 from exacta.functional.surface import Backend, Combine, Surface
 from exacta.metrics.base import PerCaseMetric
 
@@ -64,10 +64,8 @@ class _SurfaceMetric(PerCaseMetric):
 
     def update(self, pred: Any, target: Any, spacing: Any = None) -> Tensor:
         """Add a batch; ``spacing`` overrides the constructor's spacing for this batch."""
-        return super().update(pred, target, spacing=self._spacing if spacing is None else spacing)
-
-    def _batch(self, pred: Tensor, target: Tensor, *, spacing: Any) -> Tensor:
-        return self._fn(pred, target, spacing=spacing, **self._kwargs)
+        spacing = self._spacing if spacing is None else spacing
+        return self._record(self._fn(to_torch(pred), to_torch(target), spacing=spacing, **self._kwargs))
 
 
 class HausdorffDistance(_SurfaceMetric):

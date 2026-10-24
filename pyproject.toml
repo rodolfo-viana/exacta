@@ -29,3 +29,11 @@ filterwarnings = [
     # raised inside Triton's code generator on Python 3.14, not by exacta
     "ignore:AnnAssign.__init__ missing:DeprecationWarning",
 ]
+
+[tool.mypy]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Triton kernels are a DSL: loop variables and arguments are tensors, not the Python ints mypy sees.
+module = ["exacta._triton_edt", "exacta._triton_losses"]
+ignore_errors = true

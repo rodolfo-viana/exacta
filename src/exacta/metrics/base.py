@@ -38,11 +38,9 @@ class PerCaseMetric:
     def __init__(self) -> None:
         self._values: list[Tensor] = []
 
-    def update(self, pred: Any, target: Any, **kwargs: Any) -> Tensor:
+    def update(self, pred: Any, target: Any) -> Tensor:
         """Add a batch and return its (B, C) per-case values."""
-        values = self._batch(to_torch(pred), to_torch(target), **kwargs)
-        self._values.append(values.detach())
-        return values
+        return self._record(self._batch(to_torch(pred), to_torch(target)))
 
     def compute(self) -> MetricResult:
         if not self._values:
@@ -54,8 +52,12 @@ class PerCaseMetric:
     def reset(self) -> None:
         self._values.clear()
 
-    def _batch(self, pred: Tensor, target: Tensor, **kwargs: Any) -> Tensor:
+    def _batch(self, pred: Tensor, target: Tensor) -> Tensor:
         raise NotImplementedError
+
+    def _record(self, values: Tensor) -> Tensor:
+        self._values.append(values.detach())
+        return values
 
 
 def _all_gather_cat(x: Tensor) -> Tensor:

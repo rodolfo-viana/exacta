@@ -79,7 +79,7 @@ def validate(
         raise ValueError(f"pred and target are on different devices ({pred.device} and {target.device})")
 
     if input_format == "index":
-        _check_index(pred, target, num_classes)
+        num_classes = _check_index(pred, target, num_classes)
         one_hot, spatial_ndim = False, pred.ndim - 1
     elif input_format == "one-hot":
         if pred.ndim not in (4, 5):
@@ -102,7 +102,8 @@ def validate(
     )
 
 
-def _check_index(pred: Tensor, target: Tensor, num_classes: int | None) -> None:
+def _check_index(pred: Tensor, target: Tensor, num_classes: int | None) -> int:
+    """Validate index label maps and return ``num_classes``, which they require."""
     if pred.ndim not in (3, 4):
         raise ValueError(
             f"index inputs must have shape (B, H, W) or (B, D, H, W), got {tuple(pred.shape)}"
@@ -124,6 +125,7 @@ def _check_index(pred: Tensor, target: Tensor, num_classes: int | None) -> None:
             raise ValueError(
                 f"class indices must lie in [0, {num_classes}), found values in [{lo}, {hi}]"
             )
+    return num_classes
 
 
 def _binary(x: Tensor, name: str) -> Tensor:

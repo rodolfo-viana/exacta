@@ -8,7 +8,7 @@ import torch
 from torch import Tensor
 
 try:
-    from exacta import _C
+    from exacta import _C  # type: ignore[attr-defined]  # compiled, no stub
 except ImportError:  # running from a source tree that was never built
     _C = None
 
