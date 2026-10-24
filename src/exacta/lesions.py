@@ -48,7 +48,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from exacta import _native, components
-from exacta._inputs import InputFormat, as_spacing, like_input, to_torch, validate
+from exacta._inputs import InputFormat, _extent, as_spacing, like_input, to_torch, validate
 from exacta.functional.surface import Backend, Surface, hausdorff_distance
 
 Matching = Literal["greedy", "hungarian", "merge", "overlap"]
@@ -262,17 +262,20 @@ def _evaluate_pair(
         target_labels, n_target = components._label(t, connectivity, "auto")
         regions = target_labels
 
-    # Contingency tables: voxels of each predicted component in each target lesion (and region).
-    inter = _pairs(pred_labels, target_labels, n_pred, n_target)
-    touch = inter if matching != "overlap" else _pairs(pred_labels, regions, n_pred, n_target)
-    size_pred = torch.bincount(pred_labels.reshape(-1).long(), minlength=n_pred + 1)[1:].tolist()
-    size_target = torch.bincount(target_labels.reshape(-1).long(), minlength=n_target + 1)[1:].tolist()
-    inter_list, touch_list = inter.tolist(), touch.tolist()
+    # Contingency tables: voxels of each predicted component in each target lesion (and region),
+    # kept sparse, so the cost does not grow with the product of the component counts.
+    inter, size_pred, size_target = _overlap(pred_labels, target_labels, n_pred, n_target)
+    if matching == "overlap":
+        touch = _overlap(pred_labels, regions, n_pred, n_target, sizes=False)[0]
+    else:
+        touch = inter
 
     if matching == "overlap":
-        matches = [[j for j in range(n_pred) if touch_list[j][i] > 0] for i in range(n_target)]
+        matches: list[list[int]] = [[] for _ in range(n_target)]
+        for j, i in touch:  # in component order
+            matches[i].append(j)
     else:
-        matches = _match(matching, inter_list, size_pred, size_target, score, threshold, strict)
+        matches = _match(matching, inter, size_pred, size_target, score, threshold, strict)
 
     voxel = math.prod(spacing) if spacing is not None else 1.0
     kept = [i for i in range(n_target) if size_target[i] * voxel > min_target_volume]
@@ -283,7 +286,7 @@ def _evaluate_pair(
 
     dice, iou = {}, {}
     for i in kept:
-        overlap = sum(inter_list[j][i] for j in matches[i])
+        overlap = sum(inter.get((j, i), 0) for j in matches[i])
         predicted = sum(size_pred[j] for j in matches[i])
         dice[i] = 2.0 * overlap / (size_target[i] + predicted)
         iou[i] = overlap / (size_target[i] + predicted - overlap)
@@ -308,13 +311,21 @@ def _evaluate_pair(
         lesion_hd95=math.nan,
     )
     if spacing is not None:
+        # Each lesion's HD95 only needs the box around it and its matched predictions.
+        boxes_pred, boxes_target = _boxes(pred_labels, n_pred), _boxes(target_labels, n_target)
         total = fp * missed_distance
         for i in kept:
             if not matches[i]:
                 total += missed_distance
                 continue
-            lesion = target_labels == i + 1
-            found = torch.isin(pred_labels, torch.tensor([j + 1 for j in matches[i]], device=p.device))
+            corners = [boxes_target[i]] + [boxes_pred[j] for j in matches[i]]
+            box = tuple(
+                slice(min(c[0][axis] for c in corners), max(c[1][axis] for c in corners) + 1)
+                for axis in range(p.ndim)
+            )
+            lesion = target_labels[box] == i + 1
+            ids = torch.tensor([j + 1 for j in matches[i]], dtype=pred_labels.dtype, device=p.device)
+            found = torch.isin(pred_labels[box], ids)
             hd = hausdorff_distance(
                 found[None, None], lesion[None, None], spacing=spacing, percentile=95.0, surface=surface,
                 input_format="one-hot", backend=backend,
@@ -324,10 +335,38 @@ def _evaluate_pair(
     return values
 
 
-def _pairs(a: Tensor, b: Tensor, na: int, nb: int) -> Tensor:
-    """(na, nb) voxel counts of each label of ``a`` (1..na) within each label of ``b`` (1..nb)."""
-    keys = a.reshape(-1).long() * (nb + 1) + b.reshape(-1).long()
-    return torch.bincount(keys, minlength=(na + 1) * (nb + 1)).view(na + 1, nb + 1)[1:, 1:]
+def _overlap(
+    a: Tensor, b: Tensor, na: int, nb: int, sizes: bool = True
+) -> tuple[dict[tuple[int, int], int], list[int], list[int]]:
+    """Overlap of the label maps ``a`` (labels 1..na) and ``b`` (1..nb): voxels shared by each pair
+    of labels that meet, ``{(label a - 1, label b - 1): count}`` in increasing order of (a, b), and
+    the size of each label of ``a`` and of ``b`` (on GPU, empty lists unless ``sizes``).
+
+    The work is one pass however many labels there are: the native kernel on CPU, and on GPU
+    counts of the foreground voxels only, since atomic additions to the background's count would
+    take turns.
+    """
+    if a.device.type == "cpu" and _native.available():
+        found = _native.label_overlap(a, b, na, nb)
+        if found is None:
+            raise RuntimeError("labels out of range")  # unreachable: both come from labelling
+        size_a, size_b, rows = found
+        pairs = {(i - 1, j - 1): count for i, j, count in rows.tolist()}
+        return pairs, size_a[1:].tolist(), size_b[1:].tolist()
+    both = (a > 0) & (b > 0)
+    keys = a[both].long() * (nb + 1) + b[both].long()
+    values, counts = torch.unique(keys, return_counts=True)  # sorted
+    pairs = {(k // (nb + 1) - 1, k % (nb + 1) - 1): c for k, c in zip(values.tolist(), counts.tolist())}
+    if not sizes:
+        return pairs, [], []
+    return pairs, components._sizes(a, na).tolist(), components._sizes(b, nb).tolist()
+
+
+def _boxes(labels: Tensor, n: int) -> list[tuple[list[int], list[int]]]:
+    """First and last index along each axis of each label 1..n (0-based list)."""
+    _, first, last = _extent(labels, n + 1, one_hot=False)
+    first_list, last_list = first.tolist(), last.tolist()
+    return [(first_list[k], last_list[k]) for k in range(1, n + 1)]
 
 
 def _pair_score(overlap: int, size_target: int, size_pred: int, score: Score) -> float:
@@ -343,7 +382,7 @@ def _beats(value: float, threshold: float, strict: bool) -> bool:
 
 def _match(
     matching: Matching,
-    inter: list[list[int]],
+    inter: dict[tuple[int, int], int],
     size_pred: list[int],
     size_target: list[int],
     score: Score,
@@ -355,10 +394,7 @@ def _match(
     # Overlapping pairs in (prediction, target) order, then by score, best first; the sort is
     # stable, so ties keep the component order.
     candidates = [
-        (_pair_score(inter[j][i], size_target[i], size_pred[j], score), j, i)
-        for j in range(len(size_pred))
-        for i in range(n_target)
-        if inter[j][i] > 0
+        (_pair_score(overlap, size_target[i], size_pred[j], score), j, i) for (j, i), overlap in inter.items()
     ]
     candidates.sort(key=lambda c: c[0], reverse=True)
     matches: list[list[int]] = [[] for _ in range(n_target)]
@@ -390,7 +426,7 @@ def _match(
             if matching != "merge":
                 continue
             members = matches[i] + [j]
-            overlap = sum(inter[m][i] for m in members)
+            overlap = sum(inter.get((m, i), 0) for m in members)
             merged = _pair_score(overlap, size_target[i], sum(size_pred[m] for m in members), score)
             if merged > best[i]:
                 matches[i].append(j)

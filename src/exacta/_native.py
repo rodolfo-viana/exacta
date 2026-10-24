@@ -117,6 +117,47 @@ def confusion(pred: Tensor, target: Tensor, classes: int) -> Tensor | None:
     return out if ok else None
 
 
+def histogram(values: Tensor, bins: int) -> Tensor | None:
+    """Number of elements (int64, (bins,)) of each value of a CPU int32 label map, in one parallel
+    pass; None if a value lies outside [0, bins)."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    out = torch.empty(bins, dtype=torch.int64)
+    ok = _C.histogram(values.to(torch.int32).contiguous().reshape(-1), out)
+    return out if ok else None
+
+
+def select_labels(labels: Tensor, select: Tensor) -> Tensor | None:
+    """Boolean mask of the elements of a CPU int32 label map whose label is selected,
+    ``select[labels]``; None if a label lies outside [0, len(select))."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    out = torch.empty(labels.shape, dtype=torch.bool)
+    flat = labels.to(torch.int32).contiguous().reshape(-1)
+    table = select.to(torch.uint8).contiguous()
+    ok = _C.select_labels(flat, table, out.view(torch.uint8).reshape(-1))
+    return out if ok else None
+
+
+def label_overlap(a: Tensor, b: Tensor, na: int, nb: int) -> tuple[Tensor, Tensor, Tensor] | None:
+    """Overlap of two CPU int32 label maps of the same shape, labels in [0, na] and [0, nb], in one
+    pass: the size of every label (int64, (na + 1,) and (nb + 1,)) and the (i, j, count) rows
+    (int64, (M, 3)), in increasing order of (i, j), of the pairs of nonzero labels that meet.
+    None if a label is out of range."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    flat = [x.to(torch.int32).contiguous().reshape(-1) for x in (a, b)]
+    size_a, size_b = torch.empty(na + 1, dtype=torch.int64), torch.empty(nb + 1, dtype=torch.int64)
+    # Each pair needs a shared element; pages of the buffer that stay unused are never touched.
+    capacity = min(na * nb, flat[0].numel(), 1 << 20)
+    pairs = torch.empty((capacity, 3), dtype=torch.int64)
+    count = _C.label_overlap(*flat, size_a, size_b, pairs)
+    if count > capacity:  # rare: more pairs than the first guess
+        pairs = torch.empty((count, 3), dtype=torch.int64)
+        count = _C.label_overlap(*flat, size_a, size_b, pairs)
+    return (size_a, size_b, pairs[:count]) if count >= 0 else None
+
+
 def channel_counts(pred: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor] | None:
     """Per mask of two CPU stacks of binary masks (C, ...): elements in both, in pred and in
     target (int64, (C,)), counted in one pass; None if a value is not 0 or 1."""

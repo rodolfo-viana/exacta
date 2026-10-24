@@ -45,6 +45,12 @@ int exacta_edt_sq_f64(const uint8_t *features, double *out, const int64_t *shape
 int exacta_label_u8(const uint8_t *mask, int32_t *out, const int64_t *shape, int ndim,
                     int connectivity, int64_t *num_labels);
 
+/* Elements of a label map whose label is selected: out[i] = select[labels[i]] != 0, for `n`
+ * elements and labels in [0, count). Returns EXACTA_INVALID_ARGUMENT for a label out of range.
+ */
+int exacta_select_labels_i32(const int32_t *labels, int64_t n, const uint8_t *select, int64_t count,
+                             uint8_t *out, int num_threads);
+
 /* Bounding box of every class of a label map of 1 to 3 dimensions.
  *
  * For each class c in [0, num_classes) and axis a, writes to lo[c * ndim + a] and
@@ -84,6 +90,23 @@ int exacta_confusion_i32(const int32_t *pred, const int32_t *target, int64_t n, 
                          int64_t *out, int num_threads);
 int exacta_confusion_i64(const int64_t *pred, const int64_t *target, int64_t n, int64_t classes,
                          int64_t *out, int num_threads);
+
+/* Number of elements of each value of a label map of `n` elements: out[v] for v in [0, bins).
+ * Returns EXACTA_INVALID_ARGUMENT if a value lies outside [0, bins).
+ */
+int exacta_histogram_i32(const int32_t *values, int64_t n, int64_t bins, int64_t *out,
+                         int num_threads);
+
+/* Overlap of two label maps of `n` elements, `a` with labels in [0, na] and `b` in [0, nb]: the
+ * number of elements of every label (`size_a`, na + 1 entries; `size_b`, nb + 1 entries) and, for
+ * every pair of nonzero labels (i, j) that share elements, the number they share, as rows
+ * (i, j, count) of `pairs` in increasing order of (i, j). `*num_pairs` receives the number of
+ * pairs; when it exceeds `capacity` (rows available), `pairs` is left unwritten and the caller
+ * calls again with enough room. Returns EXACTA_INVALID_ARGUMENT if a label lies out of range.
+ */
+int exacta_label_overlap_i32(const int32_t *a, const int32_t *b, int64_t n, int64_t na, int64_t nb,
+                             int64_t *size_a, int64_t *size_b, int64_t *pairs, int64_t capacity,
+                             int64_t *num_pairs, int num_threads);
 
 /* For each of `count` pairs of binary masks of `n` elements (mask-major, C order), the number of
  * elements in both, in `pred` and in `target`. Returns EXACTA_INVALID_ARGUMENT if a value is not

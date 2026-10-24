@@ -151,6 +151,65 @@ bool channel_counts(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_con
 using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
 using Indices = nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
 
+// Returns false when a value lies outside [0, bins).
+bool histogram(Flat<std::int32_t> values, Counts out, int num_threads) {
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_histogram_i32(values.data(), static_cast<std::int64_t>(values.shape(0)),
+                                  static_cast<std::int64_t>(out.shape(0)), out.data(), num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT) {
+    throw std::runtime_error(exacta_status_string(status));
+  }
+  return status == EXACTA_OK;
+}
+
+// Returns false when a label lies outside [0, len(select)).
+bool select_labels(Flat<std::int32_t> labels, Flat<std::uint8_t> select,
+                   nb::ndarray<std::uint8_t, nb::ndim<1>, nb::device::cpu, nb::c_contig> out,
+                   int num_threads) {
+  if (out.shape(0) != labels.shape(0) || select.shape(0) < 1) {
+    throw std::invalid_argument("labels and out (N,) and select (C,) do not agree");
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_select_labels_i32(labels.data(), static_cast<std::int64_t>(labels.shape(0)),
+                                      select.data(), static_cast<std::int64_t>(select.shape(0)),
+                                      out.data(), num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT) {
+    throw std::runtime_error(exacta_status_string(status));
+  }
+  return status == EXACTA_OK;
+}
+
+// Returns the number of pairs (rows of `pairs` written only if they fit), or -1 when a label lies
+// out of range.
+std::int64_t label_overlap(Flat<std::int32_t> a, Flat<std::int32_t> b, Counts size_a,
+                           Counts size_b, Indices pairs, int num_threads) {
+  if (a.shape(0) != b.shape(0) || size_a.shape(0) < 1 || size_b.shape(0) < 1 ||
+      pairs.shape(1) != 3) {
+    throw std::invalid_argument("a and b (N,), size_a (na + 1,), size_b (nb + 1,) and pairs (M, 3) "
+                                "do not agree");
+  }
+  std::int64_t num_pairs = 0;
+  int status;
+  {
+    nb::gil_scoped_release release;
+    const auto na = static_cast<std::int64_t>(size_a.shape(0)) - 1;
+    const auto nb_ = static_cast<std::int64_t>(size_b.shape(0)) - 1;
+    status = exacta_label_overlap_i32(a.data(), b.data(), static_cast<std::int64_t>(a.shape(0)),
+                                      na, nb_, size_a.data(), size_b.data(), pairs.data(),
+                                      static_cast<std::int64_t>(pairs.shape(0)), &num_pairs,
+                                      num_threads);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) return -1;
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+  return num_pairs;
+}
+
 void mask_extents(Bytes masks, Indices lo, Indices hi, int num_threads) {
   const int ndim = static_cast<int>(masks.ndim()) - 1;
   if (ndim < 1 || lo.shape(0) != masks.shape(0) || hi.shape(0) != masks.shape(0) ||
@@ -263,6 +322,19 @@ NB_MODULE(_C, m) {
   m.def("channel_counts", &channel_counts<float, exacta_channel_counts_f32>, nb::arg("pred"),
         nb::arg("target"), nb::arg("both"), nb::arg("in_pred"), nb::arg("in_target"),
         nb::arg("num_threads") = 0, counts_doc);
+  m.def("histogram", &histogram, nb::arg("values"), nb::arg("out"), nb::arg("num_threads") = 0,
+        "Write into `out` (int64, (bins,)) the number of elements of each value of the int32 label "
+        "map `values` (N,); returns False if a value lies outside [0, bins).");
+  m.def("select_labels", &select_labels, nb::arg("labels"), nb::arg("select"), nb::arg("out"),
+        nb::arg("num_threads") = 0,
+        "Write into `out` (uint8, (N,)) select[labels[i]] != 0 for the int32 label map `labels` "
+        "(N,) and the uint8 table `select` (C,); returns False if a label lies outside [0, C).");
+  m.def("label_overlap", &label_overlap, nb::arg("a"), nb::arg("b"), nb::arg("size_a"),
+        nb::arg("size_b"), nb::arg("pairs"), nb::arg("num_threads") = 0,
+        "Write into `size_a` and `size_b` the size of every label of the int32 label maps `a` and "
+        "`b` (N,), and into `pairs` (M, 3) the rows (i, j, count) of the pairs of nonzero labels "
+        "that meet, if there is room; return the number of pairs, or -1 if a label is out of "
+        "range.");
   m.def("mask_extents", &mask_extents, nb::arg("masks"), nb::arg("lo"), nb::arg("hi"),
         nb::arg("num_threads") = 0,
         "Write into `lo` and `hi` (int64, (C, ndim)) the bounding box of each mask of `masks` "

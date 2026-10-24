@@ -53,8 +53,7 @@ def largest(mask: Any, *, connectivity: int, backend: Backend = "auto") -> Any:
     labels, count = _label(to_torch(mask), connectivity, backend)
     if count == 0:
         return like_input(torch.zeros(labels.shape, dtype=torch.bool, device=labels.device), mask)
-    sizes = torch.bincount(labels.flatten(), minlength=count + 1)
-    biggest = int(sizes[1:].argmax()) + 1  # argmax returns the first of tied maxima
+    biggest = int(_sizes(labels, count).argmax()) + 1  # argmax returns the first of tied maxima
     return like_input(labels == biggest, mask)
 
 
@@ -67,9 +66,25 @@ def remove_small(mask: Any, min_size: int, *, connectivity: int, backend: Backen
     if min_size < 0:
         raise ValueError(f"min_size must be non-negative, got {min_size}")
     labels, count = _label(to_torch(mask), connectivity, backend)
-    keep = torch.bincount(labels.flatten(), minlength=count + 1) >= min_size
-    keep[0] = False
-    return like_input(keep[labels.long()], mask)
+    background = torch.zeros(1, dtype=torch.bool, device=labels.device)
+    keep = torch.cat([background, _sizes(labels, count) >= min_size])
+    if labels.device.type == "cpu" and _native.available():
+        kept = _native.select_labels(labels, keep)
+        if kept is None:
+            raise RuntimeError("labels out of range")  # unreachable: labelling numbers 0..count
+        return like_input(kept, mask)
+    return like_input(keep[labels], mask)
+
+
+def _sizes(labels: Tensor, count: int) -> Tensor:
+    """Number of elements (int64, (count,)) of each component 1..count of a label map."""
+    if labels.device.type == "cpu" and _native.available():
+        sizes = _native.histogram(labels, count + 1)
+        if sizes is None:
+            raise RuntimeError("labels out of range")  # unreachable: labelling numbers 0..count
+        return sizes[1:]
+    # Only the foreground: atomic additions to the background's count would take turns.
+    return torch.bincount(labels[labels > 0], minlength=count + 1)[1:]
 
 
 def _label(mask: Tensor, connectivity: int, backend: Backend) -> tuple[Tensor, int]:

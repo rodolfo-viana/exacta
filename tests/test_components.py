@@ -38,6 +38,26 @@ def test_label_matches_scipy_on_random_masks(mask, data):
     np.testing.assert_array_equal(got, expected)
 
 
+@pytest.mark.parametrize("threads", [1, 3, 32])
+@pytest.mark.parametrize("density", [0.25, 0.5, 0.75])
+def test_label_matches_scipy_on_large_volumes_with_any_thread_count(threads, density):
+    # The rows are labelled in blocks, one per thread, then joined; near the percolation density
+    # most components cross several blocks.
+    rng = np.random.default_rng(10)
+    masks = [rng.random((48, 40, 36)) < density, rng.random((300, 170)) < density]
+    previous = torch.get_num_threads()
+    torch.set_num_threads(threads)  # the kernels share PyTorch's OpenMP runtime
+    try:
+        for mask in masks:
+            for connectivity in range(1, mask.ndim + 1):
+                expected, n = _scipy_label(mask, connectivity)
+                got, count = components.label(mask, connectivity=connectivity)
+                assert count == n
+                np.testing.assert_array_equal(got, expected)
+    finally:
+        torch.set_num_threads(previous)
+
+
 def test_numbering_follows_first_element_in_c_order():
     mask = np.array(
         [
@@ -115,6 +135,52 @@ def test_remove_small_matches_reference(min_size):
     sizes = np.bincount(labels.ravel())
     expected = (sizes >= min_size)[labels] & mask
     np.testing.assert_array_equal(components.remove_small(mask, min_size, connectivity=1), expected)
+
+
+@pytest.mark.parametrize("threads", [1, 5, 32])
+def test_native_label_map_kernels_match_numpy(threads):
+    from exacta import _native
+
+    rng = np.random.default_rng(11)
+    # Runs of equal labels, as labelling gives, and isolated values.
+    a = np.repeat(rng.integers(0, 40, 3000), rng.integers(1, 9, 3000)).astype(np.int32)
+    b = np.repeat(rng.integers(0, 25, 4000), rng.integers(1, 7, 4000)).astype(np.int32)[: a.size]
+    a = a[: b.size]
+    a[::7] = rng.integers(0, 40, a[::7].size)
+    previous = torch.get_num_threads()
+    torch.set_num_threads(threads)
+    try:
+        ta, tb = torch.from_numpy(a), torch.from_numpy(b)
+        np.testing.assert_array_equal(_native.histogram(ta, 40).numpy(), np.bincount(a, minlength=40))
+        select = rng.random(40) < 0.5
+        got = _native.select_labels(ta, torch.from_numpy(select))
+        np.testing.assert_array_equal(got.numpy(), select[a])
+        size_a, size_b, pairs = _native.label_overlap(ta, tb, 39, 24)
+        np.testing.assert_array_equal(size_a.numpy(), np.bincount(a, minlength=40))
+        np.testing.assert_array_equal(size_b.numpy(), np.bincount(b, minlength=25))
+        both = (a > 0) & (b > 0)
+        keys, counts = np.unique(a[both].astype(np.int64) * 25 + b[both], return_counts=True)
+        expected = np.stack([keys // 25, keys % 25, counts], axis=1)
+        np.testing.assert_array_equal(pairs.numpy(), expected)
+    finally:
+        torch.set_num_threads(previous)
+
+
+def test_native_label_map_kernels_report_labels_out_of_range():
+    from exacta import _C, _native
+
+    a = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+    assert _native.histogram(a, 3) is None
+    assert _native.histogram(-a, 4) is None
+    assert _native.select_labels(a, torch.ones(3, dtype=torch.bool)) is None
+    assert _native.label_overlap(a, a, 2, 3) is None
+    assert _native.label_overlap(a, a, 3, 2) is None
+    assert _native.label_overlap(a, a, 3, 3) is not None
+    # With less room than pairs, the count comes back and the rows are left alone.
+    sizes = [torch.empty(4, dtype=torch.int64) for _ in range(2)]
+    pairs = torch.full((2, 3), -7, dtype=torch.int64)
+    assert _C.label_overlap(a, a, *sizes, pairs) == 3
+    assert (pairs == -7).all()
 
 
 def test_rejects_bad_arguments():
