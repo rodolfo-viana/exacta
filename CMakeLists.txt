@@ -4,7 +4,10 @@ project(exacta LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
+# scikit-build-core sets SKBUILD_SABI_COMPONENT to Development.SABIModule when the wheel targets the
+# stable ABI (wheel.py-api in pyproject.toml); without it nanobind quietly builds for the running
+# Python only, and the abi3-tagged wheel fails to import on other versions.
+find_package(Python 3.10 COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
 find_package(nanobind CONFIG REQUIRED)
 find_package(OpenMP)
 
