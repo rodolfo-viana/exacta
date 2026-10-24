@@ -38,7 +38,7 @@ jobs:
           python -m build --sdist
           python -m twine check --strict dist/*
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1
-          python -m pip install 'numpy<2' dist/*.tar.gz pytest hypothesis scipy
+          python -m pip install 'numpy<2' dist/*.tar.gz pytest hypothesis scipy 'setuptools>=70'
           python -c 'import exacta, exacta._C; print(exacta.__file__, exacta._C.__file__)'
           python -m pytest -q
           python -m mypy src/exacta

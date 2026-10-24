@@ -66,6 +66,6 @@ jobs:
       - name: Test the Python 3.12 stable-ABI wheel on a newer interpreter
         run: |
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
-          python -m pip install wheelhouse/*cp312-abi3*.whl pytest hypothesis scipy
+          python -m pip install wheelhouse/*cp312-abi3*.whl pytest hypothesis scipy 'setuptools>=70'
           python -c 'import exacta, exacta._C; print(exacta.__file__, exacta._C.__file__)'
           python -m pytest -q
