@@ -19,7 +19,8 @@ from exacta.losses import DiceCELoss
 from exacta.metrics import HD95, NSD, Dice
 
 # Training
-loss_fn = DiceCELoss(include_background=False)        # logits (B, C, D, H, W), labels (B, D, H, W)
+loss_fn = DiceCELoss(include_background=False)        # logits (B, C, D, H, W), labels (B, D, H, W);
+                                                      # fused Triton kernels on GPU
 loss = loss_fn(model(x), y)
 
 # Validation: accumulate per-case values across batches (and processes under torch.distributed)
@@ -71,17 +72,21 @@ Each convention is an explicit argument, because this is where libraries disagre
 
 ## Architecture
 
-- Pure PyTorch for anything that reduces to tensor operations (most losses and overlap metrics).
-  Overlap metrics on label maps use a single confusion-matrix pass, so memory does not grow
-  with the number of classes.
-- Compiled kernels (`csrc/`) for algorithms that don't: the exact Euclidean distance transform
-  behind HD95, ASSD and NSD, and run-based connected-component labelling. Kernels sit behind a plain C interface and receive arrays through
-  DLPack, so the compiled extension never links against PyTorch and one wheel works across
-  PyTorch versions.
-- GPU kernels in Triton, compiled at run time: no CUDA toolkit or host compiler is needed to
-  install exacta. The GPU distance transform runs the same algorithm as the CPU kernel and gives
-  the same values bit for bit (`backend="auto"` picks native on CPU and Triton on GPU; a
-  plain-PyTorch `backend="torch"` remains as a slow fallback).
+- Pure PyTorch for anything that reduces to tensor operations: overlap metrics (a single
+  confusion-matrix pass on label maps, so memory does not grow with the number of classes) and
+  the CPU path of the losses.
+- Compiled CPU kernels (`csrc/`) for algorithms that don't: the exact Euclidean distance
+  transform behind HD95, ASSD and NSD, and run-based connected-component labelling. They sit
+  behind a plain C interface and receive arrays through DLPack, so the extension never links
+  against PyTorch and one wheel works across PyTorch versions.
+- GPU kernels in Triton, compiled at run time, so installing exacta needs no CUDA toolkit or host
+  compiler. `backend="auto"` (the default everywhere) picks them on GPU; `backend="torch"`
+  remains as a fallback.
+  - The distance transform runs the same algorithm as the CPU kernel and gives the same values,
+    bit for bit.
+  - `DiceLoss` and `DiceCELoss` run as two fused kernels, one forward and one backward, that
+    keep nothing for the backward pass but the logits: 7-13x faster than the PyTorch path on 3-D
+    batches, without its 0.3-1.1 GiB of intermediates (`benchmarks/bench_losses.py`).
 
 ## Development
 
@@ -91,6 +96,7 @@ pip install torch scikit-build-core nanobind cmake ninja
 pip install --no-build-isolation -e ".[test]"   # re-run after editing csrc/
 pytest
 python benchmarks/bench_metrics.py
+python benchmarks/bench_losses.py
 ```
 
 Reference tests against MONAI, MedPy and DeepMind's surface-distance are skipped unless those

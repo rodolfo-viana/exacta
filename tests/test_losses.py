@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from exacta import _triton_losses
 from exacta.losses import DiceCELoss, DiceLoss
 
 
@@ -99,3 +100,141 @@ def test_matches_monai(batch_dice):
         expected_dice_ce = monai_dice_ce(logits, target[:, None])
     torch.testing.assert_close(DiceLoss(batch_dice=batch_dice)(logits, target), expected_dice)
     torch.testing.assert_close(DiceCELoss(batch_dice=batch_dice)(logits, target), expected_dice_ce)
+
+
+# --- Fused Triton kernels -----------------------------------------------------------------------
+
+GPU = torch.cuda.is_available() and _triton_losses.available()
+needs_gpu = pytest.mark.skipif(not GPU, reason="needs CUDA and Triton")
+
+FUSED_CONFIGS = [
+    (loss_cls, activation, target_format, include_background, batch_dice)
+    for loss_cls in (DiceLoss, DiceCELoss)
+    for activation in ("softmax", "sigmoid", "none")
+    for target_format in ("index", "one-hot")
+    for include_background in (True, False)
+    for batch_dice in (False, True)
+    if not (loss_cls is DiceCELoss and activation == "none")
+]
+
+
+def _both_backends(loss_fn_factory, logits, target):
+    """Loss and input gradient from the PyTorch and the Triton backend."""
+    out = []
+    for backend in ("torch", "triton"):
+        x = logits.detach().clone().requires_grad_()
+        loss = loss_fn_factory(backend)(x, target)
+        loss.backward()
+        out.append((loss.detach(), x.grad))
+    return out
+
+
+def _fused_inputs(activation, target_format, shape=(2, 4, 9, 10, 11), dtype=torch.float32, seed=0):
+    logits, target = _inputs("cuda", shape=shape, seed=seed, dtype=dtype)
+    if activation == "none":
+        logits = logits.softmax(1)
+    if target_format == "one-hot":
+        target = F.one_hot(target, shape[1]).movedim(-1, 1)
+    return logits, target
+
+
+CONFIG_NAMES = ("loss_cls", "activation", "target_format", "include_background", "batch_dice")
+
+
+@needs_gpu
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize(CONFIG_NAMES, FUSED_CONFIGS)
+def test_fused_matches_torch(loss_cls, activation, target_format, include_background, batch_dice, dtype):
+    logits, target = _fused_inputs(activation, target_format, dtype=dtype)
+    kw = dict(
+        activation=activation,
+        target_format=target_format,
+        include_background=include_background,
+        batch_dice=batch_dice,
+    )
+    (loss_t, grad_t), (loss_f, grad_f) = _both_backends(lambda b: loss_cls(backend=b, **kw), logits, target)
+    tol = dict(rtol=1e-12, atol=1e-15) if dtype == torch.float64 else dict(rtol=1e-5, atol=1e-8)
+    assert loss_f.dtype == loss_t.dtype
+    torch.testing.assert_close(loss_f, loss_t, **tol)
+    torch.testing.assert_close(grad_f, grad_t, **tol)
+
+
+@needs_gpu
+@pytest.mark.parametrize("shape", [(3, 2, 17, 19), (1, 5, 1000), (2, 3, 4, 5, 6, 7)])
+def test_fused_other_shapes(shape):
+    logits, target = _fused_inputs("softmax", "index", shape=shape)
+    (loss_t, grad_t), (loss_f, grad_f) = _both_backends(lambda b: DiceCELoss(backend=b), logits, target)
+    torch.testing.assert_close(loss_f, loss_t)
+    torch.testing.assert_close(grad_f, grad_t)
+
+
+@needs_gpu
+@pytest.mark.parametrize("classes", [1, 117])
+def test_fused_class_counts(classes):
+    # 1 class: binary sigmoid segmentation; 117: TotalSegmentator-sized, padded to 128 channels
+    activation = "sigmoid" if classes == 1 else "softmax"
+    logits, target = _fused_inputs(activation, "index", shape=(2, classes, 6, 7, 8))
+    (loss_t, grad_t), (loss_f, grad_f) = _both_backends(
+        lambda b: DiceCELoss(activation=activation, backend=b), logits, target
+    )
+    torch.testing.assert_close(loss_f, loss_t)
+    torch.testing.assert_close(grad_f, grad_t)
+
+
+@needs_gpu
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fused_half_precision(dtype):
+    logits, target = _fused_inputs("softmax", "index", dtype=dtype)
+    (loss_t, grad_t), (loss_f, grad_f) = _both_backends(lambda b: DiceCELoss(backend=b), logits, target)
+    assert loss_f.dtype == torch.float32 and grad_f.dtype == dtype
+    torch.testing.assert_close(loss_f, loss_t)  # both compute in float32 from the same values
+    torch.testing.assert_close(grad_f, grad_t)
+
+
+@needs_gpu
+@pytest.mark.parametrize(CONFIG_NAMES, FUSED_CONFIGS[::3])
+def test_fused_gradcheck(loss_cls, activation, target_format, include_background, batch_dice):
+    logits, target = _fused_inputs(activation, target_format, shape=(2, 3, 3, 4, 2), dtype=torch.float64)
+    loss_fn = loss_cls(
+        activation=activation,
+        target_format=target_format,
+        include_background=include_background,
+        batch_dice=batch_dice,
+        backend="triton",
+    )
+    assert torch.autograd.gradcheck(lambda x: loss_fn(x, target), (logits.requires_grad_(),))
+
+
+@needs_gpu
+def test_fused_accepts_non_contiguous_input():
+    logits, target = _fused_inputs("softmax", "index")
+    strided = logits.to(memory_format=torch.channels_last_3d)
+    assert not strided.is_contiguous()
+    loss_fn = DiceCELoss(backend="triton")
+    torch.testing.assert_close(loss_fn(strided, target), loss_fn(logits, target))
+
+
+@needs_gpu
+def test_fused_matches_monai():
+    monai_losses = pytest.importorskip("monai.losses")
+    logits, target = _inputs("cpu")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = monai_losses.DiceCELoss(softmax=True, to_onehot_y=True)(logits, target[:, None])
+    got = DiceCELoss(backend="triton")(logits.cuda(), target.cuda())
+    torch.testing.assert_close(got.cpu(), expected)
+
+
+@needs_gpu
+def test_fused_rejects_out_of_range_classes():
+    logits, target = _fused_inputs("softmax", "index")
+    with pytest.raises(ValueError, match="class indices must lie in"):
+        DiceLoss(backend="triton")(logits, target + 1)
+
+
+def test_backend_validation():
+    with pytest.raises(ValueError, match="backend must be"):
+        DiceLoss(backend="cuda")
+    logits, target = _inputs("cpu")
+    with pytest.raises(NotImplementedError, match="needs a CUDA input"):
+        DiceLoss(backend="triton")(logits, target)

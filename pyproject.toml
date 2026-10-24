@@ -25,3 +25,7 @@ metadata.version.input = "src/exacta/__init__.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # raised inside Triton's code generator on Python 3.14, not by exacta
+    "ignore:AnnAssign.__init__ missing:DeprecationWarning",
+]
