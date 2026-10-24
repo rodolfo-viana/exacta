@@ -355,8 +355,8 @@ float64, sigmoid activation and other batch, class and volume sizes.
 
 ## Development
 
-Feature development takes place on `dev`; `main` is reserved for releases. This release is
-`0.0.1a3`. See the
+Feature development takes place on `dev`; `main` is reserved for releases. The current
+development version is `0.0.1a4.dev0`; the release documented above is `0.0.1a3`. See the
 [segmentation roadmap](docs/segmentation-roadmap.md) for priorities.
 
 ```bash
