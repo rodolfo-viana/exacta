@@ -168,8 +168,9 @@ python benchmarks/bench_losses.py
 ```
 
 Lesion-wise evaluation is tested against fixtures produced by Panoptica 2.1.7 and by the BraTS
-2023 evaluation code, which need environments of their own (old NumPy and pandas); the scripts that
-regenerate them are in `tests/fixtures/`. Reference tests against MONAI, MedPy and DeepMind's
+2023 evaluation code, which need environments of their own (old NumPy and pandas).
+`tests/fixtures/regenerate.sh` rebuilds those environments with `uv`, reruns both tools and reports
+whether their results changed (set `PANOPTICA_VERSION` or `BRATS_COMMIT` to try other releases). Reference tests against MONAI, MedPy and DeepMind's
 surface-distance are skipped unless those packages are installed:
 
 ```bash

@@ -1,9 +1,7 @@
 """Reference results of Panoptica on the binary cases of lesion_cases.npz (panoptica.json).
 
-Panoptica 2.1.7 needs NumPy < 2.3, so this runs in an environment of its own:
-
-    uv venv -p 3.12 /tmp/panoptica && uv pip install -p /tmp/panoptica/bin/python panoptica==2.1.7
-    /tmp/panoptica/bin/python tests/fixtures/make_panoptica_fixture.py
+Panoptica 2.1.7 needs NumPy < 2.3, so this runs in an environment of its own; regenerate.sh
+builds it and runs this script.
 
 Every matcher x matching metric x threshold x connected-components backend is evaluated.
 """
@@ -12,6 +10,7 @@ from __future__ import annotations
 
 import json
 import warnings
+from importlib.metadata import version
 from pathlib import Path
 
 import numpy as np
@@ -61,7 +60,7 @@ def main() -> None:
                             case=name, matcher=matcher, metric=metric, threshold=threshold, backend=backend
                         )
                         results.append({**config, **values})
-    header = {"panoptica": panoptica.__version__ if hasattr(panoptica, "__version__") else "2.1.7"}
+    header = {"panoptica": version("panoptica")}
     (HERE / "panoptica.json").write_text(json.dumps({"source": header, "results": results}, indent=1))
 
 

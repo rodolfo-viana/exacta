@@ -1,5 +1,7 @@
 {
- "source": "BraTS-2023-Metrics",
+ "source": {
+  "BraTS-2023-Metrics": "43c905242b2eecf421d4ab2da7af8ece9777d322"
+ },
  "results": [
   {
    "case": "brats0",

@@ -3,11 +3,10 @@ lesion_cases.npz (brats2023.json).
 
 The reference is metrics.py of https://github.com/rachitsaluja/BraTS-2023-Metrics, with its
 vendored surface_distance package. It uses DataFrame.append (removed in pandas 2) and np.Inf
-(removed in NumPy 2), so it runs in an environment of its own:
+(removed in NumPy 2), and pandas newer than its pin (1.3.4) breaks it too, so it runs in an
+environment with its pinned requirements; regenerate.sh builds it and runs this script:
 
-    uv venv -p 3.10 /tmp/brats
-    uv pip install -p /tmp/brats/bin/python "numpy<2" "scipy<1.14" "pandas<2" connected-components-3d nibabel
-    /tmp/brats/bin/python tests/fixtures/make_brats_fixture.py /path/to/BraTS-2023-Metrics
+    python tests/fixtures/make_brats_fixture.py /path/to/BraTS-2023-Metrics
 
 Each case is written as NIfTI with an isotropic and an anisotropic voxel size, and evaluated for
 the GLI settings (dilation 3, 50 mm^3 threshold) and the MET ones (dilation 1, 2 mm^3).
@@ -16,6 +15,7 @@ the GLI settings (dilation 3, 50 mm^3 threshold) and the MET ones (dilation 1, 2
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -54,7 +54,10 @@ def main() -> None:
                                 **{k: float(row[k]) for k in KEYS},
                             )
                         )
-    fixture = {"source": "BraTS-2023-Metrics", "results": results}
+    commit = subprocess.run(
+        ["git", "-C", sys.argv[1], "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    fixture = {"source": {"BraTS-2023-Metrics": commit or "unknown"}, "results": results}
     (HERE / "brats2023.json").write_text(json.dumps(fixture, indent=1))
 
 
