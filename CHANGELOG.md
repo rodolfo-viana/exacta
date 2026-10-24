@@ -11,6 +11,7 @@ Development toward the next alpha release uses feature branches merged into `mai
 - Publish to PyPI only when a GitHub Release is published; branch merges and tag pushes do
   not publish packages. Verify the release tag, source version and main ancestry first.
 - Group generated release notes by PR labels and document the feature-to-release cycle.
+- Update SHA-pinned artifact upload/download actions to Node 24 releases.
 
 ## 0.0.1a3 — 2026-10-24
 
