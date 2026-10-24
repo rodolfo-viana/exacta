@@ -39,6 +39,17 @@ filterwarnings = [
 [tool.mypy]
 ignore_missing_imports = true
 
+[tool.cibuildwheel]
+build = ["cp310-manylinux_x86_64", "cp311-manylinux_x86_64", "cp312-manylinux_x86_64"]
+archs = ["x86_64"]
+test-requires = ["pytest>=8", "hypothesis>=6", "numpy<2", "scipy>=1.10"]
+before-test = "python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1"
+test-command = "python -m pytest -q {project}/tests"
+environment = { OMP_NUM_THREADS = "2", MKL_NUM_THREADS = "2", CMAKE_BUILD_PARALLEL_LEVEL = "2" }
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_28"
+
 [[tool.mypy.overrides]]
 # Triton kernels are a DSL: loop variables and arguments are tensors, not the Python ints mypy sees.
 module = ["exacta._triton_edt", "exacta._triton_losses"]
