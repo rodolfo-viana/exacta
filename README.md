@@ -90,3 +90,7 @@ packages are installed:
 ```bash
 pip install monai medpy "git+https://github.com/google-deepmind/surface-distance.git"
 ```
+
+## License
+
+Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).

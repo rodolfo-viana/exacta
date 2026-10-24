@@ -1,0 +1,7 @@
+exacta
+Copyright 2026 Rodolfo Viana
+
+This product includes a lookup table from DeepMind's surface-distance
+(https://github.com/google-deepmind/surface-distance), in
+src/exacta/functional/_surfel_tables.py. Copyright 2018 Google Inc.,
+licensed under the Apache License, Version 2.0.
