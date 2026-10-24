@@ -100,6 +100,57 @@ updates. All ranks receive the gathered scores; if no rank has cases, all raise 
 Use an evaluation sampler without padding so repeated cases do not bias the average. With NCCL,
 set each rank's current CUDA device before computing.
 
+## Training losses
+
+Losses are PyTorch modules taking floating-point logits `(B, C, *spatial)` and integer class
+indices `(B, *spatial)`. Use `target_format="one-hot"` for masks or soft labels with the logits'
+shape. Softmax targets should sum to one over classes; sigmoid targets should lie in `[0, 1]`.
+Target probabilities are used as supplied, without normalization or clamping. For binary
+segmentation with a single output channel, use sigmoid and a same-shaped target.
+
+```python
+from exacta.losses import DiceLoss, DiceCELoss, TverskyLoss, FocalLoss
+
+dice_ce = DiceCELoss(include_background=False)
+tversky = TverskyLoss(alpha=0.3, beta=0.7, include_background=False)
+focal = FocalLoss(gamma=2.0)  # softmax, no class weighting
+binary_focal = FocalLoss(activation="sigmoid", target_format="one-hot", alpha=0.25)
+loss = tversky(logits, labels)
+loss.backward()
+```
+
+For probabilities `p` and targets `g`, the definitions and reductions are explicit:
+
+| Loss | Definition and reduction |
+|---|---|
+| `DiceLoss` | `1 - (2 Σ p·g + s) / (Σ p + Σ g + s)`, averaged over cases and classes. |
+| `DiceCELoss` | `lambda_dice * DiceLoss + lambda_ce * CE`; CE is ordinary cross-entropy for softmax, BCE for sigmoid, and always includes every channel. |
+| `TverskyLoss` | `1 - (TP+s)/(TP+alpha*FP+beta*FN+s)`, with `TP=Σ p·g`, `FP=Σ p·(1-g)`, `FN=Σ (1-p)·g`. Average over cases and classes. |
+| `FocalLoss`, softmax | `-Σ_c w_c*g_c*(1-p_c)^gamma*log(p_c)`, averaged over cases and voxels. |
+| `FocalLoss`, sigmoid | `-w_pos*g*(1-p)^gamma*log(p) - w_neg*(1-g)*p^gamma*log(1-p)`, averaged over cases, channels and voxels. |
+
+Dice and Tversky sum over spatial axes, or batch and spatial axes with `batch_dice=True`.
+`include_background=False` omits channel 0 after activation. Their `smooth` defaults to `1e-5`.
+Tversky's `alpha` weights false positives and `beta` false negatives; both default to `0.5` and
+need not sum to one. At those defaults, Tversky equals Dice with **twice** the smoothing
+constant. The asymmetric overlap objective follows
+[Salehi et al. (2017)](https://arxiv.org/abs/1706.05721).
+
+Focal loss downweights easy examples using `gamma` (default `2`), following
+[Lin et al. (2017)](https://arxiv.org/abs/1708.02002). `alpha=None` gives unit weights. A scalar
+`alpha` in `[0, 1]` assigns sigmoid positive/negative weights `alpha`/`1-alpha`; for softmax,
+channel 0 gets `1-alpha` and every other class gets `alpha`. With `gamma=0, alpha=None`, focal
+loss equals CE/BCE, including its reduction. Softmax focal loss is therefore `C` times MONAI's
+default mean for the same hard targets. The formulas above define soft targets as weighted
+sums of hard-label losses; sigmoid soft-target behavior differs from MONAI's modulation of a
+single soft-label BCE term. Focal loss expects finite logits and includes every channel.
+
+All four losses compute half/bfloat16 inputs in float32 and retain float64 precision.
+`backend="auto"` uses fused Triton on CUDA when available and PyTorch elsewhere. Use
+`backend="torch"` for higher-order derivatives; the fused backward explicitly rejects them.
+Targets requiring gradients automatically select PyTorch. Eager execution rejects out-of-range
+indices; compiled Triton execution returns NaN for them without a host synchronization.
+
 ## Architecture
 
 - Compiled CPU kernels (`csrc/`), multithreaded with OpenMP, for every pass over the voxels that
@@ -117,18 +168,18 @@ set each rank's current CUDA device before computing.
   - The distance transform runs the same algorithm as the CPU kernel and gives the same values,
     bit for bit. Labelling gives the same labels as the CPU kernel and SciPy.
   - The overlap metrics count voxels in per-block histograms, checking the values as they go.
-  - `DiceLoss` and `DiceCELoss` run as two fused kernels, one forward and one backward, that
-    keep nothing for the backward pass but the logits: 7-22x faster than the PyTorch path on 3-D
-    batches, without its 0.3-2.1 GiB of intermediates (`benchmarks/bench_losses.py`). They
-    work under `torch.compile` without graph breaks.
+  - Dice, Dice-plus-CE, Tversky and focal losses fuse voxel operations in forward and backward,
+    retaining the inputs and small reduction statistics instead of full-volume activations or
+    one-hot intermediates. They work under `torch.compile` without graph breaks. CPU losses
+    use PyTorch's compiled operators and autograd; `torch.compile` can fuse them further.
 - PyTorch for the glue between kernels, the CPU path of the losses, and the fallbacks.
 
 ## Benchmarks
 
-AMD Ryzen 9 5900XT (16 cores), NVIDIA RTX 5070, PyTorch 2.14.1, CUDA 13.0. Times in milliseconds,
-median of 5 runs (one run for anything slower than 5 s). Reproduce with
-`python benchmarks/bench_metrics.py --sizes 128 256` (add `--only exacta` to skip the slow
-references) and `python benchmarks/bench_losses.py`.
+AMD Ryzen 9 5900XT (16 cores), NVIDIA RTX 5070, PyTorch 2.14.1, CUDA 13.0. Times are in
+milliseconds. Metric timings use the median of 5 runs (one run for anything slower than 5 s).
+Reproduce them with `python benchmarks/bench_metrics.py --sizes 128 256` (add `--only exacta`
+to skip the slow references). Loss measurements and commands are described below.
 
 ### Metrics
 
@@ -164,8 +215,39 @@ below) and was timed there, on the same case.
 
 ### Losses
 
-`DiceCELoss`, forward plus backward on GPU, index targets. Extra memory is the peak allocation
-beyond the logits and their gradient.
+The current benchmark uses identical seeded inputs for eager PyTorch, `torch.compile` over
+`backend="torch"`, and fused Triton. Compilation and 5 warm-up steps are excluded; results are
+medians of 20 forward-plus-backward steps with synchronization. Default loss arguments,
+softmax activation, integer targets, float32 logits of shape `2×4×128³`, RTX 5070:
+
+| Loss | PyTorch (ms) | Compiled PyTorch (ms) | Triton (ms) | Extra MiB: PyTorch / compiled / Triton |
+|---|---:|---:|---:|---:|
+| Dice + CE | 5.643 | 3.105 | 0.847 | 320 / 144 / <0.1 |
+| Tversky | 6.980 | 1.918 | 0.818 | 256 / 80 / <0.1 |
+| Focal | 8.628 | 2.056 | 0.614 | 560 / 128 / <0.1 |
+
+Extra memory is the peak allocation during the step beyond its inputs and logits' gradient;
+small scratch buffers can fit below that baseline. These are local synthetic measurements,
+not end-to-end training speedups. CPU measurements on the same system, with 16 threads and
+`2×4×64³` float32 logits, use the same seed, warm-up and repeat count:
+
+| Loss | PyTorch (ms) | Compiled PyTorch (ms) |
+|---|---:|---:|
+| Dice + CE | 15.746 | 10.248 |
+| Tversky | 13.157 | 9.574 |
+| Focal | 30.743 | 6.378 |
+
+Reproduce these tables with:
+
+```bash
+python benchmarks/bench_losses.py --classes 4 --sizes 128 --dtypes float32 --repeat 20 --warmup 5 --seed 0
+python benchmarks/bench_losses.py --device cpu --classes 4 --sizes 64 --dtypes float32 \
+    --backends torch compiled --threads 16 --repeat 20 --warmup 5 --seed 0
+```
+
+The earlier Dice-plus-CE scaling measurements below use the median of 10 warmed-up GPU steps,
+integer targets and the same peak-memory definition. The benchmark also supports bfloat16,
+float64, sigmoid activation and other batch, class and volume sizes.
 
 | Logits | dtype | PyTorch time | PyTorch extra memory | Fused time | Fused extra memory |
 |---|---|---:|---:|---:|---:|
@@ -207,6 +289,11 @@ releases).
 Array-library round-trip tests run for NumPy, and for CuPy and JAX when installed:
 `python -m pytest tests/test_inputs.py -k round_trip`. Distributed tests exercise ranks without
 updates using Gloo; their NCCL variants require two GPUs and are skipped otherwise.
+
+Loss checks include independent NumPy formulas, MONAI comparisons with explicit reduction
+adjustments, float64 finite-difference gradient checks, higher-order PyTorch gradients,
+CPU/GPU agreement, mixed precision, extreme logits and full-graph compilation:
+`python -m pytest tests/test_losses.py tests/test_weighted_losses.py`.
 
 ## License
 

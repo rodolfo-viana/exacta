@@ -1,4 +1,4 @@
-"""Fused Dice and Dice + cross-entropy losses on GPU, in Triton.
+"""Fused overlap and focal losses on GPU, in Triton.
 
 The PyTorch implementation in :mod:`exacta.losses.segmentation` materialises the activation, the
 one-hot target and their product, and autograd keeps them for the backward pass: several times
@@ -8,6 +8,8 @@ reads them again, recomputes the activation and writes the gradient from a close
 
     Dice:   dL/dp = -A·g + B per (case, class), with A = 2 / (E·D) and B = (2I + s) / (E·D²),
             where D = Σp + Σg + s, I = Σ p·g and E is the number of averaged entries.
+    Tversky: A = [D - (1-alpha-beta)·N] / (E·D²), B = alpha·N / (E·D²),
+             where N=I+s and D=I+alpha·FP+beta·FN+s. FP/FN are accumulated directly.
     softmax CE:  dL/dz = (p·Σg - g) / (cases·voxels)
     sigmoid BCE: dL/dz = (p - g) / (cases·classes·voxels)
 
@@ -19,6 +21,10 @@ are and computed in float32; float64 logits are computed in float64. Class indic
 The backward pass is not itself differentiable: double backward (``create_graph=True``, as in
 gradient penalties) raises rather than silently dropping the second-order term. Gradients do not
 flow into the target; the loss modules use the PyTorch path when the target requires them.
+
+Focal loss uses a separate pointwise reduction, sharing the activation/target loader. Its
+softmax derivative uses q=dL/d(log p), then dL/dz=q-p·Σq; sigmoid differentiates the positive
+and negative focal terms separately. Stable log probabilities avoid log(0) for finite logits.
 """
 
 from __future__ import annotations
@@ -52,10 +58,12 @@ def seg_loss(
     lambda_dice: float,
     lambda_ce: float,
     cross_entropy: bool,
+    tversky: tuple[float, float] | None = None,
 ) -> Tensor:
-    """``lambda_dice * Dice + lambda_ce * CE`` with the semantics of the PyTorch losses."""
+    """Dice plus optional CE, or Tversky when its weights are supplied by TverskyLoss."""
     config = (
-        activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce, cross_entropy
+        activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce,
+        cross_entropy, tversky,
     )
     return _SegLoss.apply(logits, target, config)
 
@@ -73,7 +81,7 @@ def _layout(logits: Tensor) -> tuple[int, int, int, int, int]:
 class _SegLoss(torch.autograd.Function):
     @staticmethod
     def forward(ctx, logits: Tensor, target: Tensor, config: tuple) -> Tensor:  # type: ignore[override]
-        activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce, ce = config
+        activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce, ce, tversky = config
         logits, target = logits.contiguous(), target.contiguous()
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
@@ -83,6 +91,7 @@ class _SegLoss(torch.autograd.Function):
             _forward[(blocks, batch)](
                 logits, target, partial, voxels, classes, blocks,
                 ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, C_PAD=c_pad, BLOCK=block,
+                TVERSKY=tversky is not None, CE=ce,
                 COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
             )  # fmt: skip
         sums = partial.sum(1, dtype=torch.float64)  # (batch, 5, c_pad)
@@ -93,8 +102,15 @@ class _SegLoss(torch.autograd.Function):
         inter, prob, truth = inter[:, first:], prob[:, first:], truth[:, first:]
         if batch_dice:
             inter, prob, truth = inter.sum(0), prob.sum(0), truth.sum(0)
-        den = prob + truth + smooth
-        num = 2 * inter + smooth
+        if tversky is None:
+            den = prob + truth + smooth
+            num = 2 * inter + smooth
+        else:
+            alpha, beta = tversky
+            # Rows named prob/truth hold FP/FN for Tversky, accumulated directly to avoid
+            # cancellation from subtracting almost equal sums near a perfect prediction.
+            den = inter + alpha * prob + beta * truth + smooth
+            num = inter + smooth
         dice = num / den
         loss = lambda_dice * (1 - dice.mean())
         ce_scale = torch.zeros((), dtype=torch.float64, device=logits.device)
@@ -105,8 +121,12 @@ class _SegLoss(torch.autograd.Function):
 
         entries = dice.numel()
         coef = torch.zeros((batch, 2, c_pad), dtype=torch.float64, device=logits.device)
-        coef[:, 0, first:classes] = lambda_dice * 2 / (entries * den)
-        coef[:, 1, first:classes] = lambda_dice * num / (entries * den * den)
+        if tversky is None:
+            coef[:, 0, first:classes] = lambda_dice * 2 / (entries * den)
+            coef[:, 1, first:classes] = lambda_dice * num / (entries * den * den)
+        else:
+            coef[:, 0, first:classes] = (den - (1 - alpha - beta) * num) / (entries * den * den)
+            coef[:, 1, first:classes] = alpha * num / (entries * den * den)
         ctx.save_for_backward(logits, target, coef, ce_scale)
         ctx.config = config
         loss = torch.where(invalid > 0, torch.nan, loss)
@@ -120,7 +140,7 @@ class _SegLoss(torch.autograd.Function):
                 "use backend='torch'"
             )
         logits, target, coef, ce_scale = ctx.saved_tensors
-        activation, one_hot, *_, ce = ctx.config
+        activation, one_hot, *_, ce, tversky = ctx.config
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
         coef = (coef * grad_out).to(compute)
@@ -132,6 +152,59 @@ class _SegLoss(torch.autograd.Function):
                 ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, CE=ce, C_PAD=c_pad, BLOCK=block,
                 COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
             )  # fmt: skip
+        return grad, None, None
+
+
+def focal_loss(
+    logits: Tensor, target: Tensor, *, activation: str, one_hot: bool,
+    gamma: float, alpha: float | None,
+) -> Tensor:
+    """Mean focal CE/BCE, recomputing activations in backward instead of saving them."""
+    return _FocalLoss.apply(logits, target, (activation, one_hot, gamma, alpha))
+
+
+class _FocalLoss(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, logits: Tensor, target: Tensor, config: tuple) -> Tensor:
+        activation, one_hot, gamma, alpha = config
+        logits, target = logits.contiguous(), target.contiguous()
+        batch, classes, voxels, c_pad, block = _layout(logits)
+        compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
+        blocks = triton.cdiv(voxels, block)
+        partial = torch.empty((batch, blocks), device=logits.device, dtype=compute)
+        elements = batch * voxels * (classes if activation == "sigmoid" else 1)
+        with torch.cuda.device(logits.device):
+            _focal_kernel[(blocks, batch)](
+                logits, target, partial, partial, partial, voxels, classes, blocks,
+                ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, GAMMA=gamma, ALPHA=alpha,
+                BACKWARD=False, ELEMENTS=elements, C_PAD=c_pad, BLOCK=block,
+                COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
+            )
+        ctx.save_for_backward(logits, target)
+        ctx.config = config
+        return (partial.sum(dtype=torch.float64) / elements).to(compute)
+
+    @staticmethod
+    def backward(ctx, grad_out: Tensor):
+        if torch.is_grad_enabled():
+            raise RuntimeError(
+                "the fused Triton loss does not support double backward (create_graph=True); "
+                "use backend='torch'"
+            )
+        logits, target = ctx.saved_tensors
+        activation, one_hot, gamma, alpha = ctx.config
+        batch, classes, voxels, c_pad, block = _layout(logits)
+        compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
+        blocks = triton.cdiv(voxels, block)
+        elements = batch * voxels * (classes if activation == "sigmoid" else 1)
+        grad = torch.empty_like(logits)
+        with torch.cuda.device(logits.device):
+            _focal_kernel[(blocks, batch)](
+                logits, target, grad, grad, grad_out, voxels, classes, blocks,
+                ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, GAMMA=gamma, ALPHA=alpha,
+                BACKWARD=True, ELEMENTS=elements, C_PAD=c_pad, BLOCK=block,
+                COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
+            )
         return grad, None, None
 
 
@@ -176,6 +249,7 @@ if triton is not None:
     def _forward(
         logits, target, partial, voxels, classes, blocks,
         ACT: tl.constexpr, ONE_HOT: tl.constexpr, C_PAD: tl.constexpr, BLOCK: tl.constexpr,
+        TVERSKY: tl.constexpr, CE: tl.constexpr,
         COMPUTE: tl.constexpr,
     ):  # fmt: skip
         blk = tl.program_id(0)
@@ -186,14 +260,20 @@ if triton is not None:
         w = mask.to(COMPUTE)
         # Terms with g = 0 are left out rather than multiplied by 0: a class masked with a -inf
         # logit would otherwise make 0 * inf = NaN.
-        if ACT == 0:  # cross-entropy -Σ g log p, per class
+        if not CE:
+            ce = tl.full((C_PAD, BLOCK), 0.0, COMPUTE)
+        elif ACT == 0:  # cross-entropy -Σ g log p, per class
             ce = tl.where(g != 0, g * (lse[None, :] - z), 0.0)
         else:  # binary cross-entropy with logits
             ce = tl.maximum(z, 0.0) - tl.where(g != 0, z * g, 0.0) + libdevice.log1p(tl.exp(-tl.abs(z)))
         out = partial + ((b * blocks + blk) * 5) * C_PAD + ch
         tl.store(out, tl.sum(p * g * w, axis=1))
-        tl.store(out + C_PAD, tl.sum(p * w, axis=1))
-        tl.store(out + 2 * C_PAD, tl.sum(g * w, axis=1))
+        if TVERSKY:
+            tl.store(out + C_PAD, tl.sum(p * (1.0 - g) * w, axis=1))
+            tl.store(out + 2 * C_PAD, tl.sum((1.0 - p) * g * w, axis=1))
+        else:
+            tl.store(out + C_PAD, tl.sum(p * w, axis=1))
+            tl.store(out + 2 * C_PAD, tl.sum(g * w, axis=1))
         tl.store(out + 3 * C_PAD, tl.sum(ce * w, axis=1))
         invalid = tl.zeros([C_PAD], dtype=COMPUTE)
         if not ONE_HOT:
@@ -227,3 +307,68 @@ if triton is not None:
         else:
             d_z = d_p
         tl.store(grad + row, d_z.to(grad.dtype.element_ty), mask=mask)
+
+    @triton.jit
+    def _focal_kernel(
+        logits, target, partial, grad, grad_out, voxels, classes, blocks,
+        ACT: tl.constexpr, ONE_HOT: tl.constexpr, GAMMA: tl.constexpr, ALPHA: tl.constexpr,
+        BACKWARD: tl.constexpr, ELEMENTS: tl.constexpr, C_PAD: tl.constexpr, BLOCK: tl.constexpr,
+        COMPUTE: tl.constexpr,
+    ):
+        blk = tl.program_id(0)
+        b = tl.program_id(1).to(tl.int64)
+        p, g, z, lse, mask, row, ch, offs = _tile(
+            logits, target, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT, C_PAD, BLOCK, COMPUTE
+        )
+        if ACT == 0:
+            logp = z - lse[None, :]
+            # expm1 retains 1-p near p=1. Use exp(logp) consistently in its derivative.
+            p = tl.exp(logp)
+            u = -libdevice.expm1(logp)
+            if GAMMA == 0:
+                modulation = tl.full((C_PAD, BLOCK), 1.0, COMPUTE)
+            else:
+                modulation = tl.where(u > 0, tl.exp(GAMMA * tl.log(tl.where(u > 0, u, 1.0))), 0.0)
+            weight = tl.full((C_PAD, 1), 1.0, COMPUTE)
+            if ALPHA is not None:
+                weight = tl.where(
+                    ch[:, None] == 0, tl.full((C_PAD, 1), 1.0 - ALPHA, COMPUTE),
+                    tl.full((C_PAD, 1), ALPHA, COMPUTE),
+                )
+            if BACKWARD:
+                if GAMMA == 0:
+                    q = -weight * g
+                else:
+                    q = weight * g * modulation * (GAMMA * p * logp / tl.where(u > 0, u, 1.0) - 1.0)
+                q = tl.where(mask, q, 0.0)
+                dz = q - p * tl.sum(q, axis=0)[None, :]
+            else:
+                terms = -weight * g * modulation * logp
+        else:
+            # Stable log(sigmoid(z)) and log(sigmoid(-z)); neither forms log(0).
+            tail = libdevice.log1p(tl.exp(-tl.abs(z)))
+            pos_ce = tl.maximum(-z, 0.0) + tail
+            neg_ce = tl.maximum(z, 0.0) + tail
+            pos_mod = tl.exp(-GAMMA * neg_ce)
+            neg_mod = tl.exp(-GAMMA * pos_ce)
+            pos_weight = g
+            neg_weight = 1.0 - g
+            if ALPHA is not None:
+                pos_weight *= ALPHA
+                neg_weight *= 1.0 - ALPHA
+            if BACKWARD:
+                u = tl.sigmoid(-z)
+                dz = (-pos_weight * pos_mod * (u + GAMMA * p * pos_ce)
+                      + neg_weight * neg_mod * (p + GAMMA * u * neg_ce))
+            else:
+                terms = pos_weight * pos_mod * pos_ce + neg_weight * neg_mod * neg_ce
+        if BACKWARD:
+            dz *= tl.load(grad_out).to(COMPUTE) / ELEMENTS
+            tl.store(grad + row, dz.to(grad.dtype.element_ty), mask=mask)
+        else:
+            loss = tl.sum(tl.sum(tl.where(mask, terms, 0.0), axis=0), axis=0)
+            if not ONE_HOT:
+                t = tl.load(target + b * voxels + offs, mask=offs < voxels, other=0).to(tl.int64)
+                invalid = tl.sum(((offs < voxels) & ((t < 0) | (t >= classes))).to(tl.int32), axis=0)
+                loss = tl.where(invalid > 0, float("nan"), loss)
+            tl.store(partial + b * blocks + blk, loss)
