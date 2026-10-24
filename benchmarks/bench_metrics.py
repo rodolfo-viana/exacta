@@ -48,8 +48,6 @@ def methods(pred, target, classes: int, spacing):
         ("Dice", "numpy reference", "cpu", lambda: reference.per_case(reference.dice, p_np, t_np, classes)),
         ("HD95", "exacta native", "cpu",
          lambda: EF.hd95(pred, target, spacing=spacing, num_classes=classes, backend="native")),
-        ("HD95", "exacta torch", "cpu",
-         lambda: EF.hd95(pred, target, spacing=spacing, num_classes=classes, backend="torch")),
         ("HD95", "scipy reference", "cpu",
          lambda: reference.per_case(reference.hausdorff, p_np, t_np, classes, spacings=[spacing], percentile=95)),
         ("NSD voxels", "exacta native", "cpu",
@@ -82,9 +80,11 @@ def methods(pred, target, classes: int, spacing):
         pc, tc = pred.cuda(), target.cuda()
         cases += [
             ("Dice", "exacta", "cuda", lambda: EF.dice(pc, tc, num_classes=classes)),
+            ("HD95", "exacta triton", "cuda",
+             lambda: EF.hd95(pc, tc, spacing=spacing, num_classes=classes, backend="triton")),
             ("HD95", "exacta torch", "cuda",
              lambda: EF.hd95(pc, tc, spacing=spacing, num_classes=classes, backend="torch")),
-            ("NSD surfels", "exacta torch", "cuda",
+            ("NSD surfels", "exacta triton", "cuda",
              lambda: EF.nsd(pc, tc, spacing=spacing, tolerance=1.0, num_classes=classes, surface="surfels")),
         ]
     try:

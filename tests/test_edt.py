@@ -8,8 +8,19 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from scipy import ndimage
 
-from exacta import _C, _native
+from exacta import _C, _native, _triton_edt
 from exacta.functional.surface import _edt_sq_torch
+
+GPU = torch.cuda.is_available() and _triton_edt.available()
+needs_gpu = pytest.mark.skipif(not GPU, reason="needs CUDA and Triton")
+
+
+def _triton(features, spacing):
+    return _triton_edt.edt_sq(features.cuda(), spacing).cpu()
+
+
+CPU_KERNELS = [_native.edt_sq, _edt_sq_torch]
+KERNELS = CPU_KERNELS + [pytest.param(_triton, marks=needs_gpu)]
 
 CASES = [
     ((50,), (0.7,)),
@@ -63,8 +74,18 @@ def test_is_the_exact_floating_point_minimum(features, spacing):
     if not features.any():
         return
     expected = _brute_force(features, spacing)
-    for edt_sq in (_native.edt_sq, _edt_sq_torch):
+    for edt_sq in CPU_KERNELS + ([_triton] if GPU else []):
         np.testing.assert_array_equal(edt_sq(torch.from_numpy(features), spacing).numpy(), expected)
+
+
+@needs_gpu
+@pytest.mark.parametrize(
+    ("shape", "spacing"), CASES + [((1, 1, 7), (1.0, 2.0, 0.5)), ((300, 7, 1), (0.5, 1.5, 2.0))]
+)
+@pytest.mark.parametrize("density", [0.001, 0.05, 0.5])
+def test_triton_matches_native_bit_for_bit(shape, spacing, density):
+    features = torch.from_numpy(_features(shape, density))
+    assert torch.equal(_triton(features, spacing), _native.edt_sq(features, spacing))
 
 
 # Non-dyadic spacings, where mathematically tied features round to different values. The
@@ -76,21 +97,23 @@ def test_backends_agree_bit_for_bit(device, spacing, density):
     features = torch.from_numpy(_features((30, 36, 42), density))
     native = _native.edt_sq(features, spacing)
     assert torch.equal(_edt_sq_torch(features.to(device), spacing).cpu(), native)
+    if device.type == "cuda" and GPU:
+        assert torch.equal(_triton(features, spacing), native)
 
 
-@pytest.mark.parametrize("edt_sq", [_native.edt_sq, _edt_sq_torch])
+@pytest.mark.parametrize("edt_sq", KERNELS)
 def test_no_features_is_inf(edt_sq):
     got = edt_sq(torch.zeros(4, 5, 6, dtype=torch.bool), (1.0, 1.0, 1.0))
     assert torch.isinf(got).all()
 
 
-@pytest.mark.parametrize("edt_sq", [_native.edt_sq, _edt_sq_torch])
+@pytest.mark.parametrize("edt_sq", KERNELS)
 def test_all_features_is_zero(edt_sq):
     got = edt_sq(torch.ones(4, 5, dtype=torch.bool), (1.0, 2.0))
     assert (got == 0).all()
 
 
-@pytest.mark.parametrize("edt_sq", [_native.edt_sq, _edt_sq_torch])
+@pytest.mark.parametrize("edt_sq", KERNELS)
 def test_empty_array(edt_sq):
     assert edt_sq(torch.zeros(0, 5, dtype=torch.bool), (1.0, 2.0)).shape == (0, 5)
 

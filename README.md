@@ -78,8 +78,10 @@ Each convention is an explicit argument, because this is where libraries disagre
   behind HD95, ASSD and NSD, and run-based connected-component labelling. Kernels sit behind a plain C interface and receive arrays through
   DLPack, so the compiled extension never links against PyTorch and one wheel works across
   PyTorch versions.
-- On GPU, distance metrics currently use an exact distance transform written in PyTorch
-  (separable, O(n) work per voxel per axis). CUDA kernels and Triton-fused losses come next.
+- GPU kernels in Triton, compiled at run time: no CUDA toolkit or host compiler is needed to
+  install exacta. The GPU distance transform runs the same algorithm as the CPU kernel and gives
+  the same values bit for bit (`backend="auto"` picks native on CPU and Triton on GPU; a
+  plain-PyTorch `backend="torch"` remains as a slow fallback).
 
 ## Development
 

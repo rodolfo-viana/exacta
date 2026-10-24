@@ -20,7 +20,7 @@ def test_boundary_matches_scipy(shape):
 
 
 def _backends(device):
-    return ["torch"] if device.type == "cuda" else ["torch", "native"]
+    return ["torch", "triton"] if device.type == "cuda" else ["torch", "native"]
 
 
 @pytest.mark.parametrize(
@@ -198,8 +198,22 @@ def test_native_backend_rejects_cuda():
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA")
     x = torch.zeros(1, 4, 4, 4, dtype=torch.long, device="cuda")
-    with pytest.raises(NotImplementedError):
+    x[0, 1:3, 1:3, 1:3] = 1
+    with pytest.raises(NotImplementedError, match="runs on CPU"):
         EF.hd95(x, x, spacing=1, num_classes=2, backend="native")
+
+
+def test_triton_backend_rejects_cpu():
+    x = torch.zeros(1, 4, 4, 4, dtype=torch.long)
+    x[0, 1:3, 1:3, 1:3] = 1
+    with pytest.raises(NotImplementedError, match="runs on GPU"):
+        EF.hd95(x, x, spacing=1, num_classes=2, backend="triton")
+
+
+def test_rejects_unknown_backend():
+    x = torch.zeros(1, 4, 4, 4, dtype=torch.long)
+    with pytest.raises(ValueError, match="backend must be"):
+        EF.hd95(x, x, spacing=1, num_classes=2, backend="cuda")
 
 
 @pytest.mark.parametrize("percentile", [95.0, 100.0])

@@ -162,7 +162,7 @@ def _per_case(fn, pred, target, num_classes, **kw):
 
 
 def _backends(device):
-    return ["torch"] if device.type == "cuda" else ["torch", "native"]
+    return ["torch", "triton"] if device.type == "cuda" else ["torch", "native"]
 
 
 CASES = [((40, 36), (0.5, 1.25)), ((20, 24, 28), (1.5, 0.8, 0.8)), ((18, 22, 26), (3.0, 0.7, 0.9))]

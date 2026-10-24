@@ -55,11 +55,11 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from exacta import _native
+from exacta import _native, _triton_edt
 from exacta._inputs import InputFormat, Segmentations, as_spacing, like_input, to_torch, validate
 from exacta.functional._surfel_tables import surfel_measures
 
-Backend = Literal["auto", "native", "torch"]
+Backend = Literal["auto", "native", "triton", "torch"]
 Combine = Literal["max", "mean", "pooled"]
 Surface = Literal["voxels", "surfels"]
 
@@ -106,8 +106,9 @@ def hausdorff_distance(
         num_classes, include_background: As in :func:`exacta.functional.dice`.
         both_empty: Value when the class is absent from both prediction and target.
         one_empty: Value when the class is absent from exactly one of them.
-        backend: Exact distance transform to use. ``"native"`` is the compiled kernel (CPU),
-            ``"torch"`` runs on any device, ``"auto"`` picks native on CPU and torch elsewhere.
+        backend: Exact distance transform to use: ``"native"`` (compiled kernel, CPU),
+            ``"triton"`` (GPU kernel) or ``"torch"`` (plain PyTorch, any device, much slower).
+            ``"auto"`` picks native on CPU and Triton on GPU. All give the same values, bit for bit.
 
     Returns:
         A float64 array of shape (B, C), in the array library of ``pred``.
@@ -251,7 +252,7 @@ def _per_case(
     else:
         raise ValueError(f"surface must be 'voxels' or 'surfels', got {surface!r}")
     spacings = as_spacing(spacing, batch=seg.batch, ndim=seg.ndim)
-    edt_sq = _native.edt_sq if _use_native(backend, seg.pred.device) else _edt_sq_torch
+    edt_sq = _edt_function(backend, seg.pred.device)
 
     out = torch.full((seg.batch, len(seg.classes)), both_empty, dtype=torch.float64)
     for b in range(seg.batch):
@@ -333,20 +334,27 @@ def _tolerances(tolerance: Any, classes: range) -> list[float]:
     return t.tolist()
 
 
-def _use_native(backend: Backend, device: torch.device) -> bool:
+def _edt_function(backend: Backend, device: torch.device) -> EdtSq:
+    if backend == "auto":
+        if device.type == "cpu":
+            backend = "native" if _native.available() else "torch"
+        else:
+            backend = "triton" if device.type == "cuda" and _triton_edt.available() else "torch"
     if backend == "torch":
-        return False
+        return _edt_sq_torch
     if backend == "native":
         if device.type != "cpu":
-            raise NotImplementedError(
-                "native kernels run on CPU only for now; use backend='torch' or 'auto' on GPU"
-            )
+            raise NotImplementedError("the native kernel runs on CPU; use backend='triton' or 'auto' on GPU")
         if not _native.available():
             raise RuntimeError("exacta was installed without its compiled extension")
-        return True
-    if backend == "auto":
-        return device.type == "cpu" and _native.available()
-    raise ValueError(f"backend must be 'auto', 'native' or 'torch', got {backend!r}")
+        return _native.edt_sq
+    if backend == "triton":
+        if device.type != "cuda":
+            raise NotImplementedError("the Triton kernel runs on GPU; use backend='native' or 'auto' on CPU")
+        if not _triton_edt.available():
+            raise RuntimeError("backend='triton' needs Triton, which this PyTorch build does not include")
+        return _triton_edt.edt_sq
+    raise ValueError(f"backend must be 'auto', 'native', 'triton' or 'torch', got {backend!r}")
 
 
 def _voxel_distances(
