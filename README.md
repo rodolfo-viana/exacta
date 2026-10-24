@@ -7,8 +7,9 @@ disagree: [Podobnik & Vrtovec (2024)](https://arxiv.org/abs/2410.02630) compared
 tools and found that distance-based metrics such as HD95 and NSD can differ substantially across
 tools for the same segmentation pair. exacta aims to be the one implementation you can trust and
 cite: every metric states its exact definition and is tested against independent reference
-implementations (SciPy, MONAI, MedPy and DeepMind's surface-distance), and where they disagree
-with each other, exacta can reproduce each of them through an explicit argument.
+implementations (SciPy, MONAI, MedPy, DeepMind's surface-distance, MeshMetrics, SimpleITK,
+Panoptica and the BraTS 2023 evaluation code), and where they disagree with each other, exacta
+can reproduce each of them through an explicit argument.
 
 Status: early development (v0.0.1). The first release targets 3D medical image segmentation.
 
@@ -47,6 +48,7 @@ EF.sensitivity(pred, target, num_classes=4, zero_division=0.0)          # 0 wher
 EF.volume_similarity(pred, target, num_classes=4, convention="itk")      # SimpleITK's signed variant
 
 # Match another tool's definition explicitly
+s = (1.5, 0.8, 0.8)                                                  # voxel size in mm
 EF.hd95(pred, target, spacing=s, num_classes=4, combine="pooled")    # MedPy's hd95
 EF.assd(pred, target, spacing=s, num_classes=4, combine="mean")      # MedPy 0.4's assd
 EF.nsd(pred, target, spacing=s, num_classes=4, tolerance=1.0, surface="surfels")  # DeepMind's NSD
@@ -80,10 +82,10 @@ Each convention is an explicit argument, because this is where libraries disagre
 | ASSD | `combine="pooled"` (default): mean over the surface elements of both masks, as in MONAI and MedPy 0.5.2. `"mean"`: mean of the two directed means, as in MedPy 0.4 (DeepMind returns the two directed means). |
 | NSD | Fraction of the surface of both masks within `tolerance` of the other surface, `d ≤ tolerance`, as in MONAI and DeepMind. Each distance is the exact floating-point minimum of the expression SciPy evaluates, so distances that tie with the tolerance land on the same side as in MedPy and DeepMind. MONAI compares in float32. |
 | Class absent from both | `both_empty`, default NaN (skipped when averaging). |
-| Zero denominators | `zero_division` for sensitivity, precision, specificity, volume similarity and relative volume difference; default NaN, as in MONAI. MedPy 0.5.2 returns 0 with NumPy 1.x but NaN with NumPy 2 (its `ZeroDivisionError` handler no longer fires). |
-| Volume similarity | `convention="taha"` (default): `1 - ||P| - |T|| / (|P| + |T|)`, in [0, 1] (Taha & Hanbury 2015). `"itk"`: `2(|P| - |T|) / (|P| + |T|)`, signed, as SimpleITK's `GetVolumeSimilarity`. |
-| Relative volume difference | `(|P| - |T|) / |T|`, as MedPy's `ravd`; `absolute=True` for the unsigned form. |
 | Class absent from one | Dice/IoU give 0. Distance metrics give `one_empty`: default `inf` for HD/ASSD, 0 for NSD. |
+| Zero denominators | `zero_division` for sensitivity, precision, specificity, volume similarity and relative volume difference; default NaN, as in MONAI. MedPy 0.5.2 returns 0 with NumPy 1.x but NaN with NumPy 2 (its `ZeroDivisionError` handler no longer fires). |
+| Volume similarity | `convention="taha"` (default): `1 - \|\|P\| - \|T\|\| / (\|P\| + \|T\|)`, in [0, 1] (Taha & Hanbury 2015). `"itk"`: `2(\|P\| - \|T\|) / (\|P\| + \|T\|)`, signed, as SimpleITK's `GetVolumeSimilarity`. |
+| Relative volume difference | `(\|P\| - \|T\|) / \|T\|`, as MedPy's `ravd`; `absolute=True` for the unsigned form. |
 | Aggregation | Per case, then the NaN-ignoring mean over cases, then over classes. |
 | Lesion matching | `matching="greedy"`: one-to-one, best-scoring pairs first, above `threshold` (Panoptica's `NaiveThresholdMatching`). `"hungarian"`: optimal one-to-one (`MaxBipartiteMatching`). `"merge"`: a lesion predicted in pieces is merged when the union scores higher (`MaximizeMergeMatching`). `"overlap"`: every prediction touching a target lesion grown by `dilation` steps, many-to-many (BraTS 2023). F1/SQ/PQ are Panoptica's RQ/SQ/PQ; `lesion_dice`/`lesion_hd95` are BraTS's lesion-wise scores. Panoptica labels 3-D images with 26-connectivity but 2-D ones with 4-connectivity; exacta's `connectivity` is explicit. |
 | Connectivity | Required for connected components: 1 = faces (6 neighbours in 3-D, SciPy's default), 2 = and edges (18), 3 = and corners (26, MONAI's default). |
@@ -95,10 +97,10 @@ Each convention is an explicit argument, because this is where libraries disagre
   extraction (boundary voxels, neighbour codes, the marching-cubes mesh) and point-to-mesh
   distances; the voxel counts of the overlap metrics, in one pass that also checks the values;
   connected-component labelling and the label statistics behind `largest`, `remove_small` and
-  lesion matching; dilation; and the sorts behind percentiles. They sit behind a plain C
-  interface and receive arrays through DLPack, so the extension never links against PyTorch and
-  one wheel works across PyTorch versions. They are built without fused multiply-adds, which
-  would round reference expressions differently.
+  lesion matching; dilation; and the sort behind area-weighted percentiles. They sit behind a
+  plain C interface and receive arrays through DLPack, so the extension never links against
+  PyTorch and one wheel works across PyTorch versions. They are built without fused
+  multiply-adds, which would round reference expressions differently.
 - GPU kernels in Triton, compiled at run time, so installing exacta needs no CUDA toolkit or host
   compiler. `backend="auto"` (the default everywhere) picks them on GPU; `backend="torch"`
   remains as a fallback.
@@ -106,16 +108,17 @@ Each convention is an explicit argument, because this is where libraries disagre
     bit for bit. Labelling gives the same labels as the CPU kernel and SciPy.
   - The overlap metrics count voxels in per-block histograms, checking the values as they go.
   - `DiceLoss` and `DiceCELoss` run as two fused kernels, one forward and one backward, that
-    keep nothing for the backward pass but the logits: 7-13x faster than the PyTorch path on 3-D
-    batches, without its 0.3-2.2 GiB of intermediates (`benchmarks/bench_losses.py`). They
+    keep nothing for the backward pass but the logits: 7-22x faster than the PyTorch path on 3-D
+    batches, without its 0.3-2.1 GiB of intermediates (`benchmarks/bench_losses.py`). They
     work under `torch.compile` without graph breaks.
 - PyTorch for the glue between kernels, the CPU path of the losses, and the fallbacks.
 
 ## Benchmarks
 
 AMD Ryzen 9 5900XT (16 cores), NVIDIA RTX 5070, PyTorch 2.14.1, CUDA 13.0. Times in milliseconds,
-median of 5 runs. Reproduce with `python benchmarks/bench_metrics.py --sizes 128 256` (add
-`--only exacta` to skip the slow references) and `python benchmarks/bench_losses.py`.
+median of 5 runs (one run for anything slower than 5 s). Reproduce with
+`python benchmarks/bench_metrics.py --sizes 128 256` (add `--only exacta` to skip the slow
+references) and `python benchmarks/bench_losses.py`.
 
 ### Metrics
 
@@ -142,7 +145,10 @@ references run on CPU (MONAI's GPU path needs cuCIM, which is not installed here
 
 "SciPy EDT" is exacta's test reference (`tests/reference.py`): the textbook implementation on
 `scipy.ndimage.distance_transform_edt`. exacta's plain-PyTorch GPU fallback (`backend="torch"`)
-takes 3,020 ms for HD95 at 256³. Mesh distances run on the CPU, also for CUDA inputs.
+takes 3,020 ms for HD95 at 256³. Mesh distances run on the CPU, also for CUDA inputs. The BraTS
+row scores the regions WT, TC and ET of one synthetic case from the lesion test fixtures'
+generator (`tests/fixtures/make_lesion_cases.py`); BraTS-2023-Metrics needs an environment of its
+own (see below) and was timed there, on the same case.
 
 ### Losses
 
@@ -171,17 +177,20 @@ python benchmarks/bench_metrics.py
 python benchmarks/bench_losses.py
 ```
 
-Lesion-wise evaluation is tested against fixtures produced by Panoptica 2.1.7 and by the BraTS
-2023 evaluation code, which need environments of their own (old NumPy and pandas).
-`tests/fixtures/regenerate.sh` rebuilds those environments with `uv`, reruns both tools and reports
-whether their results changed (set `PANOPTICA_VERSION` or `BRATS_COMMIT` to try other releases). Reference tests against MONAI, MedPy and DeepMind's
-surface-distance are skipped unless those packages are installed:
+Reference tests against MONAI, MedPy, DeepMind's surface-distance, MeshMetrics, VTK and
+SimpleITK are skipped unless those packages are installed:
 
 ```bash
-pip install monai medpy scikit-image vtk \
+pip install monai medpy scikit-image vtk SimpleITK \
     "git+https://github.com/google-deepmind/surface-distance.git" \
     "git+https://github.com/gasperpodobnik/MeshMetrics.git"
 ```
+
+Lesion-wise evaluation is tested against fixtures produced by Panoptica 2.1.7 and by the BraTS
+2023 evaluation code, which need environments of their own (old NumPy and pandas).
+`tests/fixtures/regenerate.sh` rebuilds those environments with `uv`, reruns both tools and
+reports whether their results changed (set `PANOPTICA_VERSION` or `BRATS_COMMIT` to try other
+releases).
 
 ## License
 

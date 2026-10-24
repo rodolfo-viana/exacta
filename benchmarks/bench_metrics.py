@@ -16,12 +16,15 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "fixtures"))
 
+import numpy as np  # noqa: E402
 import reference  # noqa: E402
 from _data import pair  # noqa: E402
+from make_lesion_cases import brats_case  # noqa: E402
 
 import exacta.functional as EF  # noqa: E402
-from exacta import components  # noqa: E402
+from exacta import components, lesions  # noqa: E402
 
 SLOW = 5.0  # seconds; slower methods run once instead of --repeat times
 
@@ -158,6 +161,19 @@ def methods(pred, target, classes: int, spacing):
     return cases
 
 
+def brats_methods():
+    """BraTS 2023 lesion-wise scores of the three regions on one synthetic 240x240x155 case (the
+    generator of the lesion test fixtures). BraTS-2023-Metrics needs an environment of its own
+    (see tests/fixtures/regenerate.sh), so it is not timed here."""
+    pred, target = (torch.from_numpy(x)[None] for x in brats_case(np.random.default_rng(7), (240, 240, 155)))
+    cases = []
+    for device in ["cpu"] + (["cuda"] if torch.cuda.is_available() else []):
+        p, t = lesions.brats_regions(pred.to(device)), lesions.brats_regions(target.to(device))
+        cases.append(("BraTS 2023 lesion-wise", "exacta", device,
+                      lambda p=p, t=t: lesions.brats2023(p, t, challenge="GLI", spacing=1.0)))
+    return cases
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sizes", type=int, nargs="+", default=[96, 128, 192])
@@ -180,6 +196,11 @@ def main() -> None:
                 continue
             seconds = timed(fn, device, args.repeat)
             print(f"| {size}³ | {metric} | {impl} | {device} | {seconds * 1e3:,.1f} |", flush=True)
+    for metric, impl, device, fn in brats_methods():
+        if args.only and args.only not in impl:
+            continue
+        seconds = timed(fn, device, args.repeat)
+        print(f"| 240×240×155 | {metric} | {impl} | {device} | {seconds * 1e3:,.1f} |", flush=True)
 
 
 if __name__ == "__main__":
