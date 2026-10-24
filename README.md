@@ -90,6 +90,53 @@ Each convention is an explicit argument, because this is where libraries disagre
     batches, without its 0.3-1.1 GiB of intermediates (`benchmarks/bench_losses.py`). They
     work under `torch.compile` without graph breaks.
 
+## Benchmarks
+
+AMD Ryzen 9 5900XT (16 cores), NVIDIA RTX 5070, PyTorch 2.14.1, CUDA 13.0. Times in milliseconds,
+median of 5 runs. Reproduce with `python benchmarks/bench_metrics.py --sizes 128 256` and
+`python benchmarks/bench_losses.py`.
+
+### Metrics
+
+One synthetic 3-D prediction/target pair with 4 classes, spacing 1.5 × 0.8 × 0.8 mm. MONAI and
+the other references run on CPU (MONAI's GPU path needs cuCIM, which is not installed here).
+
+| Metric | Volume | exacta CPU | exacta GPU | MONAI | Other reference |
+|---|---|---:|---:|---:|---|
+| Dice | 128³ | 8.4 | 0.7 | | NumPy 11.6 |
+| | 256³ | 77 | 5.5 | | NumPy 88 |
+| HD95 | 128³ | 95 | 17 | 735 | SciPy EDT 2,618 |
+| | 256³ | 817 | 106 | 9,858 | SciPy EDT 16,227 |
+| NSD, voxels | 128³ | 68 | 17 | 731 | |
+| | 256³ | 731 | 106 | 9,809 | |
+| NSD, surfels | 128³ | 93 | 18 | 1,570 | DeepMind 1,683 |
+| | 256³ | 906 | 118 | 30,791 | DeepMind 13,799 |
+| Connected components, 26-conn. | 128³ | 2.5 | 1.7 | | SciPy 15.4 |
+| | 256³ | 17.5 | 7.8 | | SciPy 110 |
+| Largest component, 26-conn. | 128³ | 4.8 | 2.5 | 21.6 | |
+| | 256³ | 61 | 13.5 | 169 | |
+
+"SciPy EDT" is exacta's test reference (`tests/reference.py`): the textbook implementation on
+`scipy.ndimage.distance_transform_edt`. exacta's plain-PyTorch GPU fallback (`backend="torch"`)
+takes 3,786 ms for HD95 at 256³.
+
+### Losses
+
+`DiceCELoss`, forward plus backward on GPU, index targets. Extra memory is the peak allocation
+beyond the logits and their gradient.
+
+| Logits | dtype | PyTorch | | Fused (Triton) | |
+|---|---|---:|---:|---:|---:|
+| | | time | extra memory | time | extra memory |
+| 2×4×128³ | float32 | 5.6 | 320 MiB | 0.9 | 0 |
+| 2×4×160³ | float32 | 11.0 | 629 MiB | 1.2 | 1 MiB |
+| 2×14×128³ | float32 | 21.5 | 1,120 MiB | 1.6 | 0 |
+| 2×14×160³ | float32 | 42.9 | 2,191 MiB | 3.0 | 1 MiB |
+| 2×4×128³ | bfloat16 | 6.2 | 320 MiB | 0.7 | 0 |
+| 2×4×160³ | bfloat16 | 12.3 | 629 MiB | 1.0 | 0 |
+| 2×14×128³ | bfloat16 | 23.6 | 1,120 MiB | 1.2 | 0 |
+| 2×14×160³ | bfloat16 | 46.4 | 2,190 MiB | 2.2 | 0 |
+
 ## Development
 
 ```bash

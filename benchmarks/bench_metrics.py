@@ -85,6 +85,8 @@ def methods(pred, target, classes: int, spacing):
              lambda: EF.hd95(pc, tc, spacing=spacing, num_classes=classes, backend="triton")),
             ("HD95", "exacta torch", "cuda",
              lambda: EF.hd95(pc, tc, spacing=spacing, num_classes=classes, backend="torch")),
+            ("NSD voxels", "exacta triton", "cuda",
+             lambda: EF.nsd(pc, tc, spacing=spacing, tolerance=1.0, num_classes=classes)),
             ("NSD surfels", "exacta triton", "cuda",
              lambda: EF.nsd(pc, tc, spacing=spacing, tolerance=1.0, num_classes=classes, surface="surfels")),
             ("label (26-conn.)", "exacta triton", "cuda",
@@ -105,7 +107,37 @@ def methods(pred, target, classes: int, spacing):
                 one_hot, one_hot_t, include_background=True, percentile=95, spacing=spacing
             )
 
-    cases.append(("HD95", "MONAI", "cpu", monai_hd95))
+    def monai_nsd():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            monai.metrics.compute_surface_dice(
+                one_hot, one_hot_t, [1.0] * classes, include_background=True, spacing=spacing
+            )
+
+    def monai_nsd_surfels():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            monai.metrics.compute_surface_dice(
+                one_hot, one_hot_t, [1.0] * classes, include_background=True, spacing=spacing, use_subvoxels=True
+            )
+
+    cases += [
+        ("HD95", "MONAI", "cpu", monai_hd95),
+        ("NSD voxels", "MONAI", "cpu", monai_nsd),
+        ("NSD surfels", "MONAI", "cpu", monai_nsd_surfels),
+        ("largest component", "exacta native", "cpu", lambda: components.largest(fg, connectivity=3)),
+    ]
+    if torch.cuda.is_available():
+        cases.append(("largest component", "exacta triton", "cuda",
+                      lambda: components.largest(fg_cuda, connectivity=3)))
+    try:
+        import skimage.measure  # noqa: F401  (MONAI's connected components need it)
+    except ImportError:
+        return cases
+    from monai.transforms.utils import get_largest_connected_component_mask
+
+    cases.append(("largest component", "MONAI", "cpu",
+                  lambda: get_largest_connected_component_mask(torch.from_numpy(fg), connectivity=3)))
     return cases
 
 
