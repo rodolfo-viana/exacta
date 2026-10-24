@@ -6,6 +6,7 @@ import warnings
 import numpy as np
 import pytest
 import torch
+from scipy import ndimage
 
 import exacta.functional as EF
 from exacta import _native
@@ -101,6 +102,52 @@ def test_point_mesh_distances_match_brute_force(dim):
     np.testing.assert_allclose(got, expected, rtol=1e-10)
     no_mesh = torch.zeros(0, dim, dim, dtype=torch.float64)
     assert np.isinf(_native.point_mesh_distances(torch.from_numpy(points), no_mesh).numpy()).all()
+
+
+@pytest.mark.parametrize("dim", [2, 3])
+def test_point_mesh_distances_are_the_exact_minimum_over_elements(dim):
+    # The tree prunes by bounding boxes; it must never drop the nearest element, even where many
+    # elements are almost equally far (points deep inside a blob, or far outside). Each element on
+    # its own (a tree of one leaf, nothing pruned) gives the kernel's distance to it.
+    rng = np.random.default_rng(2)
+    shape = (14, 12, 10)[:dim]
+    target = ndimage.binary_dilation(rng.random(shape) < 0.04, iterations=2)
+    pred = rng.random(shape) < 0.3
+    spacing = (1.5, 0.8, 0.7)[:dim]
+    elements = _mesh(torch.from_numpy(target), spacing).elements
+    points = torch.cat([
+        _mesh(torch.from_numpy(pred), spacing).centres,
+        torch.from_numpy(rng.random((200, dim)) * 40 - 10),  # inside, near and far outside
+    ])
+    got = _native.point_mesh_distances(points, elements)
+    each = torch.stack([_native.point_mesh_distances(points, element[None]) for element in elements])
+    assert torch.equal(got, each.min(0).values)
+
+
+@pytest.mark.parametrize("shape", [(9, 10, 11), (1, 1, 1), (0, 4, 4), (17, 13), (1, 1), (30, 1)])
+def test_native_neighbour_codes_match_torch(shape):
+    from exacta.functional.surface import _neighbour_code_torch
+
+    for density in (0.0, 0.3, 0.7, 1.0):
+        mask = torch.from_numpy(np.random.default_rng(4).random(shape) < density)
+        code, _ = _native.neighbour_codes(mask)
+        assert torch.equal(code, _neighbour_code_torch(mask))
+
+
+def test_point_mesh_distances_on_a_tree_built_in_parallel():
+    # Large meshes are built in parallel; the answer must equal that of small trees over parts.
+    rng = np.random.default_rng(3)
+    target = ndimage.binary_dilation(rng.random((64, 64, 48)) < 0.002, iterations=4)
+    spacing = (1.5, 0.8, 0.7)
+    elements = _mesh(torch.from_numpy(target), spacing).elements
+    assert len(elements) > 1 << 15
+    points = torch.cat([
+        _mesh(torch.from_numpy(rng.random((64, 64, 48)) < 0.001), spacing).centres,
+        torch.from_numpy(rng.random((300, 3)) * 120 - 10),
+    ])
+    got = _native.point_mesh_distances(points, elements)
+    parts = torch.stack([_native.point_mesh_distances(points, part) for part in elements.split(1024)])
+    assert torch.equal(got, parts.min(0).values)
 
 
 def _meshmetrics(ref, pred, spacing, tolerance):

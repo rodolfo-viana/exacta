@@ -14,9 +14,16 @@ find_package(OpenMP)
 # Kernels behind a plain C interface (csrc/include/exacta/kernels.h). They take raw pointers
 # and never link against PyTorch, so the wheel does not depend on a specific torch version.
 add_library(exacta_kernels STATIC csrc/cpu/counts.cpp csrc/cpu/edt.cpp csrc/cpu/extents.cpp
-            csrc/cpu/label.cpp csrc/cpu/mesh.cpp csrc/cpu/morphology.cpp)
+            csrc/cpu/label.cpp csrc/cpu/mesh.cpp csrc/cpu/meshing.cpp csrc/cpu/morphology.cpp
+            csrc/cpu/sort.cpp)
 target_include_directories(exacta_kernels PUBLIC csrc/include)
 set_target_properties(exacta_kernels PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# The kernels reproduce reference expressions to the last bit, so the compiler must round every
+# product and sum as written: no fused multiply-adds (GCC and Clang may form them otherwise
+# whenever the target has FMA, as with -march=native).
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(exacta_kernels PRIVATE -ffp-contract=off)
+endif()
 if(OpenMP_CXX_FOUND)
   target_link_libraries(exacta_kernels PUBLIC OpenMP::OpenMP_CXX)
 endif()

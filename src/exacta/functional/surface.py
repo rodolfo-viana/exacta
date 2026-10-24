@@ -363,7 +363,8 @@ def _percentile(x: _Distances, q: float) -> float:
         return _weighted_percentile(x.d.cpu().numpy(), x.w.cpu().numpy(), q)
     if q == 100:
         return x.d.max().item()
-    d = x.d.sort().values
+    # NumPy's CPU sort is vectorised and many times faster than PyTorch's; same order, NaN last.
+    d = torch.from_numpy(np.sort(x.d.numpy())) if x.d.device.type == "cpu" else x.d.sort().values
     pos = q / 100 * (d.numel() - 1)
     lo = math.floor(pos)
     hi = min(lo + 1, d.numel() - 1)
@@ -376,8 +377,12 @@ def _weighted_percentile(d: np.ndarray, w: np.ndarray, q: float) -> float:
     NumPy, not PyTorch, so the cumulative sum and the total round as DeepMind's do: with equal
     areas the cumulative fraction can hit q% exactly, and a one-ulp difference moves the result.
     """
-    order = np.lexsort((w, d))  # DeepMind sorts (distance, area) pairs
-    d, w = d[order], w[order]
+    # DeepMind sorts (distance, area) pairs; ties have equal values, so any such sort will do.
+    pairs = _native.sort_pairs(d, w) if _native.available() else None
+    if pairs is None:  # NaN, or no compiled extension
+        order = np.lexsort((w, d))
+        pairs = d[order], w[order]
+    d, w = pairs
     cum = np.cumsum(w) / np.sum(w)
     return float(d[min(int(np.searchsorted(cum, q / 100.0)), d.size - 1)])
 
@@ -537,30 +542,19 @@ def _mesh(mask: Tensor, spacing: Sequence[float]) -> _Mesh:
     """
     if not _native.available():
         raise RuntimeError("surface='mesh' needs exacta's compiled extension")
-    ndim = mask.ndim
-    code = _neighbour_code(mask).cpu()
-    on = (code != 0) & (code != (1 << (1 << ndim)) - 1)
-    corners = torch.nonzero(on)
-    codes = code[on].long()
-    table, counts = _mesh_table(ndim)
-    per_block = counts[codes]
-    owner = torch.repeat_interleave(torch.arange(codes.numel()), per_block)
-    first = torch.cumsum(per_block, 0) - per_block
-    slot = torch.arange(owner.numel()) - torch.repeat_interleave(first, per_block)
-    # Vertices in half-voxels, exact integers: the table's offsets plus twice the block's first voxel.
-    half = table[codes[owner], slot] + 2 * (corners[owner] - 1)[:, None, :]  # (M, d, d)
-    elements = (half.double() / 2) * torch.tensor(spacing, dtype=torch.float64)
-    if ndim == 3:
-        # VTK's parametric centre of a triangle, evaluated as VTK does
-        third = 1.0 / 3.0
-        centres = elements[:, 0] * (1.0 - third - third) + elements[:, 1] * third + elements[:, 2] * third
+    table, counts = _mesh_table(mask.ndim)
+    code, total = _native.neighbour_codes(mask.cpu(), counts)
+    # Vertices (h / 2) * spacing for half-voxel coordinates h, and VTK's parametric centre of a
+    # triangle (the midpoint of a segment), evaluated as VTK does.
+    elements, centres, block, element_code, slot = _native.mesh_elements(
+        code, table, counts, spacing, total
+    )
+    if mask.ndim == 3:
         edges = elements[:, 1:] - elements[:, :1]
         sizes = 0.5 * torch.linalg.cross(edges[:, 0], edges[:, 1]).norm(dim=1)
     else:
-        centres = (elements[:, 0] + elements[:, 1]) / 2  # MeshMetrics' segment centres
         sizes = (elements[:, 1] - elements[:, 0]).norm(dim=1)
-    block = torch.nonzero(on.reshape(-1)).squeeze(1)[owner]
-    return _Mesh(elements, centres, sizes, code, block, codes[owner], slot)
+    return _Mesh(elements, centres, sizes, code, block, element_code, slot)
 
 
 @functools.lru_cache(maxsize=None)
@@ -581,6 +575,12 @@ def _neighbour_code(mask: Tensor) -> Tensor:
     voxel is in the mask: in 3-D the block's voxel (a, b, c) carries bit 7 - (4a + 2b + c),
     so (0, 0, 0) is 128 and (1, 1, 1) is 1. Voxels outside the image count as outside.
     """
+    if mask.device.type == "cpu" and _native.available():
+        return _native.neighbour_codes(mask)[0]
+    return _neighbour_code_torch(mask)
+
+
+def _neighbour_code_torch(mask: Tensor) -> Tensor:
     padded = torch.nn.functional.pad(mask.to(torch.uint8), (1, 1) * mask.ndim)
     code = torch.zeros(tuple(n + 1 for n in mask.shape), dtype=torch.uint8, device=mask.device)
     bits = 1 << mask.ndim

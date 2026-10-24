@@ -151,6 +151,23 @@ bool channel_counts(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_con
 using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
 using Indices = nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
 
+// Returns false when a key or value is NaN.
+bool sort_pairs(nb::ndarray<double, nb::ndim<1>, nb::device::cpu, nb::c_contig> keys,
+                nb::ndarray<double, nb::ndim<1>, nb::device::cpu, nb::c_contig> values,
+                int num_threads) {
+  if (keys.shape(0) != values.shape(0)) throw std::invalid_argument("keys and values (N,) differ");
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_sort_pairs_f64(keys.data(), values.data(),
+                                   static_cast<std::int64_t>(keys.shape(0)), num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT) {
+    throw std::runtime_error(exacta_status_string(status));
+  }
+  return status == EXACTA_OK;
+}
+
 // Returns false when a value lies outside [0, bins).
 bool histogram(Flat<std::int32_t> values, Counts out, int num_threads) {
   int status;
@@ -228,6 +245,75 @@ void mask_extents(Bytes masks, Indices lo, Indices hi, int num_threads) {
   }
   if (status == EXACTA_INVALID_ARGUMENT) {
     throw std::invalid_argument("mask_extents: masks must have 1 to 3 spatial dimensions");
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
+
+using Codes = nb::ndarray<std::uint8_t, nb::device::cpu, nb::c_contig>;
+template <int D>
+using Table = nb::ndarray<const std::int64_t, nb::ndim<D>, nb::device::cpu, nb::c_contig>;
+
+// Mask shape (2-D or 3-D) from the shape of its corner grid (one more along each axis).
+std::vector<std::int64_t> mask_shape_of(Codes code) {
+  const int ndim = static_cast<int>(code.ndim());
+  if (ndim != 2 && ndim != 3) throw std::invalid_argument("code must have 2 or 3 dimensions");
+  std::vector<std::int64_t> shape(ndim);
+  for (int axis = 0; axis < ndim; ++axis) {
+    if (code.shape(axis) < 1) throw std::invalid_argument("code has an empty axis");
+    shape[axis] = static_cast<std::int64_t>(code.shape(axis)) - 1;
+  }
+  return shape;
+}
+
+// Returns the number of elements (0 when `counts` is empty).
+std::int64_t neighbour_codes(Bytes mask, Codes code, Table<1> counts, int num_threads) {
+  const std::vector<std::int64_t> shape = mask_shape_of(code);
+  const int ndim = static_cast<int>(shape.size());
+  bool agree = static_cast<int>(mask.ndim()) == ndim;
+  for (int axis = 0; agree && axis < ndim; ++axis) {
+    agree = static_cast<std::int64_t>(mask.shape(axis)) == shape[axis];
+  }
+  const bool with_counts = counts.shape(0) > 0;
+  if (!agree || (with_counts && counts.shape(0) != (std::size_t(1) << (1 << ndim)))) {
+    throw std::invalid_argument("mask (shape), code (shape + 1) and counts (2^(2^ndim)) disagree");
+  }
+  std::int64_t num_elements = 0;
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_neighbour_codes_u8(mask.data(), shape.data(), ndim, code.data(),
+                                       with_counts ? counts.data() : nullptr, &num_elements,
+                                       num_threads);
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+  return num_elements;
+}
+
+void mesh_elements(Codes code, Table<4> table, Table<1> counts, std::vector<double> spacing,
+                   nb::ndarray<double, nb::ndim<3>, nb::device::cpu, nb::c_contig> elements,
+                   nb::ndarray<double, nb::ndim<2>, nb::device::cpu, nb::c_contig> centres,
+                   Counts block, Counts element_code, Counts slot, int num_threads) {
+  const std::vector<std::int64_t> shape = mask_shape_of(code);
+  const auto ndim = static_cast<std::size_t>(shape.size());
+  const std::size_t m = elements.shape(0);
+  if (spacing.size() != ndim || table.shape(0) != counts.shape(0) ||
+      counts.shape(0) != (std::size_t(1) << (1 << ndim)) || table.shape(2) != ndim ||
+      table.shape(3) != ndim || elements.shape(1) != ndim || elements.shape(2) != ndim ||
+      centres.shape(0) != m || centres.shape(1) != ndim || block.shape(0) != m ||
+      element_code.shape(0) != m || slot.shape(0) != m) {
+    throw std::invalid_argument("mesh_elements: arguments disagree in shape");
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_mesh_elements_f64(
+        code.data(), shape.data(), static_cast<int>(ndim), table.data(), counts.data(),
+        static_cast<std::int64_t>(table.shape(1)), spacing.data(), static_cast<std::int64_t>(m),
+        elements.data(), centres.data(), block.data(), element_code.data(), slot.data(),
+        num_threads);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) {
+    throw std::invalid_argument("mesh_elements: the codes hold a different number of elements");
   }
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }
@@ -322,6 +408,9 @@ NB_MODULE(_C, m) {
   m.def("channel_counts", &channel_counts<float, exacta_channel_counts_f32>, nb::arg("pred"),
         nb::arg("target"), nb::arg("both"), nb::arg("in_pred"), nb::arg("in_target"),
         nb::arg("num_threads") = 0, counts_doc);
+  m.def("sort_pairs", &sort_pairs, nb::arg("keys"), nb::arg("values"), nb::arg("num_threads") = 0,
+        "Sort the float64 pairs (keys[i], values[i]) in place by key, then value; returns False "
+        "(arrays untouched) if one is NaN.");
   m.def("histogram", &histogram, nb::arg("values"), nb::arg("out"), nb::arg("num_threads") = 0,
         "Write into `out` (int64, (bins,)) the number of elements of each value of the int32 label "
         "map `values` (N,); returns False if a value lies outside [0, bins).");
@@ -339,6 +428,17 @@ NB_MODULE(_C, m) {
         nb::arg("num_threads") = 0,
         "Write into `lo` and `hi` (int64, (C, ndim)) the bounding box of each mask of `masks` "
         "(uint8, (C, *spatial)); shape and -1 for an empty mask.");
+  m.def("neighbour_codes", &neighbour_codes, nb::arg("mask"), nb::arg("code"), nb::arg("counts"),
+        nb::arg("num_threads") = 0,
+        "Write into `code` (uint8, mask shape + 1) the neighbour code of every voxel corner of "
+        "the 2-D or 3-D `mask`; with `counts` (int64, elements per code; may be empty) return the "
+        "number of mesh elements.");
+  m.def("mesh_elements", &mesh_elements, nb::arg("code"), nb::arg("table"), nb::arg("counts"),
+        nb::arg("spacing"), nb::arg("elements"), nb::arg("centres"), nb::arg("block"),
+        nb::arg("element_code"), nb::arg("slot"), nb::arg("num_threads") = 0,
+        "Write the mesh elements the neighbour codes `code` select from `table` (int64, (codes, "
+        "most per code, d, d), half-voxels) into `elements` (M, d, d), with their centres "
+        "(M, d), blocks, codes and slots (M,).");
   m.def("dilate", &dilate, nb::arg("mask"), nb::arg("out"), nb::arg("connectivity"),
         nb::arg("steps"), nb::arg("num_threads") = 0,
         "Write into `out` (uint8, same shape) the binary dilation of `mask` by `steps` steps of "

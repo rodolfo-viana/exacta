@@ -127,6 +127,34 @@ int exacta_class_extents_i32(const int32_t *labels, const int64_t *shape, int nd
 int exacta_class_extents_i64(const int64_t *labels, const int64_t *shape, int ndim,
                              int64_t num_classes, int64_t *lo, int64_t *hi, int num_threads);
 
+/* Sorts `n` (key, value) pairs in place, in increasing lexicographic order: by key, then by
+ * value. Returns EXACTA_INVALID_ARGUMENT, with both arrays as they were, if a key or value is NaN.
+ */
+int exacta_sort_pairs_f64(double *keys, double *values, int64_t n, int num_threads);
+
+/* DeepMind's neighbour code at every corner of the voxels of a 2-D or 3-D mask (`shape`; nonzero
+ * is inside): `code` has shape + 1 along each axis, and the code of corner c has one bit per
+ * voxel c - 1 + o of the block around it, o in {0, 1}^ndim, set when the voxel is inside (outside
+ * the image counts as outside); offset number i (last axis fastest) sets bit 2^ndim - 1 - i. With
+ * `counts` (elements per code), `*num_elements` receives the number of elements of the blocks
+ * whose code is neither 0 nor all ones.
+ */
+int exacta_neighbour_codes_u8(const uint8_t *mask, const int64_t *shape, int ndim, uint8_t *code,
+                              const int64_t *counts, int64_t *num_elements, int num_threads);
+
+/* The mesh of neighbour codes (`code`, of a mask of shape `shape`): for every block whose code is
+ * neither 0 nor all ones, in C order, the counts[code] elements of `table` (codes x max_per_code
+ * x ndim x ndim offsets in half-voxels from the block's first voxel), as vertices in physical
+ * units, (h / 2) * spacing for half-voxel coordinate h; with their centres (VTK's parametric
+ * centre of a triangle, the midpoint of a segment), blocks (flat index into `code`), codes and
+ * slots among their code's elements. `num_elements` must be the total.
+ */
+int exacta_mesh_elements_f64(const uint8_t *code, const int64_t *shape, int ndim,
+                             const int64_t *table, const int64_t *counts, int64_t max_per_code,
+                             const double *spacing, int64_t num_elements, double *elements,
+                             double *centres, int64_t *block, int64_t *element_code,
+                             int64_t *slot, int num_threads);
+
 #ifdef __cplusplus
 }
 #endif

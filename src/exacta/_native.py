@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -83,6 +84,37 @@ def _as_bytes(mask: Tensor) -> Tensor:
     return (mask != 0).to(torch.uint8).contiguous()
 
 
+def neighbour_codes(mask: Tensor, counts: Tensor | None = None) -> tuple[Tensor, int]:
+    """DeepMind's neighbour code (uint8, shape + 1 along each axis) at every voxel corner of a CPU
+    2-D or 3-D mask, and, given ``counts`` (int64, elements per code), the number of mesh
+    elements; see ``exacta_neighbour_codes_u8`` in ``kernels.h``."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    mask = _as_bytes(mask)
+    code = torch.empty(tuple(n + 1 for n in mask.shape), dtype=torch.uint8)
+    counts = counts.contiguous() if counts is not None else torch.empty(0, dtype=torch.int64)
+    total = _C.neighbour_codes(mask, code, counts)
+    return code, total
+
+
+def mesh_elements(
+    code: Tensor, table: Tensor, counts: Tensor, spacing: Sequence[float], num_elements: int
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Elements (M, d, d), centres (M, d), blocks, codes and slots (M,) of the mesh that the
+    neighbour codes select from ``table``; see ``exacta_mesh_elements_f64`` in ``kernels.h``."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    ndim = code.ndim
+    elements = torch.empty((num_elements, ndim, ndim), dtype=torch.float64)
+    centres = torch.empty((num_elements, ndim), dtype=torch.float64)
+    block, element_code, slot = (torch.empty(num_elements, dtype=torch.int64) for _ in range(3))
+    _C.mesh_elements(
+        code.contiguous(), table.contiguous(), counts.contiguous(), [float(s) for s in spacing],
+        elements, centres, block, element_code, slot,
+    )
+    return elements, centres, block, element_code, slot
+
+
 def mask_extents(masks: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     """Presence (C,), first and last index (C, ndim) of each of the CPU masks (C, *spatial)."""
     if _C is None:
@@ -115,6 +147,16 @@ def confusion(pred: Tensor, target: Tensor, classes: int) -> Tensor | None:
     out = torch.empty((classes, classes), dtype=torch.int64)
     ok = _C.confusion(pred.contiguous().reshape(-1), target.contiguous().reshape(-1), out)
     return out if ok else None
+
+
+def sort_pairs(keys: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """Copies of two float64 arrays with their (key, value) pairs sorted by key, then by value, as
+    ``np.lexsort((values, keys))`` orders them; parallel. None if one is NaN."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    keys = np.array(keys, dtype=np.float64, order="C")
+    values = np.array(values, dtype=np.float64, order="C")
+    return (keys, values) if _C.sort_pairs(keys, values) else None
 
 
 def histogram(values: Tensor, bins: int) -> Tensor | None:
