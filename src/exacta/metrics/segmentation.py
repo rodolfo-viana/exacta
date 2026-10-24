@@ -9,7 +9,7 @@ from torch import Tensor
 
 from exacta import functional
 from exacta._inputs import InputFormat
-from exacta.functional.surface import Backend, Combine
+from exacta.functional.surface import Backend, Combine, Surface
 from exacta.metrics.base import PerCaseMetric
 
 
@@ -81,6 +81,7 @@ class HausdorffDistance(_SurfaceMetric):
         spacing: Any = None,
         percentile: float = 100.0,
         combine: Combine = "max",
+        surface: Surface = "voxels",
         input_format: InputFormat = "index",
         num_classes: int | None = None,
         include_background: bool = True,
@@ -92,6 +93,7 @@ class HausdorffDistance(_SurfaceMetric):
             spacing,
             percentile=percentile,
             combine=combine,
+            surface=surface,
             input_format=input_format,
             num_classes=num_classes,
             include_background=include_background,
@@ -118,6 +120,7 @@ class ASSD(_SurfaceMetric):
         *,
         spacing: Any = None,
         combine: Combine = "pooled",
+        surface: Surface = "voxels",
         input_format: InputFormat = "index",
         num_classes: int | None = None,
         include_background: bool = True,
@@ -128,6 +131,7 @@ class ASSD(_SurfaceMetric):
         super().__init__(
             spacing,
             combine=combine,
+            surface=surface,
             input_format=input_format,
             num_classes=num_classes,
             include_background=include_background,
@@ -147,6 +151,7 @@ class NSD(_SurfaceMetric):
         *,
         tolerance: Any,
         spacing: Any = None,
+        surface: Surface = "voxels",
         input_format: InputFormat = "index",
         num_classes: int | None = None,
         include_background: bool = True,
@@ -157,6 +162,7 @@ class NSD(_SurfaceMetric):
         super().__init__(
             spacing,
             tolerance=tolerance,
+            surface=surface,
             input_format=input_format,
             num_classes=num_classes,
             include_background=include_background,

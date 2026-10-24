@@ -1,40 +1,52 @@
 """Surface-distance metrics: Hausdorff distance (HD, HD95), average symmetric surface distance
 (ASSD) and normalized surface Dice (NSD).
 
-Shared definitions:
-    * The boundary of a mask is the set of mask voxels with at least one face-adjacent
-      neighbour outside the mask. Voxels outside the image count as background. Every boundary
-      voxel has equal weight: the area-weighted surface elements of DeepMind's surface-distance
-      (and MONAI's ``use_subvoxels=True``) are not implemented yet.
-    * Distances are Euclidean, between voxel centres, in the physical units of ``spacing``.
-    * ``d(A -> B)`` holds, for every boundary voxel of A, the distance to the nearest boundary
-      voxel of B. P is the prediction and T the target.
+Every metric measures, for each element of one mask's surface, the Euclidean distance to the
+nearest element of the other mask's surface, in the physical units of ``spacing``. ``d(A -> B)``
+denotes these distances from the surface of A to that of B; P is the prediction and T the target.
+Voxels outside the image count as background.
 
-HD and ASSD reduce each direction with a statistic ``s`` (for HD the q-th percentile with linear
-interpolation, NumPy's default; for ASSD the mean) and join the two directions with ``combine``:
+``surface`` chooses what a surface element is:
+
+    * ``"voxels"``: the boundary voxels, i.e. mask voxels with at least one face-adjacent
+      neighbour outside the mask, located at voxel centres, each with equal weight. This is
+      MONAI's default and MedPy's definition.
+    * ``"surfels"``: DeepMind's surface elements (surface-distance; MONAI's
+      ``use_subvoxels=True``). Each 2x2(x2) block of voxels that straddles the surface gives one
+      element, located at the voxel corner the block shares and weighted by the area (3-D) or
+      length (2-D) of the marching-cubes surface inside the block. Weights replace counts in every
+      statistic below, and percentiles become area-weighted: the smallest distance at which the
+      cumulative area reaches q% (no interpolation), as in DeepMind's ``compute_robust_hausdorff``.
+
+HD and ASSD reduce each direction with a statistic ``s`` (for HD the q-th percentile, with linear
+interpolation for voxels as in NumPy's default; for ASSD the mean) and join the two directions
+with ``combine``:
 
     * ``"max"``: ``max(s(d(P -> T)), s(d(T -> P)))``
     * ``"mean"``: ``(s(d(P -> T)) + s(d(T -> P))) / 2``
     * ``"pooled"``: ``s`` over both sets of distances together
 
-Tools disagree on this choice, so it is an argument rather than a fixed definition:
+Tools disagree on these choices, so they are arguments rather than fixed definitions:
 
-    ===========  =======  ==================================
-    Tool         HD/HD95  ASSD
-    ===========  =======  ==================================
-    MONAI        max      pooled (``symmetric=True``)
-    MedPy 0.5.2  pooled   pooled
-    MedPy 0.4    pooled   mean
-    ===========  =======  ==================================
+    ===========  ========  =======  ==================================
+    Tool         surface   HD/HD95  ASSD
+    ===========  ========  =======  ==================================
+    MONAI        voxels    max      pooled (``symmetric=True``)
+    MedPy 0.5.2  voxels    pooled   pooled
+    MedPy 0.4    voxels    pooled   mean
+    DeepMind     surfels   max      both directed means are returned
+    ===========  ========  =======  ==================================
 
-NSD at tolerance ``tau`` (Nikolov et al., JMIR 2021) is the fraction of boundary voxels, of both
-masks together, that lie within ``tau`` of the other boundary:
-``(#{d(P -> T) <= tau} + #{d(T -> P) <= tau}) / (#d(P -> T) + #d(T -> P))``. This is MONAI's
-``compute_surface_dice`` with its default ``use_subvoxels=False``.
+NSD at tolerance ``tau`` (Nikolov et al., JMIR 2021) is the fraction of the surface, of both
+masks together, that lies within ``tau`` of the other surface:
+``(#{d(P -> T) <= tau} + #{d(T -> P) <= tau}) / (#d(P -> T) + #d(T -> P))``, with ``#`` counting
+voxels or summing surfel areas. This is MONAI's ``compute_surface_dice`` (``use_subvoxels`` picks
+the representation) and, for surfels, DeepMind's ``compute_surface_dice_at_tolerance``.
 """
 
 from __future__ import annotations
 
+import itertools
 import math
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, NamedTuple
@@ -45,9 +57,11 @@ from torch import Tensor
 
 from exacta import _native
 from exacta._inputs import InputFormat, Segmentations, as_spacing, like_input, to_torch, validate
+from exacta.functional._surfel_tables import surfel_measures
 
 Backend = Literal["auto", "native", "torch"]
 Combine = Literal["max", "mean", "pooled"]
+Surface = Literal["voxels", "surfels"]
 
 EdtSq = Callable[[Tensor, Sequence[float]], Tensor]
 
@@ -56,8 +70,8 @@ _CHUNK = 1 << 24
 
 
 class _Distances(NamedTuple):
-    """Distances from the boundary voxels of one mask to the other mask's boundary, and the
-    voxels' weights (``None`` when every voxel counts once)."""
+    """Distances from the surface elements of one mask to the other mask's surface, and the
+    elements' areas or lengths (``None`` when every element counts once)."""
 
     d: Tensor
     w: Tensor | None
@@ -70,6 +84,7 @@ def hausdorff_distance(
     spacing: Any,
     percentile: float = 100.0,
     combine: Combine = "max",
+    surface: Surface = "voxels",
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
@@ -85,8 +100,9 @@ def hausdorff_distance(
             dimensions (a SimpleITK array is (z, y, x) while ``GetSpacing()`` is (x, y, z)).
             A scalar, one value per spatial axis, or a (B, ndim) array for per-case spacing.
         percentile: 100 gives the Hausdorff distance, 95 gives HD95.
-        combine: How the two directions are joined: ``"max"`` (MONAI), ``"pooled"`` (MedPy)
-            or ``"mean"``.
+        combine: How the two directions are joined: ``"max"`` (MONAI, DeepMind), ``"pooled"``
+            (MedPy) or ``"mean"``.
+        surface: ``"voxels"`` (MONAI, MedPy) or area-weighted ``"surfels"`` (DeepMind).
         num_classes, include_background: As in :func:`exacta.functional.dice`.
         both_empty: Value when the class is absent from both prediction and target.
         one_empty: Value when the class is absent from exactly one of them.
@@ -111,7 +127,7 @@ def hausdorff_distance(
         return _combine(pt, tp, combine, lambda x: _percentile(x, percentile))
 
     out = _per_case(
-        seg, spacing, score, both_empty=both_empty, one_empty=one_empty, backend=backend
+        seg, spacing, score, surface=surface, both_empty=both_empty, one_empty=one_empty, backend=backend
     )
     return like_input(out, pred)
 
@@ -127,6 +143,7 @@ def assd(
     *,
     spacing: Any,
     combine: Combine = "pooled",
+    surface: Surface = "voxels",
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
@@ -138,7 +155,8 @@ def assd(
 
     Args:
         combine: How the two directions are joined: ``"pooled"`` (MONAI, MedPy 0.5.2), ``"mean"``
-            of the two directed means (MedPy 0.4) or ``"max"`` of them.
+            of the two directed means (MedPy 0.4; the mean of the pair DeepMind returns) or
+            ``"max"`` of them.
         Others: As in :func:`hausdorff_distance`.
 
     Returns:
@@ -157,7 +175,7 @@ def assd(
         return _combine(pt, tp, combine, _mean)
 
     out = _per_case(
-        seg, spacing, score, both_empty=both_empty, one_empty=one_empty, backend=backend
+        seg, spacing, score, surface=surface, both_empty=both_empty, one_empty=one_empty, backend=backend
     )
     return like_input(out, pred)
 
@@ -168,6 +186,7 @@ def nsd(
     *,
     spacing: Any,
     tolerance: Any,
+    surface: Surface = "voxels",
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
@@ -179,8 +198,8 @@ def nsd(
 
     Distances equal to the tolerance count as within it. Each distance is the exact
     floating-point minimum of the expression SciPy's ``distance_transform_edt`` evaluates, so a
-    distance that ties with the tolerance lands on the same side as in MedPy, which uses SciPy.
-    (SciPy itself returns a value one ulp above that minimum at a few voxels per
+    distance that ties with the tolerance lands on the same side as in MedPy and DeepMind, which
+    use SciPy. (SciPy itself returns a value one ulp above that minimum at a few voxels per
     million.) MONAI casts distances to float32 before comparing them with the tolerance, which
     agrees on exact ties but also counts distances within float32 resolution of the tolerance.
 
@@ -188,7 +207,7 @@ def nsd(
         tolerance: Accepted boundary deviation, in the units of ``spacing``. A scalar, or one
             value per evaluated class (``num_classes - 1`` values when the background is excluded).
         one_empty: Value when the class is absent from exactly one of prediction and target.
-            The default 0 is the limit of the definition: no boundary voxel has a partner.
+            The default 0 is the limit of the definition: no surface element has a partner.
         Others: As in :func:`hausdorff_distance`.
 
     Returns:
@@ -209,7 +228,7 @@ def nsd(
         return (within_p + within_t) / (total_p + total_t)
 
     out = _per_case(
-        seg, spacing, score, both_empty=both_empty, one_empty=one_empty, backend=backend
+        seg, spacing, score, surface=surface, both_empty=both_empty, one_empty=one_empty, backend=backend
     )
     return like_input(out, pred)
 
@@ -219,11 +238,18 @@ def _per_case(
     spacing: Any,
     score: Callable[[_Distances, _Distances, int], float],
     *,
+    surface: Surface,
     both_empty: float,
     one_empty: float,
     backend: Backend,
 ) -> Tensor:
     """Apply ``score(d(P -> T), d(T -> P), class position)`` to every case and class."""
+    if surface == "voxels":
+        elements = _voxel_distances
+    elif surface == "surfels":
+        elements = _surfel_distances
+    else:
+        raise ValueError(f"surface must be 'voxels' or 'surfels', got {surface!r}")
     spacings = as_spacing(spacing, batch=seg.batch, ndim=seg.ndim)
     edt_sq = _native.edt_sq if _use_native(backend, seg.pred.device) else _edt_sq_torch
 
@@ -237,7 +263,7 @@ def _per_case(
             if not (has_p and has_t):
                 out[b, k] = one_empty
                 continue
-            out[b, k] = score(*_voxel_distances(p, t, spacings[b], edt_sq), k)
+            out[b, k] = score(*elements(p, t, spacings[b], edt_sq), k)
     return out.to(seg.pred.device)
 
 
@@ -255,6 +281,8 @@ def _combine(pt: _Distances, tp: _Distances, combine: Combine, stat: Callable[[_
 
 
 def _percentile(x: _Distances, q: float) -> float:
+    if x.w is not None:
+        return _weighted_percentile(x.d.cpu().numpy(), x.w.cpu().numpy(), q)
     if q == 100:
         return x.d.max().item()
     d = x.d.sort().values
@@ -264,6 +292,18 @@ def _percentile(x: _Distances, q: float) -> float:
     return (d[lo] + (d[hi] - d[lo]) * (pos - lo)).item()
 
 
+def _weighted_percentile(d: np.ndarray, w: np.ndarray, q: float) -> float:
+    """Smallest distance at which the cumulative weight reaches q%, computed as DeepMind does.
+
+    NumPy, not PyTorch, so the cumulative sum and the total round as DeepMind's do: with equal
+    areas the cumulative fraction can hit q% exactly, and a one-ulp difference moves the result.
+    """
+    order = np.lexsort((w, d))  # DeepMind sorts (distance, area) pairs
+    d, w = d[order], w[order]
+    cum = np.cumsum(w) / np.sum(w)
+    return float(d[min(int(np.searchsorted(cum, q / 100.0)), d.size - 1)])
+
+
 def _mean(x: _Distances) -> float:
     if x.w is None:
         return x.d.mean().item()
@@ -271,7 +311,7 @@ def _mean(x: _Distances) -> float:
 
 
 def _within(x: _Distances, tau: float) -> tuple[float, float]:
-    """Amount of boundary (voxel count, or total weight) within ``tau``, and the total amount."""
+    """Amount of surface (voxel count, or surfel area) within ``tau``, and the total amount."""
     inside = x.d <= tau
     if x.w is None:
         return inside.sum().item(), x.d.numel()
@@ -314,6 +354,41 @@ def _voxel_distances(
 ) -> tuple[_Distances, _Distances]:
     d_pt, d_tp = _surface_distances(_boundary(p, p.ndim), _boundary(t, t.ndim), spacing, edt_sq)
     return _Distances(d_pt, None), _Distances(d_tp, None)
+
+
+def _surfel_distances(
+    p: Tensor, t: Tensor, spacing: Sequence[float], edt_sq: EdtSq
+) -> tuple[_Distances, _Distances]:
+    # Cropping to the bounding box of both masks is exact, as in DeepMind's implementation: every
+    # block that straddles a surface has its corner on the box or inside it.
+    idx = torch.nonzero(p | t)
+    box = tuple(slice(lo, hi + 1) for lo, hi in zip(idx.amin(0).tolist(), idx.amax(0).tolist()))
+    code_p, code_t = _neighbour_code(p[box]), _neighbour_code(t[box])
+    full = (1 << (1 << p.ndim)) - 1  # every voxel of the block inside: no surface
+    on_p = (code_p != 0) & (code_p != full)
+    on_t = (code_t != 0) & (code_t != full)
+    to_p, to_t = edt_sq(on_p, spacing), edt_sq(on_t, spacing)
+    measure = torch.from_numpy(surfel_measures(tuple(spacing))).to(p.device)
+    return (
+        _Distances(_sqrt(to_t[on_p]), measure[code_p[on_p].long()]),
+        _Distances(_sqrt(to_p[on_t]), measure[code_t[on_t].long()]),
+    )
+
+
+def _neighbour_code(mask: Tensor) -> Tensor:
+    """DeepMind's neighbour code at every voxel corner, including those on the image border.
+
+    The code of a corner has one bit per voxel of the 2x2(x2) block around it, set when the
+    voxel is in the mask: in 3-D the block's voxel (a, b, c) carries bit 7 - (4a + 2b + c),
+    so (0, 0, 0) is 128 and (1, 1, 1) is 1. Voxels outside the image count as outside.
+    """
+    padded = torch.nn.functional.pad(mask.to(torch.uint8), (1, 1) * mask.ndim)
+    code = torch.zeros(tuple(n + 1 for n in mask.shape), dtype=torch.uint8, device=mask.device)
+    bits = 1 << mask.ndim
+    for i, offset in enumerate(itertools.product((0, 1), repeat=mask.ndim)):
+        block = padded[tuple(slice(o, o + n + 1) for o, n in zip(offset, mask.shape))]
+        code += block << (bits - 1 - i)
+    return code
 
 
 def _boundary(mask: Tensor, ndim: int) -> Tensor:

@@ -51,13 +51,32 @@ def methods(pred, target, classes: int, spacing):
          lambda: EF.hd95(pred, target, spacing=spacing, num_classes=classes, backend="torch")),
         ("HD95", "scipy reference", "cpu",
          lambda: reference.per_case(reference.hausdorff, p_np, t_np, classes, spacings=[spacing], percentile=95)),
+        ("NSD voxels", "exacta native", "cpu",
+         lambda: EF.nsd(pred, target, spacing=spacing, tolerance=1.0, num_classes=classes)),
+        ("NSD surfels", "exacta native", "cpu",
+         lambda: EF.nsd(pred, target, spacing=spacing, tolerance=1.0, num_classes=classes, surface="surfels")),
     ]
+    try:
+        import surface_distance
+    except ImportError:
+        pass
+    else:
+        def deepmind_nsd():
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                for c in range(classes):
+                    s = surface_distance.compute_surface_distances(t_np[0] == c, p_np[0] == c, spacing)
+                    surface_distance.compute_surface_dice_at_tolerance(s, 1.0)
+
+        cases.append(("NSD surfels", "DeepMind", "cpu", deepmind_nsd))
     if torch.cuda.is_available():
         pc, tc = pred.cuda(), target.cuda()
         cases += [
             ("Dice", "exacta", "cuda", lambda: EF.dice(pc, tc, num_classes=classes)),
             ("HD95", "exacta torch", "cuda",
              lambda: EF.hd95(pc, tc, spacing=spacing, num_classes=classes, backend="torch")),
+            ("NSD surfels", "exacta torch", "cuda",
+             lambda: EF.nsd(pc, tc, spacing=spacing, tolerance=1.0, num_classes=classes, surface="surfels")),
         ]
     try:
         import monai.metrics
