@@ -53,7 +53,9 @@ def methods(pred, target, classes: int, spacing):
         ("HD95", "exacta native", "cpu",
          lambda: EF.hd95(pred, target, spacing=spacing, num_classes=classes, backend="native")),
         ("HD95", "scipy reference", "cpu",
-         lambda: reference.per_case(reference.hausdorff, p_np, t_np, classes, spacings=[spacing], percentile=95)),
+         lambda: reference.per_case(
+             reference.hausdorff, p_np, t_np, classes, spacings=[spacing], percentile=95
+         )),
         ("NSD voxels", "exacta native", "cpu",
          lambda: EF.nsd(pred, target, spacing=spacing, tolerance=1.0, num_classes=classes)),
         ("NSD surfels", "exacta native", "cpu",
@@ -138,7 +140,8 @@ def methods(pred, target, classes: int, spacing):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             monai.metrics.compute_surface_dice(
-                one_hot, one_hot_t, [1.0] * classes, include_background=True, spacing=spacing, use_subvoxels=True
+                one_hot, one_hot_t, [1.0] * classes, include_background=True, spacing=spacing,
+                use_subvoxels=True,
             )
 
     cases += [

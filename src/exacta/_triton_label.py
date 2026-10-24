@@ -20,7 +20,11 @@ try:
 except ImportError:  # CPU-only PyTorch builds ship without Triton
     triton = None
 
-_BLOCK = 256
+_BLOCK = 32  # lanes per program, one warp: block-wide loop conditions are then a warp vote
+# One thread per lane. With more threads than lanes, Triton gives a lane to several threads and
+# lets only one issue its atomic minimum; the others can retry a union forever.
+_WARPS = _BLOCK // 32
+_FLAT_BLOCK = 1024  # the elementwise kernels, which have neither loops nor atomics
 
 
 def available() -> bool:
@@ -38,9 +42,11 @@ def label(mask: Tensor, connectivity: int) -> tuple[Tensor, int]:
     total = mask.numel()
     if total >= 2**31:
         raise ValueError("labelling supports fewer than 2^31 elements")
-    fg = (mask != 0).reshape(-1).contiguous()
     if total == 0:
         return torch.zeros(mask.shape, dtype=torch.int32, device=mask.device), 0
+    values = mask.reshape(-1).contiguous()
+    if values.dtype == torch.bool:
+        values = values.view(torch.uint8)
 
     # Earlier neighbours in raster order, at most `connectivity` nonzero offsets.
     offsets = [
@@ -52,17 +58,17 @@ def label(mask: Tensor, connectivity: int) -> tuple[Tensor, int]:
     ]
     table = torch.tensor(offsets, dtype=torch.int32, device=mask.device).reshape(-1)
 
-    index = torch.arange(total, dtype=torch.int32, device=mask.device)
-    parent = torch.where(fg, index, -1)
-    grid = (triton.cdiv(total, _BLOCK),)
+    parent = torch.empty(total, dtype=torch.int32, device=mask.device)
+    roots = torch.empty(total, dtype=torch.int32, device=mask.device)
+    labels = torch.empty(total, dtype=torch.int32, device=mask.device)
+    grid, flat = (triton.cdiv(total, _BLOCK),), (triton.cdiv(total, _FLAT_BLOCK),)
     with torch.cuda.device(mask.device):  # Triton launches on the current device
-        _merge[grid](parent, table, len(offsets), shape[0], shape[1], shape[2], total, BLOCK=_BLOCK)
-        _compress[grid](parent, total, BLOCK=_BLOCK)
-
-    roots = fg & (parent == index)
-    number = torch.cumsum(roots, 0, dtype=torch.int32)  # components in order of first voxel
-    labels = torch.where(fg, number[parent.clamp_min(0).long()], 0)
-    return labels.reshape(mask.shape), int(roots.sum())
+        _init[flat](values, parent, total, BLOCK=_FLAT_BLOCK)
+        _merge[grid](parent, table, len(offsets), *shape, total, BLOCK=_BLOCK, num_warps=_WARPS)
+        _compress[grid](parent, roots, total, BLOCK=_BLOCK, num_warps=_WARPS)
+        number = torch.cumsum(roots, 0, dtype=torch.int32)  # components in order of first voxel
+        _number[flat](parent, number, labels, total, BLOCK=_FLAT_BLOCK)
+    return labels.reshape(mask.shape), int(number[-1])
 
 
 if triton is not None:
@@ -112,8 +118,25 @@ if triton is not None:
                 b = tl.where(active, lo, b)
 
     @triton.jit(do_not_specialize=["total"])
-    def _compress(parent, total, BLOCK: tl.constexpr):
+    def _init(mask, parent, total, BLOCK: tl.constexpr):
+        # Every foreground voxel (nonzero) its own parent, background -1.
+        i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        fg = tl.load(mask + i, mask=i < total, other=0) != 0
+        tl.store(parent + i, tl.where(fg, i, -1), mask=i < total)
+
+    @triton.jit(do_not_specialize=["total"])
+    def _compress(parent, roots, total, BLOCK: tl.constexpr):
+        # Points every voxel at its root, and flags the roots (1) for the prefix sum.
         i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         fg = (i < total) & (tl.load(parent + i, mask=i < total, other=-1) >= 0)
         root = _find(parent, i, fg)
         tl.store(parent + i, root, mask=fg)
+        tl.store(roots + i, (fg & (root == i)).to(tl.int32), mask=i < total)
+
+    @triton.jit(do_not_specialize=["total"])
+    def _number(parent, number, labels, total, BLOCK: tl.constexpr):
+        # A voxel's label is its root's position among the roots: the prefix sum at the root.
+        i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        root = tl.load(parent + i, mask=i < total, other=-1)
+        label = tl.load(number + root, mask=root >= 0, other=0)
+        tl.store(labels + i, label, mask=i < total)

@@ -78,7 +78,8 @@ def _transform(features: Tensor, spacing: Sequence[float], batch_ndim: int) -> T
         g = torch.empty((n + 1) * lanes, dtype=torch.float64, device=out.device)
         consts = torch.tensor([float(h), tol], dtype=torch.float64, device=out.device)
         _edt_pass[(programs,)](
-            out, buf, v, z, g, consts, n, stride, lines, lanes, BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False
+            out, buf, v, z, g, consts, n, stride, lines, lanes,
+            BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False,
         )
         out, buf = buf, out
     return out

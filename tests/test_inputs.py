@@ -28,7 +28,8 @@ def test_index_out_of_range():
 
 def test_shape_mismatch():
     with pytest.raises(ValueError, match="same shape"):
-        EF.dice(torch.zeros(1, 4, 4, 4, dtype=torch.long), torch.zeros(1, 4, 4, 5, dtype=torch.long), num_classes=2)
+        a, b = torch.zeros(1, 4, 4, 4, dtype=torch.long), torch.zeros(1, 4, 4, 5, dtype=torch.long)
+        EF.dice(a, b, num_classes=2)
 
 
 def test_one_hot_rejects_probabilities():
