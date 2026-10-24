@@ -66,7 +66,7 @@ def _rows(elements):
 @pytest.mark.parametrize("density", [0.1, 0.4, 0.7])
 def test_meshing_reproduces_vtk(shape, density):
     mask = np.random.default_rng(0).random(shape) < density
-    elements, _, _ = _mesh(torch.from_numpy(mask), (1.0,) * len(shape))
+    elements = _mesh(torch.from_numpy(mask), (1.0,) * len(shape)).elements
     np.testing.assert_array_equal(_rows(elements.numpy()), _rows(_vtk_mesh(mask)))
 
 
@@ -190,10 +190,10 @@ def test_empty_handling():
     assert EF.hd95(empty, empty, **kw)[0, 1].isnan()
     assert EF.hd95(empty, filled, **kw)[0, 1] == math.inf
     assert EF.nsd(filled, empty, tolerance=1, **kw)[0, 1] == 0
-    # A triangle's centre lies on the same triangle of an identical mesh, but thirds are not exact
-    # in binary: the distance comes out ~1e-16, as in MeshMetrics, so tolerance 0 is ill-posed.
-    assert EF.hausdorff_distance(filled, filled, **kw)[0, 1] < 1e-12
-    assert EF.nsd(filled, filled, tolerance=1e-9, **kw)[0, 1] == 1
+    # Identical meshes share every element: distances are exactly 0, not the ~1e-16 that floating
+    # point gives (and MeshMetrics reports), so NSD at tolerance 0 is 1.
+    assert EF.hausdorff_distance(filled, filled, **kw)[0, 1] == 0
+    assert EF.nsd(filled, filled, tolerance=0, **kw)[0, 1] == 1
 
 
 def test_metric_class_accepts_mesh(device):
@@ -205,3 +205,40 @@ def test_metric_class_accepts_mesh(device):
     kw = dict(spacing=(1.5, 1.0, 1.0), tolerance=1.0, surface="mesh", input_format="one-hot")
     expected = EF.nsd(pred, target, **kw)
     torch.testing.assert_close(metric.compute().per_case, expected)
+
+
+@pytest.mark.parametrize("shape", [(18, 20, 22), (30, 34)])
+def test_shared_elements_are_exactly_zero(shape):
+    rng = np.random.default_rng(5)
+    target = _blobs(shape, rng)
+    pred = target.copy()
+    pred[: shape[0] // 2] = _blobs(shape, rng)[: shape[0] // 2]  # agree on one half only
+    spacing = (1.3, 0.7, 0.9)[: len(shape)]
+
+    # Shared elements, counted independently on VTK's meshes: identical vertex sets.
+    def keys(mask):
+        return {tuple(sorted(map(tuple, element))) for element in _vtk_mesh(mask).tolist()}
+
+    shared = keys(pred) & keys(target)
+    assert shared  # the masks do agree somewhere
+    from exacta.functional.surface import _mesh_distances
+
+    pred_to_target, _ = _mesh_distances([(torch.from_numpy(pred), torch.from_numpy(target))], spacing, None)[0]
+    d = pred_to_target.d
+    assert int((d == 0).sum()) == len(shared & keys(pred))
+    # elsewhere the kernel's distances are untouched
+    elements_t = _mesh(torch.from_numpy(target), spacing).elements
+    raw = _native.point_mesh_distances(_mesh(torch.from_numpy(pred), spacing).centres, elements_t)
+    torch.testing.assert_close(d[d != 0], raw[d != 0], rtol=0, atol=0)
+    assert raw[d == 0].max() < 1e-12  # what floating point would have said
+
+
+def test_no_mesh_element_lies_on_its_block_boundary():
+    # What makes the shared-element test exact: elements of different blocks never coincide.
+    from exacta.functional._mesh_tables import SEGMENTS_2D, TRIANGLES_3D
+
+    for table, d in ((TRIANGLES_3D, 3), (SEGMENTS_2D, 2)):
+        for elements in table:
+            for element in elements:
+                vertices = [[int(x) for x in element[i * d : (i + 1) * d]] for i in range(d)]
+                assert not any(all(v[a] == c for v in vertices) for a in range(d) for c in (0, 2))

@@ -21,9 +21,11 @@ Voxels outside the image count as background.
       discrete marching cubes (contoured with discrete flying edges in 2-D), and every triangle
       (segment) is an element located at its centre and weighted by its area (length). Distances
       run from those centres to the nearest point of the other mesh, not to its elements, and are
-      computed exactly in float64 on the CPU. Percentiles are area-weighted as for surfels. A
-      point lying on the other surface comes out ~1e-16 rather than 0, as in MeshMetrics, so an
-      NSD tolerance of exactly 0 (or exactly a distance) is ill-posed here.
+      computed exactly in float64 on the CPU. Percentiles are area-weighted as for surfels.
+      Elements that both meshes share (wherever the masks agree locally) are at distance exactly 0;
+      MeshMetrics reports ~1e-16 for them (a centre involves thirds, which binary cannot represent),
+      which matters for an NSD tolerance of exactly 0. Other ties between a distance and the
+      tolerance remain subject to floating-point rounding, as in any implementation.
 
 HD and ASSD reduce each direction with a statistic ``s`` (for HD the q-th percentile, with linear
 interpolation for voxels as in NumPy's default; for ASSD the mean) and join the two directions
@@ -477,20 +479,58 @@ def _mesh_distances(
     definition, computed on the CPU."""
     out = []
     for p, t in masks:
-        elements_p, centres_p, sizes_p = _mesh(p, spacing)
-        elements_t, centres_t, sizes_t = _mesh(t, spacing)
-        out.append(
-            (
-                _Distances(_native.point_mesh_distances(centres_p, elements_t), sizes_p),
-                _Distances(_native.point_mesh_distances(centres_t, elements_p), sizes_t),
-            )
-        )
+        mesh_p, mesh_t = _mesh(p, spacing), _mesh(t, spacing)
+        d_pt = _native.point_mesh_distances(mesh_p.centres, mesh_t.elements)
+        d_tp = _native.point_mesh_distances(mesh_t.centres, mesh_p.elements)
+        # An element both meshes share (wherever the masks agree locally) holds its own centre, so
+        # its distance is 0. Floating point cannot show it (a centre involves thirds, which binary
+        # cannot represent, so it lands ~1e-16 off the plane), but the block codes can.
+        d_pt[_shared(mesh_p, mesh_t)] = 0.0
+        d_tp[_shared(mesh_t, mesh_p)] = 0.0
+        out.append((_Distances(d_pt, mesh_p.sizes), _Distances(d_tp, mesh_t.sizes)))
     return out
 
 
-def _mesh(mask: Tensor, spacing: Sequence[float]) -> tuple[Tensor, Tensor, Tensor]:
-    """MeshMetrics' mesh of a mask, as float64 CPU tensors: its triangles (3-D) or segments
-    (2-D) in physical units (M, d, d), their centres (M, d) and their areas or lengths (M,).
+def _shared(a: _Mesh, b: _Mesh) -> Tensor:
+    """Which elements of mesh ``a`` mesh ``b`` also has, for masks of the same shape.
+
+    No element lies on the boundary of its block (checked in tests/test_mesh.py), so two meshes
+    can only share an element within the same block, where it depends on the two codes alone.
+    """
+    other = b.code.reshape(-1)[a.block].long()  # b's code at the blocks of a's elements
+    return _shared_table(a.code.ndim)[a.element_code, a.slot, other]
+
+
+@functools.lru_cache(maxsize=None)
+def _shared_table(ndim: int) -> Tensor:
+    """``[a, k, b]``: whether element k of neighbour code a is also an element of code b."""
+    cells = TRIANGLES_3D if ndim == 3 else SEGMENTS_2D
+    # an element as its set of vertices, so that vertex order does not matter
+    vertex_sets = [[frozenset(e[i * ndim : (i + 1) * ndim] for i in range(ndim)) for e in c] for c in cells]
+    by_code = [set(sets) for sets in vertex_sets]
+    table = torch.zeros((len(cells), max(map(len, cells)), len(cells)), dtype=torch.bool)
+    for a, sets in enumerate(vertex_sets):
+        for k, element in enumerate(sets):
+            table[a, k] = torch.tensor([element in other for other in by_code])
+    return table
+
+
+class _Mesh(NamedTuple):
+    """A mask's mesh: elements (M, d, d), centres (M, d) and sizes (M,) in physical units (float64,
+    CPU); the neighbour codes of the corner grid, and for each element its block (flat index into
+    that grid), the block's code and its position among that code's elements."""
+
+    elements: Tensor
+    centres: Tensor
+    sizes: Tensor
+    code: Tensor
+    block: Tensor
+    element_code: Tensor
+    slot: Tensor
+
+
+def _mesh(mask: Tensor, spacing: Sequence[float]) -> _Mesh:
+    """MeshMetrics' mesh of a mask: its triangles (3-D) or segments (2-D), see :class:`_Mesh`.
 
     VTK's discrete marching cubes (flying edges in 2-D), tabulated per 2x2(x2) block of voxels:
     the block whose neighbour code sits at corner index ``c`` starts at voxel ``c - 1``.
@@ -507,9 +547,9 @@ def _mesh(mask: Tensor, spacing: Sequence[float]) -> tuple[Tensor, Tensor, Tenso
     owner = torch.repeat_interleave(torch.arange(codes.numel()), per_block)
     first = torch.cumsum(per_block, 0) - per_block
     slot = torch.arange(owner.numel()) - torch.repeat_interleave(first, per_block)
-    local = table[codes[owner], slot]  # (M, d, d), in voxels from the block's first voxel
-    origin = (corners[owner] - 1)[:, None, :].double()
-    elements = (local + origin) * torch.tensor(spacing, dtype=torch.float64)
+    # Vertices in half-voxels, exact integers: the table's offsets plus twice the block's first voxel.
+    half = table[codes[owner], slot] + 2 * (corners[owner] - 1)[:, None, :]  # (M, d, d)
+    elements = (half.double() / 2) * torch.tensor(spacing, dtype=torch.float64)
     if ndim == 3:
         # VTK's parametric centre of a triangle, evaluated as VTK does
         third = 1.0 / 3.0
@@ -519,17 +559,18 @@ def _mesh(mask: Tensor, spacing: Sequence[float]) -> tuple[Tensor, Tensor, Tenso
     else:
         centres = (elements[:, 0] + elements[:, 1]) / 2  # MeshMetrics' segment centres
         sizes = (elements[:, 1] - elements[:, 0]).norm(dim=1)
-    return elements, centres, sizes
+    block = torch.nonzero(on.reshape(-1)).squeeze(1)[owner]
+    return _Mesh(elements, centres, sizes, code, block, codes[owner], slot)
 
 
 @functools.lru_cache(maxsize=None)
 def _mesh_table(ndim: int) -> tuple[Tensor, Tensor]:
-    """Elements of each neighbour code (codes, most per code, d, d) in voxels, and their counts."""
+    """Elements of each neighbour code (codes, most per code, d, d) in half-voxels, and their counts."""
     cells = TRIANGLES_3D if ndim == 3 else SEGMENTS_2D
-    table = torch.zeros((len(cells), max(map(len, cells)), ndim, ndim), dtype=torch.float64)
+    table = torch.zeros((len(cells), max(map(len, cells)), ndim, ndim), dtype=torch.int64)
     for code, elements in enumerate(cells):
-        for k, element in enumerate(elements):  # digits are half-voxels
-            table[code, k] = torch.tensor([int(x) for x in element], dtype=torch.float64).view(ndim, ndim) / 2
+        for k, element in enumerate(elements):
+            table[code, k] = torch.tensor([int(x) for x in element]).view(ndim, ndim)
     return table, torch.tensor([len(c) for c in cells])
 
 
