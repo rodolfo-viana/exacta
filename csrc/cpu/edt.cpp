@@ -78,7 +78,7 @@ void edt_1d(const double *f, double fmax, double *d, std::int64_t n, double h, s
 }
 
 int edt_sq(const std::uint8_t *features, double *out, const std::int64_t *shape, int ndim,
-           const double *spacing, int num_threads) {
+           int batch_ndim, const double *spacing, int num_threads) {
   std::int64_t total = 1;
   std::int64_t max_n = 0;
   for (int axis = 0; axis < ndim; ++axis) {
@@ -105,8 +105,9 @@ int edt_sq(const std::uint8_t *features, double *out, const std::int64_t *shape,
   for (int axis = 0; axis < ndim; ++axis) {
     const std::int64_t n = shape[axis];
     stride /= n;  // C order: stride of `axis` is the product of the trailing extents
+    if (axis < batch_ndim) continue;  // batch axes separate images; nothing to transform
     const std::int64_t lines = total / n;
-    const double h = spacing[axis];
+    const double h = spacing[axis - batch_ndim];
 
 #pragma omp parallel num_threads(threads)
     {
@@ -151,19 +152,24 @@ extern "C" const char *exacta_status_string(int status) {
 }
 
 extern "C" int exacta_edt_sq_f64(const uint8_t *features, double *out, const int64_t *shape,
-                                 int ndim, const double *spacing, int num_threads) {
-  if (shape == nullptr || spacing == nullptr || ndim < 1) return EXACTA_INVALID_ARGUMENT;
+                                 int ndim, int batch_ndim, const double *spacing,
+                                 int num_threads) {
+  if (shape == nullptr || spacing == nullptr || ndim < 1 || batch_ndim < 0 || batch_ndim > ndim) {
+    return EXACTA_INVALID_ARGUMENT;
+  }
   bool empty = false;
   for (int axis = 0; axis < ndim; ++axis) {
-    if (shape[axis] < 0 || !(spacing[axis] > 0.0) || !std::isfinite(spacing[axis])) {
-      return EXACTA_INVALID_ARGUMENT;
+    if (shape[axis] < 0) return EXACTA_INVALID_ARGUMENT;
+    if (axis >= batch_ndim) {
+      const double h = spacing[axis - batch_ndim];
+      if (!(h > 0.0) || !std::isfinite(h)) return EXACTA_INVALID_ARGUMENT;
     }
     empty = empty || shape[axis] == 0;
   }
   if (empty) return EXACTA_OK;  // the data pointers of an empty array may be null
   if (features == nullptr || out == nullptr) return EXACTA_INVALID_ARGUMENT;
   try {
-    return edt_sq(features, out, shape, ndim, spacing, num_threads);
+    return edt_sq(features, out, shape, ndim, batch_ndim, spacing, num_threads);
   } catch (const std::bad_alloc &) {
     return EXACTA_OUT_OF_MEMORY;
   } catch (...) {

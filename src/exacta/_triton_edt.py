@@ -36,10 +36,11 @@ def available() -> bool:
     return triton is not None
 
 
-def edt_sq(features: Tensor, spacing: Sequence[float]) -> Tensor:
+def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> Tensor:
     """Squared distance from every voxel to the nearest nonzero voxel of ``features`` (CUDA).
 
-    Same contract and same values, bit for bit, as :func:`exacta._native.edt_sq`.
+    Same contract and same values, bit for bit, as :func:`exacta._native.edt_sq`, including
+    ``batch_ndim`` leading axes that index separate images.
     """
     if triton is None:
         raise RuntimeError("Triton is not installed")
@@ -47,16 +48,18 @@ def edt_sq(features: Tensor, spacing: Sequence[float]) -> Tensor:
     if out.numel() == 0:
         return out
     features = features.bool().contiguous()
+    if batch_ndim >= out.ndim:  # nothing to transform
+        return out.masked_fill_(features, 0.0).masked_fill_(~features, math.inf)
     total = out.numel()
-    n = out.shape[0]
-    stride = total // n
+    n = out.shape[batch_ndim]
+    stride = math.prod(out.shape[batch_ndim + 1 :])
     consts = torch.tensor([float(spacing[0])], dtype=torch.float64, device=out.device)
-    _first_pass[(triton.cdiv(stride, _BLOCK),)](
-        features, out, consts, n, stride, BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False
+    _first_pass[(triton.cdiv(total // n, _BLOCK),)](
+        features, out, consts, n, stride, total // n, BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False
     )
     buf = torch.empty_like(out)
-    for axis in range(1, out.ndim):
-        h = spacing[axis]
+    for axis in range(batch_ndim + 1, out.ndim):
+        h = spacing[axis - batch_ndim]
         n = out.shape[axis]
         stride = math.prod(out.shape[axis + 1 :])
         lines = total // n
@@ -77,13 +80,15 @@ def edt_sq(features: Tensor, spacing: Sequence[float]) -> Tensor:
 
 if triton is not None:
 
-    @triton.jit(do_not_specialize=["n", "stride"])
-    def _first_pass(features, dst, consts, n, stride, BLOCK: tl.constexpr):
-        # Along axis 0 the input is 0 at features and inf elsewhere, so the envelope minimum is
-        # (h * k)^2 for the distance k to the nearest feature on the line: two sweeps suffice.
-        line = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
-        valid = line < stride
+    @triton.jit(do_not_specialize=["n", "stride", "lines"])
+    def _first_pass(features, dst, consts, n, stride, lines, BLOCK: tl.constexpr):
+        # Along the first transformed axis the input is 0 at features and inf elsewhere, so the
+        # envelope minimum is (h * k)^2 for the distance k to the nearest feature on the line:
+        # two sweeps suffice.
+        index = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
+        valid = index < lines
         stride64 = stride.to(tl.int64)
+        line = (index // stride64) * n * stride64 + index % stride64  # offset of the line's start
         h = tl.load(consts)
         inf = float("inf")
         last = tl.full([BLOCK], -1, dtype=tl.int32)  # nearest feature at or before q, -1: none

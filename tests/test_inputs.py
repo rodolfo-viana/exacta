@@ -67,3 +67,32 @@ def test_spacing_forms():
 def test_spacing_rejects(spacing):
     with pytest.raises(ValueError):
         as_spacing(spacing, batch=2, ndim=3)
+
+
+EXTENT_SHAPES = [(50,), (31, 47), (17, 23, 29), (1, 9, 1), (0, 4)]
+
+
+@pytest.mark.parametrize("shape", EXTENT_SHAPES)
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int16, torch.int32, torch.int64])
+def test_class_extents_native_matches_torch(shape, dtype):
+    from exacta import _native
+    from exacta._inputs import _extent
+
+    rng = np.random.default_rng(0)
+    labels = torch.from_numpy(rng.integers(0, 6, shape)).to(dtype)
+    labels[labels == 5] = 0  # class 5 absent
+    present, lo, hi = _native.class_extents(labels, 7)  # class 6 out of the data's range
+    expected_present, expected_lo, expected_hi = _extent(labels, 7, one_hot=False, native=False)
+    assert torch.equal(present, expected_present)
+    assert not present[5] and not present[6]
+    assert torch.equal(lo[present], expected_lo[present])
+    assert torch.equal(hi[present], expected_hi[present])
+    for c in torch.nonzero(present).flatten().tolist():  # against the definition
+        idx = torch.nonzero(labels == c)
+        assert torch.equal(lo[c], idx.amin(0)) and torch.equal(hi[c], idx.amax(0))
+
+
+def test_metrics_on_zero_size_volumes(device):
+    empty = torch.zeros(2, 0, 5, 6, dtype=torch.long, device=device)
+    assert EF.hd95(empty, empty, spacing=1, num_classes=3).isnan().all()
+    assert EF.nsd(empty, empty, spacing=1, tolerance=1, num_classes=3, surface="surfels").isnan().all()

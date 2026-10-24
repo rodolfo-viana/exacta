@@ -8,6 +8,8 @@ from typing import Any, Literal
 import torch
 from torch import Tensor
 
+from exacta import _native
+
 InputFormat = Literal["index", "one-hot"]
 
 
@@ -56,11 +58,54 @@ class Segmentations:
     def classes(self) -> range:
         return range(self.first_class, self.num_classes)
 
-    def masks(self, case: int, cls: int) -> tuple[Tensor, Tensor]:
-        """Boolean (*spatial) masks of class ``cls`` in one case."""
+    def masks(self, case: int, cls: int, box: tuple[slice, ...] = ()) -> tuple[Tensor, Tensor]:
+        """Boolean (*spatial) masks of class ``cls`` in one case, restricted to ``box``."""
         if self.one_hot:
-            return self.pred[case, cls], self.target[case, cls]
-        return self.pred[case] == cls, self.target[case] == cls
+            return self.pred[case, cls][box], self.target[case, cls][box]
+        return self.pred[case][box] == cls, self.target[case][box] == cls
+
+    def extents(self, case: int) -> tuple[Tensor, Tensor, Tensor]:
+        """Where each class lies in one case: ``present`` (2, C) for prediction and target, and
+        the first and last index of each along every axis, ``lo`` and ``hi`` (2, C, ndim).
+
+        One pass over the volume whatever the number of classes, instead of one per class.
+        """
+        found = [_extent(x, self.num_classes, self.one_hot) for x in (self.pred[case], self.target[case])]
+        return tuple(torch.stack(parts) for parts in zip(*found))  # type: ignore[return-value]
+
+
+def _extent(
+    volume: Tensor, num_classes: int, one_hot: bool, native: bool = True
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Presence (C,), first and last index (C, ndim) of every class in one (C, *spatial) one-hot
+    volume or one (*spatial) label map; indices are meaningless where a class is absent."""
+    if native and not one_hot and volume.device.type == "cpu" and _native.available():
+        return _native.class_extents(volume, num_classes)  # one multithreaded pass
+    spatial = volume.shape[1:] if one_hot else volume.shape
+    if volume.numel() == 0:  # no class anywhere
+        corners = torch.zeros((num_classes, len(spatial)), dtype=torch.int64, device=volume.device)
+        return torch.zeros(num_classes, dtype=torch.bool, device=volume.device), corners, corners
+    if one_hot:
+        dims = range(1, volume.ndim)
+        planes = [
+            volume.any(dim=tuple(d for d in dims if d != axis)) if volume.ndim > 2 else volume for axis in dims
+        ]
+    else:
+        # lines[..., c]: whether class c occurs on each line along the last axis; one scatter over
+        # the volume gives every class's projection on the leading axes.
+        labels = volume.long()
+        lead = labels.ndim - 1
+        lines = torch.zeros((*labels.shape[:-1], num_classes), dtype=torch.bool, device=labels.device)
+        lines.scatter_(-1, labels, True)
+        planes = [
+            (lines.any(dim=tuple(d for d in range(lead) if d != axis)) if lead > 1 else lines).T
+            for axis in range(lead)
+        ]
+        last = torch.zeros((num_classes, labels.shape[-1]), dtype=torch.bool, device=labels.device)
+        planes.append(last.scatter_(0, labels.reshape(-1, labels.shape[-1]), True))
+    first = torch.stack([plane.to(torch.uint8).argmax(1) for plane in planes], 1)
+    final = torch.stack([plane.shape[1] - 1 - plane.flip(1).to(torch.uint8).argmax(1) for plane in planes], 1)
+    return planes[0].any(1), first, final
 
 
 def validate(

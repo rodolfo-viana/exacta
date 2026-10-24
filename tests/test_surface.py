@@ -305,3 +305,35 @@ def test_pooled_assd_matches_medpy():
     expected = _medpy_per_case(medpy.assd, pred, target, 4, spacing)
     got = EF.assd(pred, target, spacing=spacing, num_classes=4, one_empty=math.nan)
     np.testing.assert_allclose(got, expected, rtol=1e-10)
+
+
+def _many_structures(shape, classes, seed):
+    """Small ellipsoids, one per class, and a prediction shifted by a voxel or two."""
+    rng = np.random.default_rng(seed)
+    grid = np.indices(shape, dtype=np.float64)
+    target = np.zeros(shape, np.int64)
+    for c in range(1, classes):
+        center = rng.uniform(4, np.array(shape) - 4)
+        radii = rng.uniform(1.5, 5, len(shape))
+        column = (-1,) + (1,) * len(shape)
+        inside = (((grid - center.reshape(column)) / radii.reshape(column)) ** 2).sum(0) <= 1
+        target[inside] = c
+    pred = np.zeros_like(target)
+    pred[1:, :-1] = target[:-1, 1:]  # shift without wrapping around
+    return pred[None], target[None]
+
+
+@pytest.mark.parametrize("surface", ["voxels", "surfels"])
+def test_many_classes_match_per_class_computation(device, surface):
+    # Many small structures go through batched transforms on GPU; the values must not change.
+    pred, target = _many_structures((30, 34, 38), 25, seed=30)
+    spacing = (1.2, 0.8, 0.9)
+    if surface == "voxels":
+        expected = reference.per_case(reference.hausdorff, pred, target, 25, spacings=[spacing], percentile=95)
+    else:
+        expected = EF.hd95(pred, target, spacing=spacing, num_classes=25, surface=surface, backend="native")
+    got = EF.hd95(
+        torch.from_numpy(pred).to(device), torch.from_numpy(target).to(device), spacing=spacing,
+        num_classes=25, surface=surface,
+    )  # fmt: skip
+    np.testing.assert_allclose(got.cpu().numpy(), expected, rtol=1e-12)

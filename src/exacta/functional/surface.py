@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any, Literal, NamedTuple
 
 import numpy as np
@@ -63,10 +63,16 @@ Backend = Literal["auto", "native", "triton", "torch"]
 Combine = Literal["max", "mean", "pooled"]
 Surface = Literal["voxels", "surfels"]
 
-EdtSq = Callable[[Tensor, Sequence[float]], Tensor]
+EdtSq = Callable[..., Tensor]  # (features, spacing, batch_ndim=0) -> squared distances
 
 # Elements of the (lines, n, n) block evaluated at once by the PyTorch distance transform (128 MiB).
 _CHUNK = 1 << 24
+# Memory for the distance maps of the classes transformed together (one batched transform). Only
+# on GPU: there it turns many small launches into a few full ones, while on CPU each class's
+# transform already uses every core and padding classes to a common shape only adds work.
+_BATCH_BYTES = 512 << 20
+
+Box = tuple[slice, ...]
 
 
 class _Distances(NamedTuple):
@@ -256,16 +262,69 @@ def _per_case(
 
     out = torch.full((seg.batch, len(seg.classes)), both_empty, dtype=torch.float64)
     for b in range(seg.batch):
+        # Bounding boxes of every class at once, read back in one sync. Working inside the box of
+        # both masks is exact: outside it both are background, as outside the image.
+        present, lo, hi = (x.tolist() for x in seg.extents(b))
+        jobs: list[tuple[int, int, Box]] = []
         for k, cls in enumerate(seg.classes):
-            p, t = seg.masks(b, cls)
-            has_p, has_t = torch.stack([p.any(), t.any()]).tolist()
+            has_p, has_t = present[0][cls], present[1][cls]
             if not (has_p or has_t):
                 continue
             if not (has_p and has_t):
                 out[b, k] = one_empty
                 continue
-            out[b, k] = score(*elements(p, t, spacings[b], edt_sq), k)
+            box = tuple(
+                slice(min(lo_p, lo_t), max(hi_p, hi_t) + 1)
+                for lo_p, lo_t, hi_p, hi_t in zip(lo[0][cls], lo[1][cls], hi[0][cls], hi[1][cls])
+            )
+            jobs.append((k, cls, box))
+        # Classes share batched distance transforms, so many small structures cost a few kernel
+        # launches rather than several each.
+        for chunk in _chunks(jobs, _BATCH_BYTES if seg.pred.device.type == "cuda" else 0):
+            masks = [seg.masks(b, cls, box) for _, cls, box in chunk]
+            for (k, _, _), distances in zip(chunk, elements(masks, spacings[b], edt_sq)):
+                out[b, k] = score(*distances, k)
     return out.to(seg.pred.device)
+
+
+def _chunks(jobs: list[tuple[int, int, Box]], budget: int) -> Iterator[list[tuple[int, int, Box]]]:
+    """Group classes whose crops, padded to a common shape, fit ``budget`` bytes."""
+    jobs = sorted(jobs, key=lambda job: math.prod(s.stop - s.start for s in job[2]))  # similar sizes
+    chunk: list[tuple[int, int, Box]] = []
+    shape: list[int] = []
+    for job in jobs:
+        size = [s.stop - s.start + 1 for s in job[2]]  # + 1: surfels live on the corner grid
+        padded = [max(a, b) for a, b in zip(shape, size)] if chunk else size
+        # two masks per class; a bool input and two float64 maps per element
+        if chunk and 2 * (len(chunk) + 1) * math.prod(padded) * 17 > budget:
+            yield chunk
+            chunk, padded = [], size
+        chunk.append(job)
+        shape = padded
+    if chunk:
+        yield chunk
+
+
+def _edt_stack(features: list[Tensor], spacing: Sequence[float], edt_sq: EdtSq) -> list[Tensor]:
+    """Squared distance maps of several images, in one batched transform on GPU.
+
+    Each image is padded with background to a common shape. Padding adds no features, so the
+    distances inside each image are unchanged. On CPU, where batching does not pay (see
+    ``_BATCH_BYTES``), each image is transformed on its own, without the copy.
+    """
+    if features[0].device.type != "cuda":
+        return [edt_sq(f, spacing) for f in features]
+    shape = [max(f.shape[axis] for f in features) for axis in range(features[0].ndim)]
+    stack = features[0].new_zeros((len(features), *shape))
+    for i, f in enumerate(features):
+        stack[i][_region(f)] = f
+    maps = edt_sq(stack, spacing, 1)
+    return [maps[i][_region(f)] for i, f in enumerate(features)]
+
+
+def _region(x: Tensor) -> Box:
+    """Where ``x`` sits in an array padded at the end of every axis."""
+    return tuple(slice(0, n) for n in x.shape)
 
 
 def _check_combine(combine: str) -> None:
@@ -358,29 +417,40 @@ def _edt_function(backend: Backend, device: torch.device) -> EdtSq:
 
 
 def _voxel_distances(
-    p: Tensor, t: Tensor, spacing: Sequence[float], edt_sq: EdtSq
-) -> tuple[_Distances, _Distances]:
-    d_pt, d_tp = _surface_distances(_boundary(p, p.ndim), _boundary(t, t.ndim), spacing, edt_sq)
-    return _Distances(d_pt, None), _Distances(d_tp, None)
+    masks: list[tuple[Tensor, Tensor]], spacing: Sequence[float], edt_sq: EdtSq
+) -> list[tuple[_Distances, _Distances]]:
+    """For each (prediction, target) pair, cropped to the bounding box of both masks (which is
+    also that of their boundaries): distances between the boundary voxels."""
+    boundaries = [(_boundary(p, p.ndim), _boundary(t, t.ndim)) for p, t in masks]
+    maps = _edt_stack([b for pair in boundaries for b in pair], spacing, edt_sq)
+    out = []
+    for i, (on_p, on_t) in enumerate(boundaries):
+        to_p, to_t = maps[2 * i], maps[2 * i + 1]
+        out.append((_Distances(_sqrt(to_t[on_p]), None), _Distances(_sqrt(to_p[on_t]), None)))
+    return out
 
 
 def _surfel_distances(
-    p: Tensor, t: Tensor, spacing: Sequence[float], edt_sq: EdtSq
-) -> tuple[_Distances, _Distances]:
-    # Cropping to the bounding box of both masks is exact, as in DeepMind's implementation: every
-    # block that straddles a surface has its corner on the box or inside it.
-    idx = torch.nonzero(p | t)
-    box = tuple(slice(lo, hi + 1) for lo, hi in zip(idx.amin(0).tolist(), idx.amax(0).tolist()))
-    code_p, code_t = _neighbour_code(p[box]), _neighbour_code(t[box])
-    full = (1 << (1 << p.ndim)) - 1  # every voxel of the block inside: no surface
-    on_p = (code_p != 0) & (code_p != full)
-    on_t = (code_t != 0) & (code_t != full)
-    to_p, to_t = edt_sq(on_p, spacing), edt_sq(on_t, spacing)
-    measure = torch.from_numpy(surfel_measures(tuple(spacing))).to(p.device)
-    return (
-        _Distances(_sqrt(to_t[on_p]), measure[code_p[on_p].long()]),
-        _Distances(_sqrt(to_p[on_t]), measure[code_t[on_t].long()]),
-    )
+    masks: list[tuple[Tensor, Tensor]], spacing: Sequence[float], edt_sq: EdtSq
+) -> list[tuple[_Distances, _Distances]]:
+    """For each (prediction, target) pair, cropped to the bounding box of both masks: distances
+    between surface elements, and their areas. The crop is exact here too, as in DeepMind's
+    implementation: every block that straddles a surface has its corner on the box or inside it."""
+    codes = [(_neighbour_code(p), _neighbour_code(t)) for p, t in masks]
+    full = (1 << (1 << masks[0][0].ndim)) - 1  # every voxel of the block inside: no surface
+    on = [((cp != 0) & (cp != full), (ct != 0) & (ct != full)) for cp, ct in codes]
+    maps = _edt_stack([x for pair in on for x in pair], spacing, edt_sq)
+    measure = torch.from_numpy(surfel_measures(tuple(spacing))).to(masks[0][0].device)
+    out = []
+    for i, ((code_p, code_t), (on_p, on_t)) in enumerate(zip(codes, on)):
+        to_p, to_t = maps[2 * i], maps[2 * i + 1]
+        out.append(
+            (
+                _Distances(_sqrt(to_t[on_p]), measure[code_p[on_p].long()]),
+                _Distances(_sqrt(to_p[on_t]), measure[code_t[on_t].long()]),
+            )
+        )
+    return out
 
 
 def _neighbour_code(mask: Tensor) -> Tensor:
@@ -413,17 +483,6 @@ def _boundary(mask: Tensor, ndim: int) -> Tensor:
     return mask & ~interior
 
 
-def _surface_distances(a: Tensor, b: Tensor, spacing: Sequence[float], edt_sq: EdtSq) -> tuple[Tensor, Tensor]:
-    """Distances from each boundary voxel of ``a`` to boundary ``b``, and from ``b`` to ``a``."""
-    # Cropping to the bounding box of both boundaries is exact: every query voxel and every
-    # feature voxel lies inside the box.
-    idx = torch.nonzero(a | b)
-    box = tuple(slice(lo, hi + 1) for lo, hi in zip(idx.amin(0).tolist(), idx.amax(0).tolist()))
-    a, b = a[box], b[box]
-    to_a, to_b = edt_sq(a, spacing), edt_sq(b, spacing)
-    return _sqrt(to_b[a]), _sqrt(to_a[b])
-
-
 def _sqrt(x: Tensor) -> Tensor:
     """Correctly rounded square root of a float64 tensor.
 
@@ -436,7 +495,7 @@ def _sqrt(x: Tensor) -> Tensor:
     return x.sqrt()
 
 
-def _edt_sq_torch(features: Tensor, spacing: Sequence[float]) -> Tensor:
+def _edt_sq_torch(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> Tensor:
     """Exact squared Euclidean distance transform in PyTorch, for any device.
 
     Squared distance is separable, so one 1-D min-plus transform per axis is exact:
@@ -448,7 +507,7 @@ def _edt_sq_torch(features: Tensor, spacing: Sequence[float]) -> Tensor:
     out.masked_fill_(~features, math.inf)
     if out.numel() == 0:
         return out
-    for axis, h in enumerate(spacing):
+    for axis, h in enumerate(spacing, start=batch_ndim):
         n = out.shape[axis]
         lines = out.movedim(axis, -1)
         shape = lines.shape

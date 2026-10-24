@@ -135,3 +135,21 @@ def test_rejects_bad_spacing(spacing):
 def test_rejects_shape_mismatch():
     with pytest.raises(ValueError):
         _C.edt_sq(torch.zeros(3, 4, dtype=torch.uint8), torch.empty(4, 3, dtype=torch.float64), [1.0, 1.0])
+
+
+@pytest.mark.parametrize(
+    ("shape", "spacing"),
+    [((3, 20, 21, 22), (1.5, 0.8, 0.7)), ((5, 31, 47), (1.0, 2.5)), ((2, 3, 9, 10, 11), (0.7, 0.9, 1.3))],
+)
+@pytest.mark.parametrize("edt_sq", KERNELS)
+def test_batch_axes_transform_each_image_separately(edt_sq, shape, spacing):
+    batch_ndim = len(shape) - len(spacing)
+    features = torch.from_numpy(_features(shape, 0.05))
+    features[(0,) * batch_ndim] = False  # an image without features is all inf
+    expected = torch.stack(
+        [_native.edt_sq(image, spacing) for image in features.reshape(-1, *shape[batch_ndim:])]
+    ).reshape(shape)
+    got = edt_sq(features, spacing, batch_ndim) if edt_sq is not _triton else _triton_edt.edt_sq(
+        features.cuda(), spacing, batch_ndim
+    ).cpu()
+    assert torch.equal(got, expected)
