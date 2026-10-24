@@ -51,6 +51,14 @@ EF.hd95(pred, target, spacing=s, num_classes=4, combine="pooled")    # MedPy's h
 EF.assd(pred, target, spacing=s, num_classes=4, combine="mean")      # MedPy 0.4's assd
 EF.nsd(pred, target, spacing=s, num_classes=4, tolerance=1.0, surface="surfels")  # DeepMind's NSD
 
+# Lesion-wise (instance) evaluation: choose how lesions are matched
+from exacta import lesions
+scores = lesions.evaluate(pred, target, num_classes=4, include_background=False, connectivity=3,
+                          matching="greedy", score="iou", threshold=0.5)   # Panoptica's default
+scores.f1, scores.sq_iou, scores.pq_iou, scores.lesion_dice                # each (B, C)
+brats = lesions.brats2023(lesions.brats_regions(pred), lesions.brats_regions(target),
+                          challenge="GLI", spacing=(1.0, 1.0, 1.0))      # BraTS 2023, WT/TC/ET
+
 # Connected components of one binary image (no batch or channel axis)
 from exacta import components
 labels, count = components.label(mask, connectivity=3)        # numbered exactly as scipy.ndimage.label
@@ -76,6 +84,7 @@ Each convention is an explicit argument, because this is where libraries disagre
 | Relative volume difference | `(|P| - |T|) / |T|`, as MedPy's `ravd`; `absolute=True` for the unsigned form. |
 | Class absent from one | Dice/IoU give 0. Distance metrics give `one_empty`: default `inf` for HD/ASSD, 0 for NSD. |
 | Aggregation | Per case, then the NaN-ignoring mean over cases, then over classes. |
+| Lesion matching | `matching="greedy"`: one-to-one, best-scoring pairs first, above `threshold` (Panoptica's `NaiveThresholdMatching`). `"hungarian"`: optimal one-to-one (`MaxBipartiteMatching`). `"merge"`: a lesion predicted in pieces is merged when the union scores higher (`MaximizeMergeMatching`). `"overlap"`: every prediction touching a target lesion grown by `dilation` steps, many-to-many (BraTS 2023). F1/SQ/PQ are Panoptica's RQ/SQ/PQ; `lesion_dice`/`lesion_hd95` are BraTS's lesion-wise scores. Panoptica labels 3-D images with 26-connectivity but 2-D ones with 4-connectivity; exacta's `connectivity` is explicit. |
 | Connectivity | Required for connected components: 1 = faces (6 neighbours in 3-D, SciPy's default), 2 = and edges (18), 3 = and corners (26, MONAI's default). |
 
 ## Architecture
@@ -122,6 +131,7 @@ the other references run on CPU (MONAI's GPU path needs cuCIM, which is not inst
 | | 256³ | 17.5 | 7.8 | | SciPy 110 |
 | Largest component, 26-conn. | 128³ | 4.8 | 2.5 | 21.6 | |
 | | 256³ | 61 | 13.5 | 169 | |
+| BraTS 2023 lesion-wise, 3 regions | 240×240×155 | 990 | 40 | | BraTS-2023-Metrics 7,700 |
 
 "SciPy EDT" is exacta's test reference (`tests/reference.py`): the textbook implementation on
 `scipy.ndimage.distance_transform_edt`. exacta's plain-PyTorch GPU fallback (`backend="torch"`)
@@ -155,8 +165,10 @@ python benchmarks/bench_metrics.py
 python benchmarks/bench_losses.py
 ```
 
-Reference tests against MONAI, MedPy and DeepMind's surface-distance are skipped unless those
-packages are installed:
+Lesion-wise evaluation is tested against fixtures produced by Panoptica 2.1.7 and by the BraTS
+2023 evaluation code, which need environments of their own (old NumPy and pandas); the scripts that
+regenerate them are in `tests/fixtures/`. Reference tests against MONAI, MedPy and DeepMind's
+surface-distance are skipped unless those packages are installed:
 
 ```bash
 pip install monai medpy "git+https://github.com/google-deepmind/surface-distance.git"

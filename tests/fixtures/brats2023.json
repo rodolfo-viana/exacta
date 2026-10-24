@@ -1,0 +1,905 @@
+{
+ "source": "BraTS-2023-Metrics",
+ "results": [
+  {
+   "case": "brats0",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6231574888991527,
+   "LesionWise_Score_HD95": 96.48746859276655
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5648411589557691,
+   "LesionWise_Score_HD95": 96.79508497187474
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5052433530659057,
+   "LesionWise_Score_HD95": 96.76134025429681
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6231574888991527,
+   "LesionWise_Score_HD95": 96.48746859276655
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.4709319759266345,
+   "LesionWise_Score_HD95": 150.28284271247463
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.42100424200215264,
+   "LesionWise_Score_HD95": 150.2
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6231574888991527,
+   "LesionWise_Score_HD95": 96.86824422163328
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5648411589557691,
+   "LesionWise_Score_HD95": 97.23296253263835
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5052433530659057,
+   "LesionWise_Score_HD95": 97.1042310863036
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6231574888991527,
+   "LesionWise_Score_HD95": 96.86824422163328
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.4709319759266345,
+   "LesionWise_Score_HD95": 150.3242534182788
+  },
+  {
+   "case": "brats0",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.42100424200215264,
+   "LesionWise_Score_HD95": 150.24000000953674
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5892314672278577,
+   "LesionWise_Score_HD95": 125.33333333333333
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6113110287138427,
+   "LesionWise_Score_HD95": 94.25
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5630580890617127,
+   "LesionWise_Score_HD95": 94.25
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6638979838808698,
+   "LesionWise_Score_HD95": 94.25
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6113110287138427,
+   "LesionWise_Score_HD95": 94.25
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5630580890617127,
+   "LesionWise_Score_HD95": 94.25
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5892314672278577,
+   "LesionWise_Score_HD95": 125.40000001589458
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6113110287138427,
+   "LesionWise_Score_HD95": 94.35000002384186
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5630580890617127,
+   "LesionWise_Score_HD95": 94.3250000178814
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6638979838808698,
+   "LesionWise_Score_HD95": 94.35000002384186
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.6113110287138427,
+   "LesionWise_Score_HD95": 94.35000002384186
+  },
+  {
+   "case": "brats1",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.5630580890617127,
+   "LesionWise_Score_HD95": 94.3250000178814
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 1.0,
+   "Num_FP": 0.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.4621676891615542,
+   "LesionWise_Score_HD95": 16.822603841260722
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 1.0,
+   "Num_FP": 0.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.35311572700296734,
+   "LesionWise_Score_HD95": 188.802775637732
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 1.0,
+   "Num_FP": 0.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.313588850174216,
+   "LesionWise_Score_HD95": 188.5811388300842
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 1.0,
+   "Num_FP": 0.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.4210134128166915,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 1.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.24410256410256412,
+   "LesionWise_Score_HD95": 249.66666666666666
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 1.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.21818181818181817,
+   "LesionWise_Score_HD95": 249.66666666666666
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 1.0,
+   "Num_FP": 0.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.4621676891615542,
+   "LesionWise_Score_HD95": 19.417775955424894
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 1.0,
+   "Num_FP": 0.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.35311572700296734,
+   "LesionWise_Score_HD95": 188.81245693352935
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 1.0,
+   "Num_FP": 0.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.313588850174216,
+   "LesionWise_Score_HD95": 188.7414074640625
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 1.0,
+   "Num_FP": 0.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.4210134128166915,
+   "LesionWise_Score_HD95": 187.60000002384186
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 1.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.24410256410256412,
+   "LesionWise_Score_HD95": 249.7000000079473
+  },
+  {
+   "case": "brats2",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 1.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.21818181818181817,
+   "LesionWise_Score_HD95": 249.7000000079473
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.43153292919079317,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.38999930253397896,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.33842901011019255,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.43153292919079317,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.38999930253397896,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.33842901011019255,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.43153292919079317,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.38999930253397896,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.33842901011019255,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.43153292919079317,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.38999930253397896,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats3",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 3.0,
+   "Num_FP": 1.0,
+   "Num_FN": 2.0,
+   "LesionWise_Score_Dice": 0.33842901011019255,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.49341880524466136,
+   "LesionWise_Score_HD95": 131.11918658356194
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.38957816161035475,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.33985871976823073,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.42884473658117384,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.38957816161035475,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.33985871976823073,
+   "LesionWise_Score_HD95": 187.5
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "WT",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 0.0,
+   "LesionWise_Score_Dice": 0.49341880524466136,
+   "LesionWise_Score_HD95": 131.75642803236153
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "TC",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.38957816161035475,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "GLI",
+   "region": "ET",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.33985871976823073,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "WT",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.42884473658117384,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "TC",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.38957816161035475,
+   "LesionWise_Score_HD95": 187.55000001192093
+  },
+  {
+   "case": "brats4",
+   "spacing": [
+    1.2,
+    0.9,
+    1.1
+   ],
+   "challenge": "MET",
+   "region": "ET",
+   "Num_TP": 2.0,
+   "Num_FP": 1.0,
+   "Num_FN": 1.0,
+   "LesionWise_Score_Dice": 0.33985871976823073,
+   "LesionWise_Score_HD95": 187.55000001192093
+  }
+ ]
+}
