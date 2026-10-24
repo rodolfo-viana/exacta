@@ -15,7 +15,7 @@ have dedicated wheels; the Python 3.12 stable-ABI wheel is also tested on Python
 Other platforms install from source, which builds the CPU extension and requires a C++17
 compiler and Python development headers; OpenMP is optional. On Debian/Ubuntu, install
 `build-essential` and development headers matching your Python interpreter.
-Development CI tests the same wheel configurations and provides artifacts for unreleased commits.
+The release workflow builds and tests these wheels; branch CI tests an installation from source.
 
 ## CPU and GPU
 

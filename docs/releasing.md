@@ -30,9 +30,13 @@ After a branch is fully merged, it can be deleted. There is no permanent `dev` b
 ## Validation
 
 Development CI runs on all branch pushes and pull requests into `main`. It tests an installed
-sdist with Python 3.10, Torch 2.4.1 and NumPy 1.x, checks types, and builds/tests portable Linux
-wheels. Wheels cover Python 3.10, 3.11 and the Python 3.12 stable ABI, with additional tests on
-Python 3.13 and 3.14. Development CI never publishes to PyPI.
+sdist with Python 3.10, Torch 2.4.1 and NumPy 1.x, and checks types. Installing the sdist compiles
+the CPU extension needed by the tests. Development CI does not run the portable-wheel matrix
+or publish to PyPI.
+
+Portable Linux wheels are built, repaired and tested only for published GitHub Releases.
+That matrix covers Python 3.10, 3.11 and the Python 3.12 stable ABI, with additional tests on
+Python 3.13 and 3.14.
 
 The [publishing workflow](../.github/workflows/publish.yml) handles `release: published`,
 including alpha/beta/RC releases published from drafts. Its first job checks that the `v...`

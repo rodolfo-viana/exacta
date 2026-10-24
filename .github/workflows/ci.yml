@@ -78,6 +78,3 @@ jobs:
               message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
               print(f"::error title={log.stem} failure::{message}")
           PY
-
-  wheels:
-    uses: ./.github/workflows/wheels.yml

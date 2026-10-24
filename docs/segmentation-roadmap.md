@@ -55,7 +55,7 @@ and tests; see the Wiki for examples and constraints.
    including uneven, empty and fully ignored ranks using Gloo. The multi-GPU NCCL path remains
    experimental and unverified until the two-GPU tests run on suitable hardware.
 
-Development CI builds and tests installed sdists and portable Linux wheels. Feature branches
+Development CI tests installed sdists; release jobs build and test portable Linux wheels. Feature branches
 merge into `main`; GitHub Releases select tagged snapshots for publication. GPU performance and multi-GPU transport need their own
 hardware measurements; CPU CI cannot establish either.
 

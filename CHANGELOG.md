@@ -6,7 +6,8 @@ Release notes for Exacta's alpha versions.
 
 Development toward the next alpha release uses feature branches merged into `main`.
 
-- Run development CI on all branch pushes and pull requests into `main`.
+- Run source-distribution tests and type checks on all branch pushes and pull requests into
+  `main`. Build and test the portable-wheel matrix only for published GitHub Releases.
 - Publish to PyPI only when a GitHub Release is published; branch merges and tag pushes do
   not publish packages. Verify the release tag, source version and main ancestry first.
 - Group generated release notes by PR labels and document the feature-to-release cycle.

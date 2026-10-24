@@ -21,13 +21,13 @@ fixture regeneration for Panoptica and BraTS.
 
 Development CI runs on all branch pushes and pull requests targeting `main`. It tests
 an installed source distribution against Python 3.10, Torch 2.4.1 and NumPy 1.x, and runs
-type checks. A reusable wheel workflow builds manylinux_2_28 x86-64 wheels for Python 3.10,
-3.11 and the 3.12 stable ABI, tests each installed wheel, then tests the stable-ABI wheel
-on Python 3.13 and 3.14. The resulting artifacts can be downloaded from the workflow run.
+type checks. Installation compiles the CPU extension needed by the tests. The portable-wheel
+matrix runs only for releases, not for ordinary branch pushes or pull requests.
 CI has no GPU; CUDA and NCCL validation require separate hardware runs.
 
-The publishing workflow reuses the wheel checks and uploads their artifacts with the sdist
-only when a **GitHub Release is published**. Its version tag must identify a commit already
+When a **GitHub Release is published**, the publishing workflow builds and tests manylinux_2_28
+x86-64 wheels for Python 3.10, 3.11 and the 3.12 stable ABI, then tests the stable-ABI wheel on
+Python 3.13 and 3.14. It uploads the validated wheels and source distribution to PyPI. Its version tag must identify a commit already
 merged into `main` and match the source version. Branch pushes, merges, tag pushes and saved
 release drafts do not publish to PyPI. Review the collected release notes before publishing.
 After release, `main` continues toward the next version; the published tag preserves the snapshot.
