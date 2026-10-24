@@ -51,6 +51,14 @@ int exacta_label_u8(const uint8_t *mask, int32_t *out, const int64_t *shape, int
  * hi[c * ndim + a] the first and last index along a of the elements equal to c; lo = shape[a]
  * and hi = -1 when c does not occur. Values outside [0, num_classes) are ignored.
  */
+/* Distance from each of `n_points` points (n_points x dim, C order) to the nearest element of a
+ * mesh: triangles when dim is 3, segments when dim is 2, given as n_elements x dim vertices x dim
+ * coordinates. Writes the exact minimum point-to-element distance to `out` (+inf when the mesh
+ * has no element).
+ */
+int exacta_point_mesh_distances_f64(const double *points, int64_t n_points, const double *elements,
+                                    int64_t n_elements, int dim, double *out, int num_threads);
+
 int exacta_class_extents_u8(const uint8_t *labels, const int64_t *shape, int ndim,
                             int64_t num_classes, int64_t *lo, int64_t *hi, int num_threads);
 int exacta_class_extents_i32(const int32_t *labels, const int64_t *shape, int ndim,

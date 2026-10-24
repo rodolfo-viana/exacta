@@ -269,7 +269,7 @@ def test_rejects_unknown_surface():
     x = torch.zeros(1, 4, 4, 4, dtype=torch.long)
     x[0, 1:3, 1:3, 1:3] = 1
     with pytest.raises(ValueError, match="surface must be"):
-        EF.hd95(x, x, spacing=1, num_classes=2, surface="mesh")
+        EF.hd95(x, x, spacing=1, num_classes=2, surface="points")
 
 
 def test_metric_class_accepts_surface(device):

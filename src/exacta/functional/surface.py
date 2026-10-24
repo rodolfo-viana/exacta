@@ -17,6 +17,13 @@ Voxels outside the image count as background.
       length (2-D) of the marching-cubes surface inside the block. Weights replace counts in every
       statistic below, and percentiles become area-weighted: the smallest distance at which the
       cumulative area reaches q% (no interpolation), as in DeepMind's ``compute_robust_hausdorff``.
+    * ``"mesh"``: MeshMetrics' definition (Podobnik & Vrtovec). Each mask is meshed with VTK's
+      discrete marching cubes (contoured with discrete flying edges in 2-D), and every triangle
+      (segment) is an element located at its centre and weighted by its area (length). Distances
+      run from those centres to the nearest point of the other mesh, not to its elements, and are
+      computed exactly in float64 on the CPU. Percentiles are area-weighted as for surfels. A
+      point lying on the other surface comes out ~1e-16 rather than 0, as in MeshMetrics, so an
+      NSD tolerance of exactly 0 (or exactly a distance) is ill-posed here.
 
 HD and ASSD reduce each direction with a statistic ``s`` (for HD the q-th percentile, with linear
 interpolation for voxels as in NumPy's default; for ASSD the mean) and join the two directions
@@ -35,7 +42,11 @@ Tools disagree on these choices, so they are arguments rather than fixed definit
     MedPy 0.5.2  voxels    pooled   pooled
     MedPy 0.4    voxels    pooled   mean
     DeepMind     surfels   max      both directed means are returned
+    MeshMetrics  mesh      max      pooled (``assd``), mean (``masd``)
     ===========  ========  =======  ==================================
+
+MeshMetrics measures 2-D distances to an extruded contour that VTK stores in float32, so its 2-D
+values differ from exacta's by float32 rounding (about 1e-7 relative); 3-D values agree to 1e-9.
 
 NSD at tolerance ``tau`` (Nikolov et al., JMIR 2021) is the fraction of the surface, of both
 masks together, that lies within ``tau`` of the other surface:
@@ -46,6 +57,7 @@ the representation) and, for surfels, DeepMind's ``compute_surface_dice_at_toler
 
 from __future__ import annotations
 
+import functools
 import itertools
 import math
 from collections.abc import Callable, Iterator, Sequence
@@ -57,11 +69,12 @@ from torch import Tensor
 
 from exacta import _native, _triton_edt
 from exacta._inputs import InputFormat, Segmentations, as_spacing, like_input, to_torch, validate
+from exacta.functional._mesh_tables import SEGMENTS_2D, TRIANGLES_3D
 from exacta.functional._surfel_tables import surfel_measures
 
 Backend = Literal["auto", "native", "triton", "torch"]
 Combine = Literal["max", "mean", "pooled"]
-Surface = Literal["voxels", "surfels"]
+Surface = Literal["voxels", "surfels", "mesh"]
 
 EdtSq = Callable[..., Tensor]  # (features, spacing, batch_ndim=0) -> squared distances
 
@@ -108,7 +121,8 @@ def hausdorff_distance(
         percentile: 100 gives the Hausdorff distance, 95 gives HD95.
         combine: How the two directions are joined: ``"max"`` (MONAI, DeepMind), ``"pooled"``
             (MedPy) or ``"mean"``.
-        surface: ``"voxels"`` (MONAI, MedPy) or area-weighted ``"surfels"`` (DeepMind).
+        surface: ``"voxels"`` (MONAI, MedPy), area-weighted ``"surfels"`` (DeepMind) or
+            ``"mesh"`` (MeshMetrics).
         num_classes, include_background: As in :func:`exacta.functional.dice`.
         both_empty: Value when the class is absent from both prediction and target.
         one_empty: Value when the class is absent from exactly one of them.
@@ -255,8 +269,10 @@ def _per_case(
         elements = _voxel_distances
     elif surface == "surfels":
         elements = _surfel_distances
+    elif surface == "mesh":
+        elements = _mesh_distances
     else:
-        raise ValueError(f"surface must be 'voxels' or 'surfels', got {surface!r}")
+        raise ValueError(f"surface must be 'voxels', 'surfels' or 'mesh', got {surface!r}")
     spacings = as_spacing(spacing, batch=seg.batch, ndim=seg.ndim)
     edt_sq = _edt_function(backend, seg.pred.device)
 
@@ -451,6 +467,70 @@ def _surfel_distances(
             )
         )
     return out
+
+
+def _mesh_distances(
+    masks: list[tuple[Tensor, Tensor]], spacing: Sequence[float], edt_sq: EdtSq
+) -> list[tuple[_Distances, _Distances]]:
+    """For each (prediction, target) pair: distances from the centre of every triangle (3-D) or
+    segment (2-D) of one mesh to the other mesh, and the elements' areas or lengths. MeshMetrics'
+    definition, computed on the CPU."""
+    out = []
+    for p, t in masks:
+        elements_p, centres_p, sizes_p = _mesh(p, spacing)
+        elements_t, centres_t, sizes_t = _mesh(t, spacing)
+        out.append(
+            (
+                _Distances(_native.point_mesh_distances(centres_p, elements_t), sizes_p),
+                _Distances(_native.point_mesh_distances(centres_t, elements_p), sizes_t),
+            )
+        )
+    return out
+
+
+def _mesh(mask: Tensor, spacing: Sequence[float]) -> tuple[Tensor, Tensor, Tensor]:
+    """MeshMetrics' mesh of a mask, as float64 CPU tensors: its triangles (3-D) or segments
+    (2-D) in physical units (M, d, d), their centres (M, d) and their areas or lengths (M,).
+
+    VTK's discrete marching cubes (flying edges in 2-D), tabulated per 2x2(x2) block of voxels:
+    the block whose neighbour code sits at corner index ``c`` starts at voxel ``c - 1``.
+    """
+    if not _native.available():
+        raise RuntimeError("surface='mesh' needs exacta's compiled extension")
+    ndim = mask.ndim
+    code = _neighbour_code(mask).cpu()
+    on = (code != 0) & (code != (1 << (1 << ndim)) - 1)
+    corners = torch.nonzero(on)
+    codes = code[on].long()
+    table, counts = _mesh_table(ndim)
+    per_block = counts[codes]
+    owner = torch.repeat_interleave(torch.arange(codes.numel()), per_block)
+    first = torch.cumsum(per_block, 0) - per_block
+    slot = torch.arange(owner.numel()) - torch.repeat_interleave(first, per_block)
+    local = table[codes[owner], slot]  # (M, d, d), in voxels from the block's first voxel
+    origin = (corners[owner] - 1)[:, None, :].double()
+    elements = (local + origin) * torch.tensor(spacing, dtype=torch.float64)
+    if ndim == 3:
+        # VTK's parametric centre of a triangle, evaluated as VTK does
+        third = 1.0 / 3.0
+        centres = elements[:, 0] * (1.0 - third - third) + elements[:, 1] * third + elements[:, 2] * third
+        edges = elements[:, 1:] - elements[:, :1]
+        sizes = 0.5 * torch.linalg.cross(edges[:, 0], edges[:, 1]).norm(dim=1)
+    else:
+        centres = (elements[:, 0] + elements[:, 1]) / 2  # MeshMetrics' segment centres
+        sizes = (elements[:, 1] - elements[:, 0]).norm(dim=1)
+    return elements, centres, sizes
+
+
+@functools.lru_cache(maxsize=None)
+def _mesh_table(ndim: int) -> tuple[Tensor, Tensor]:
+    """Elements of each neighbour code (codes, most per code, d, d) in voxels, and their counts."""
+    cells = TRIANGLES_3D if ndim == 3 else SEGMENTS_2D
+    table = torch.zeros((len(cells), max(map(len, cells)), ndim, ndim), dtype=torch.float64)
+    for code, elements in enumerate(cells):
+        for k, element in enumerate(elements):  # digits are half-voxels
+            table[code, k] = torch.tensor([int(x) for x in element], dtype=torch.float64).view(ndim, ndim) / 2
+    return table, torch.tensor([len(c) for c in cells])
 
 
 def _neighbour_code(mask: Tensor) -> Tensor:

@@ -50,6 +50,7 @@ EF.volume_similarity(pred, target, num_classes=4, convention="itk")      # Simpl
 EF.hd95(pred, target, spacing=s, num_classes=4, combine="pooled")    # MedPy's hd95
 EF.assd(pred, target, spacing=s, num_classes=4, combine="mean")      # MedPy 0.4's assd
 EF.nsd(pred, target, spacing=s, num_classes=4, tolerance=1.0, surface="surfels")  # DeepMind's NSD
+EF.hd95(pred, target, spacing=s, num_classes=4, surface="mesh")                  # MeshMetrics' HD95
 
 # Lesion-wise (instance) evaluation: choose how lesions are matched
 from exacta import lesions
@@ -74,7 +75,7 @@ Each convention is an explicit argument, because this is where libraries disagre
 |---|---|
 | Input layout | `input_format="index"`: class indices `(B, *spatial)` + `num_classes`. `"one-hot"`: binary masks `(B, C, *spatial)`. Metrics take hard labels; losses take logits. |
 | Spacing | Required for distance metrics, in the axis order of the tensor. A SimpleITK array is `(z, y, x)` while `GetSpacing()` returns `(x, y, z)`. |
-| Surface | `surface="voxels"` (default): boundary voxels, i.e. mask voxels with a face-adjacent neighbour outside the mask, each with equal weight, as in MONAI and MedPy. `"surfels"`: DeepMind's surface elements at voxel corners, weighted by their marching-cubes area (MONAI's `use_subvoxels=True`); percentiles become area-weighted, as in DeepMind. Outside the image counts as background. |
+| Surface | `surface="voxels"` (default): boundary voxels, i.e. mask voxels with a face-adjacent neighbour outside the mask, each with equal weight, as in MONAI and MedPy. `"surfels"`: DeepMind's surface elements at voxel corners, weighted by their marching-cubes area (MONAI's `use_subvoxels=True`); percentiles become area-weighted, as in DeepMind. `"mesh"`: MeshMetrics' VTK marching-cubes mesh, with distances from each triangle's centre to the nearest point of the other mesh, weighted by area (2-D: contour segments). Outside the image counts as background. |
 | HD95 | `combine="max"` (default): `max(P95(d(P→T)), P95(d(T→P)))`, as in MONAI and DeepMind; linear-interpolated percentile for voxels. `"pooled"`: one percentile over both directions, as in MedPy. |
 | ASSD | `combine="pooled"` (default): mean over the surface elements of both masks, as in MONAI and MedPy 0.5.2. `"mean"`: mean of the two directed means, as in MedPy 0.4 (DeepMind returns the two directed means). |
 | NSD | Fraction of the surface of both masks within `tolerance` of the other surface, `d ≤ tolerance`, as in MONAI and DeepMind. Each distance is the exact floating-point minimum of the expression SciPy evaluates, so distances that tie with the tolerance land on the same side as in MedPy and DeepMind. MONAI compares in float32. |
@@ -171,7 +172,9 @@ regenerate them are in `tests/fixtures/`. Reference tests against MONAI, MedPy a
 surface-distance are skipped unless those packages are installed:
 
 ```bash
-pip install monai medpy "git+https://github.com/google-deepmind/surface-distance.git"
+pip install monai medpy scikit-image vtk \
+    "git+https://github.com/google-deepmind/surface-distance.git" \
+    "git+https://github.com/gasperpodobnik/MeshMetrics.git"
 ```
 
 ## License

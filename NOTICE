@@ -5,3 +5,9 @@ This product includes a lookup table from DeepMind's surface-distance
 (https://github.com/google-deepmind/surface-distance), in
 src/exacta/functional/_surfel_tables.py. Copyright 2018 Google Inc.,
 licensed under the Apache License, Version 2.0.
+
+This product includes mesh tables derived from VTK (https://vtk.org), in
+src/exacta/functional/_mesh_tables.py: the triangles and segments that VTK's
+vtkDiscreteMarchingCubes and vtkDiscreteFlyingEdges2D produce for each
+configuration of a 2x2(x2) block of voxels. Copyright Ken Martin, Will
+Schroeder, Bill Lorensen, licensed under the BSD 3-Clause License.

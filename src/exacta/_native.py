@@ -63,3 +63,15 @@ def class_extents(labels: Tensor, num_classes: int) -> tuple[Tensor, Tensor, Ten
     hi = torch.empty((num_classes, labels.ndim), dtype=torch.int64)
     _C.class_extents(labels, lo, hi)
     return hi[:, 0] >= 0, lo, hi
+
+
+def point_mesh_distances(points: Tensor, elements: Tensor) -> Tensor:
+    """Distance from each point (N, d) to the nearest element (M, d, d) of a CPU mesh: triangles
+    in 3-D, segments in 2-D; float64, inf for an empty mesh."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    points = points.to(torch.float64).contiguous()
+    elements = elements.to(torch.float64).contiguous()
+    out = torch.empty(points.shape[0], dtype=torch.float64)
+    _C.point_mesh_distances(points, elements, out)
+    return out

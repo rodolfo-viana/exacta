@@ -54,7 +54,23 @@ def methods(pred, target, classes: int, spacing):
          lambda: EF.nsd(pred, target, spacing=spacing, tolerance=1.0, num_classes=classes)),
         ("NSD surfels", "exacta native", "cpu",
          lambda: EF.nsd(pred, target, spacing=spacing, tolerance=1.0, num_classes=classes, surface="surfels")),
+        ("HD95 mesh", "exacta native", "cpu",
+         lambda: EF.hd95(pred, target, spacing=spacing, num_classes=classes, surface="mesh")),
     ]
+    try:
+        from meshmetrics import DistanceMetrics
+    except ImportError:
+        pass
+    else:
+        def meshmetrics_hd95():
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                for c in range(classes):
+                    dm = DistanceMetrics(verbose=False)
+                    dm.set_input(ref=t_np[0] == c, pred=p_np[0] == c, spacing=spacing)
+                    dm.hd(95)
+
+        cases.append(("HD95 mesh", "MeshMetrics", "cpu", meshmetrics_hd95))
     from scipy import ndimage
 
     fg = p_np[0] > 0

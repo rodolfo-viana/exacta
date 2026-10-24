@@ -101,6 +101,30 @@ void class_extents(nb::ndarray<const T, nb::device::cpu, nb::c_contig> labels,
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }
 
+using Points = nb::ndarray<const double, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
+using Elements = nb::ndarray<const double, nb::ndim<3>, nb::device::cpu, nb::c_contig>;
+
+void point_mesh_distances(Points points, Elements elements,
+                          nb::ndarray<double, nb::ndim<1>, nb::device::cpu, nb::c_contig> out,
+                          int num_threads) {
+  const auto dim = static_cast<int>(points.shape(1));
+  if (out.shape(0) != points.shape(0) || elements.shape(1) != points.shape(1) ||
+      elements.shape(2) != points.shape(1)) {
+    throw std::invalid_argument("points (N, d), elements (M, d, d) and out (N,) do not agree");
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_point_mesh_distances_f64(
+        points.data(), static_cast<std::int64_t>(points.shape(0)), elements.data(),
+        static_cast<std::int64_t>(elements.shape(0)), dim, out.data(), num_threads);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) {
+    throw std::invalid_argument("point_mesh_distances: dimension must be 2 or 3");
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
+
 }  // namespace
 
 NB_MODULE(_C, m) {
@@ -119,6 +143,10 @@ NB_MODULE(_C, m) {
         nb::arg("lo"), nb::arg("hi"), nb::arg("num_threads") = 0, extents_doc);
   m.def("class_extents", &class_extents<std::int64_t, exacta_class_extents_i64>, nb::arg("labels"),
         nb::arg("lo"), nb::arg("hi"), nb::arg("num_threads") = 0, extents_doc);
+  m.def("point_mesh_distances", &point_mesh_distances, nb::arg("points"), nb::arg("elements"),
+        nb::arg("out"), nb::arg("num_threads") = 0,
+        "Write into `out` the distance from each point (N, d) to the nearest triangle (d = 3) or "
+        "segment (d = 2) of `elements` (M, d, d).");
   m.def("label", &label, nb::arg("mask"), nb::arg("out"), nb::arg("connectivity"),
         "Write into `out` (int32, same shape) the connected-component labels of `mask` (uint8), "
         "numbered as scipy.ndimage.label numbers them, and return the number of components.");

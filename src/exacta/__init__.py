@@ -1,7 +1,7 @@
 """exacta: fast, reference-validated losses and metrics for deep learning."""
 
-from exacta import components, functional, losses, metrics
+from exacta import components, functional, lesions, losses, metrics
 
 __version__ = "0.0.1"
 
-__all__ = ["components", "functional", "losses", "metrics", "__version__"]
+__all__ = ["components", "functional", "lesions", "losses", "metrics", "__version__"]
