@@ -1,4 +1,5 @@
-// Lexicographic sort of (key, value) pairs of doubles, for weighted percentiles.
+// Lexicographic sort of (key, value) pairs of doubles, for weighted percentiles; and the square
+// roots of the values a mask selects, for distances at surface voxels.
 //
 // Chunks are sorted in parallel, then merged pairwise between two buffers; each merge is split
 // among the threads at points found by binary search, so the last merges run in parallel too.
@@ -9,6 +10,7 @@
 #include <memory>
 #include <new>
 #include <utility>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -97,4 +99,42 @@ extern "C" int exacta_sort_pairs_f64(double *keys, double *values, int64_t n, in
   } catch (const std::bad_alloc &) {
     return EXACTA_OUT_OF_MEMORY;
   }
+}
+
+extern "C" int exacta_masked_sqrt_f64(const double *values, const uint8_t *mask, int64_t n,
+                                      double *out, int64_t count, int num_threads) {
+  if (n < 0 || count < 0 || (n > 0 && (values == nullptr || mask == nullptr)) ||
+      (count > 0 && out == nullptr)) {
+    return EXACTA_INVALID_ARGUMENT;
+  }
+#ifdef _OPENMP
+  const int threads = num_threads > 0 ? num_threads : omp_get_max_threads();
+#else
+  (void)num_threads;
+  const int threads = 1;
+#endif
+  // Each thread counts its range, then writes from where the earlier ranges end.
+  std::vector<std::int64_t> start;
+  try {
+    start.assign(static_cast<std::size_t>(threads) + 1, 0);
+  } catch (const std::bad_alloc &) {
+    return EXACTA_OUT_OF_MEMORY;
+  }
+  const auto bound = [&](std::int64_t t) { return n * t / threads; };
+#pragma omp parallel for num_threads(threads) schedule(static, 1)
+  for (int t = 0; t < threads; ++t) {
+    std::int64_t c = 0;
+    for (std::int64_t i = bound(t); i < bound(t + 1); ++i) c += mask[i] != 0;
+    start[t + 1] = c;
+  }
+  for (int t = 0; t < threads; ++t) start[t + 1] += start[t];
+  if (start[threads] != count) return EXACTA_INVALID_ARGUMENT;
+#pragma omp parallel for num_threads(threads) schedule(static, 1)
+  for (int t = 0; t < threads; ++t) {
+    double *next = out + start[t];
+    for (std::int64_t i = bound(t); i < bound(t + 1); ++i) {
+      if (mask[i]) *next++ = std::sqrt(values[i]);  // IEEE: correctly rounded
+    }
+  }
+  return EXACTA_OK;
 }

@@ -151,6 +151,45 @@ bool channel_counts(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_con
 using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
 using Indices = nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
 
+void boundary(nb::ndarray<const std::uint8_t, nb::device::cpu> mask,
+              nb::ndarray<std::uint8_t, nb::device::cpu, nb::c_contig> out, int num_threads) {
+  const int ndim = static_cast<int>(mask.ndim());
+  if (out.ndim() != mask.ndim()) throw std::invalid_argument("mask and out differ in shape");
+  std::vector<std::int64_t> shape(ndim), strides(ndim);
+  for (int axis = 0; axis < ndim; ++axis) {
+    if (out.shape(axis) != mask.shape(axis)) throw std::invalid_argument("mask and out differ");
+    shape[axis] = static_cast<std::int64_t>(mask.shape(axis));
+    strides[axis] = static_cast<std::int64_t>(mask.stride(axis));
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_boundary_u8(mask.data(), shape.data(), strides.data(), ndim, out.data(),
+                                num_threads);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) {
+    throw std::invalid_argument("boundary: mask must have 1 to 3 dimensions");
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
+
+void masked_sqrt(Flat<double> values, Flat<std::uint8_t> mask,
+                 nb::ndarray<double, nb::ndim<1>, nb::device::cpu, nb::c_contig> out,
+                 int num_threads) {
+  if (values.shape(0) != mask.shape(0)) throw std::invalid_argument("values and mask differ");
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_masked_sqrt_f64(values.data(), mask.data(),
+                                    static_cast<std::int64_t>(values.shape(0)), out.data(),
+                                    static_cast<std::int64_t>(out.shape(0)), num_threads);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) {
+    throw std::invalid_argument("masked_sqrt: out must hold one value per selected element");
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
+
 // Returns false when a value is neither 0 nor 1.
 template <typename T, int (*Kernel)(const T *, int64_t, uint8_t *, int)>
 bool binary_mask(Flat<T> values, nb::ndarray<std::uint8_t, nb::ndim<1>, nb::device::cpu,
@@ -438,6 +477,13 @@ NB_MODULE(_C, m) {
         nb::arg("out"), nb::arg("num_threads") = 0, binary_doc);
   m.def("binary_mask", &binary_mask<double, exacta_binary_mask_f64>, nb::arg("values"),
         nb::arg("out"), nb::arg("num_threads") = 0, binary_doc);
+  m.def("boundary", &boundary, nb::arg("mask"), nb::arg("out"), nb::arg("num_threads") = 0,
+        "Write into `out` (uint8, same shape, contiguous) the boundary of the uint8 `mask` (any "
+        "strides): mask elements with a face neighbour outside the mask or the image.");
+  m.def("masked_sqrt", &masked_sqrt, nb::arg("values"), nb::arg("mask"), nb::arg("out"),
+        nb::arg("num_threads") = 0,
+        "Write into `out` the square roots of the float64 `values` where the uint8 `mask` is "
+        "nonzero, in order; `out` must have one entry per such element.");
   m.def("sort_pairs", &sort_pairs, nb::arg("keys"), nb::arg("values"), nb::arg("num_threads") = 0,
         "Sort the float64 pairs (keys[i], values[i]) in place by key, then value; returns False "
         "(arrays untouched) if one is NaN.");

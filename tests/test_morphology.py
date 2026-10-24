@@ -43,3 +43,27 @@ def test_mask_extents_match_definition(shape):
     for c in torch.nonzero(present).flatten().tolist():
         idx = torch.nonzero(masks[c])
         assert torch.equal(lo[c], idx.amin(0)) and torch.equal(hi[c], idx.amax(0))
+
+
+@pytest.mark.parametrize(
+    "shape", [(1,), (5,), (7, 1), (1, 7), (1, 1, 1), (9, 10, 11), (0, 3, 3), (3, 1, 4), (40, 33)]
+)
+@pytest.mark.parametrize("density", [0.0, 0.5, 0.9, 1.0])
+def test_native_boundary_matches_torch(shape, density):
+    from exacta.functional.surface import _boundary_torch
+
+    big = torch.from_numpy(np.random.default_rng(5).random(tuple(s + 4 for s in shape)) < density)
+    crop = big[tuple(slice(1, 1 + s) for s in shape)]  # a strided view, read in place
+    expected = _boundary_torch(crop, crop.ndim)
+    for mask in (crop, crop.contiguous(), crop.to(torch.uint8), crop.to(torch.int64) * 3):
+        got = _native.boundary(mask)
+        assert got.dtype == torch.bool and got.is_contiguous()
+        assert torch.equal(got, expected)
+
+
+def test_native_masked_sqrt_is_correctly_rounded():
+    rng = np.random.default_rng(6)
+    values = torch.from_numpy(rng.random((30, 40)) * 50)
+    mask = torch.from_numpy(rng.random((30, 40)) < 0.3)
+    assert torch.equal(_native.masked_sqrt(values, mask), torch.from_numpy(np.sqrt(values[mask].numpy())))
+    assert _native.masked_sqrt(values, torch.zeros_like(mask)).numel() == 0

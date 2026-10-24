@@ -121,4 +121,5 @@ def test_triton_counts_match_torch_for_one_hot_dtypes(dtype):
 def test_gpu_dice_with_many_classes_matches_cpu():
     assert not _triton_counts.fits(40)  # counted with bincount
     pred, target = (torch.from_numpy(a) for a in pair((20, 22, 24), 40, seed=9))
-    assert torch.equal(EF.dice(pred.cuda(), target.cuda(), num_classes=40).cpu(), EF.dice(pred, target, num_classes=40))
+    on_gpu = EF.dice(pred.cuda(), target.cuda(), num_classes=40).cpu()
+    assert torch.equal(on_gpu, EF.dice(pred, target, num_classes=40))

@@ -397,7 +397,7 @@ def _within(x: _Distances, tau: float) -> tuple[float, float]:
     """Amount of surface (voxel count, or surfel area) within ``tau``, and the total amount."""
     inside = x.d <= tau
     if x.w is None:
-        return inside.sum().item(), x.d.numel()
+        return torch.count_nonzero(inside).item(), x.d.numel()
     return x.w[inside].sum().item(), x.w.sum().item()
 
 
@@ -449,7 +449,7 @@ def _voxel_distances(
     out = []
     for i, (on_p, on_t) in enumerate(boundaries):
         to_p, to_t = maps[2 * i], maps[2 * i + 1]
-        out.append((_Distances(_sqrt(to_t[on_p]), None), _Distances(_sqrt(to_p[on_t]), None)))
+        out.append((_Distances(_sqrt_at(to_t, on_p), None), _Distances(_sqrt_at(to_p, on_t), None)))
     return out
 
 
@@ -469,8 +469,8 @@ def _surfel_distances(
         to_p, to_t = maps[2 * i], maps[2 * i + 1]
         out.append(
             (
-                _Distances(_sqrt(to_t[on_p]), measure[code_p[on_p].long()]),
-                _Distances(_sqrt(to_p[on_t]), measure[code_t[on_t].long()]),
+                _Distances(_sqrt_at(to_t, on_p), measure[code_p[on_p].long()]),
+                _Distances(_sqrt_at(to_p, on_t), measure[code_t[on_t].long()]),
             )
         )
     return out
@@ -592,6 +592,12 @@ def _neighbour_code_torch(mask: Tensor) -> Tensor:
 
 def _boundary(mask: Tensor, ndim: int) -> Tensor:
     """Mask voxels with a face-adjacent neighbour outside the mask or outside the image."""
+    if mask.ndim == ndim and 1 <= ndim <= 3 and mask.device.type == "cpu" and _native.available():
+        return _native.boundary(mask)  # one pass, reading crops in place
+    return _boundary_torch(mask, ndim)
+
+
+def _boundary_torch(mask: Tensor, ndim: int) -> Tensor:
     interior = mask.clone()
     for axis in range(mask.ndim - ndim, mask.ndim):
         n = mask.shape[axis]
@@ -602,6 +608,13 @@ def _boundary(mask: Tensor, ndim: int) -> Tensor:
         interior.narrow(axis, 0, 1).fill_(False)
         interior.narrow(axis, n - 1, 1).fill_(False)
     return mask & ~interior
+
+
+def _sqrt_at(x: Tensor, mask: Tensor) -> Tensor:
+    """``_sqrt(x[mask])``, natively on CPU: one pass instead of a gather and a square root."""
+    if x.device.type == "cpu" and _native.available():
+        return _native.masked_sqrt(x, mask)
+    return _sqrt(x[mask])
 
 
 def _sqrt(x: Tensor) -> Tensor:

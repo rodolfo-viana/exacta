@@ -164,6 +164,18 @@ int exacta_binary_mask_i64(const int64_t *values, int64_t n, uint8_t *out, int n
 int exacta_binary_mask_f32(const float *values, int64_t n, uint8_t *out, int num_threads);
 int exacta_binary_mask_f64(const double *values, int64_t n, uint8_t *out, int num_threads);
 
+/* Boundary of a 1-D to 3-D mask (nonzero is inside), with element strides `strides`: out (C order,
+ * contiguous) is 1 where the mask is and a face neighbour is outside it or outside the image.
+ */
+int exacta_boundary_u8(const uint8_t *mask, const int64_t *shape, const int64_t *strides, int ndim,
+                       uint8_t *out, int num_threads);
+
+/* sqrt(values[i]) for each i with mask[i] nonzero, in order, into `out`, which holds `count`, the
+ * number of such i. Returns EXACTA_INVALID_ARGUMENT if `count` is not that number.
+ */
+int exacta_masked_sqrt_f64(const double *values, const uint8_t *mask, int64_t n, double *out,
+                           int64_t count, int num_threads);
+
 #ifdef __cplusplus
 }
 #endif

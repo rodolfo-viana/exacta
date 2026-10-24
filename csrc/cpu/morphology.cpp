@@ -1,4 +1,4 @@
-// Binary morphology on masks: bounding boxes of several masks, and binary dilation.
+// Binary morphology on masks: bounding boxes of several masks, binary dilation, and boundaries.
 
 #include <algorithm>
 #include <cstdint>
@@ -200,4 +200,53 @@ extern "C" int exacta_dilate_u8(const uint8_t *mask, uint8_t *out, const int64_t
   } catch (const std::bad_alloc &) {
     return EXACTA_OUT_OF_MEMORY;
   }
+}
+
+namespace {
+
+// Mask elements with a face neighbour outside the mask or outside the image, for a 1-D to 3-D mask
+// (as 3-D, the leading `3 - ndim` axes of extent 1 and without neighbours) given by strides in
+// elements, written to a contiguous `out`.
+void boundary(const std::uint8_t *mask, const std::int64_t n[3], const std::int64_t stride[3],
+              int ndim, std::uint8_t *out, int threads) {
+  const int first = 2 * (3 - ndim);  // neighbouring rows of the padding axes do not exist
+#pragma omp parallel for num_threads(threads) schedule(static)
+  for (std::int64_t r = 0; r < n[0] * n[1]; ++r) {
+    const std::int64_t i0 = r / n[1], i1 = r % n[1];
+    const std::uint8_t *row = mask + i0 * stride[0] + i1 * stride[1];
+    // Neighbouring rows along axes 0 and 1, or null outside the image.
+    const std::uint8_t *near[4] = {
+        i0 > 0 ? row - stride[0] : nullptr, i0 + 1 < n[0] ? row + stride[0] : nullptr,
+        i1 > 0 ? row - stride[1] : nullptr, i1 + 1 < n[1] ? row + stride[1] : nullptr};
+    std::uint8_t *dst = out + r * n[2];
+    for (std::int64_t x = 0; x < n[2]; ++x) {
+      const std::int64_t at = x * stride[2];
+      bool interior = row[at] != 0 && x > 0 && x + 1 < n[2] && row[at - stride[2]] != 0 &&
+                      row[at + stride[2]] != 0;
+      for (int k = std::min(first, 4); k < 4 && interior; ++k) {
+        interior = near[k] != nullptr && near[k][at] != 0;
+      }
+      dst[x] = row[at] != 0 && !interior;
+    }
+  }
+}
+
+}  // namespace
+
+extern "C" int exacta_boundary_u8(const uint8_t *mask, const int64_t *shape,
+                                  const int64_t *strides, int ndim, uint8_t *out,
+                                  int num_threads) {
+  if (shape == nullptr || strides == nullptr || ndim < 1 || ndim > 3) {
+    return EXACTA_INVALID_ARGUMENT;
+  }
+  for (int axis = 0; axis < ndim; ++axis) {
+    if (shape[axis] < 0) return EXACTA_INVALID_ARGUMENT;
+  }
+  if (any_empty(shape, ndim)) return EXACTA_OK;
+  if (mask == nullptr || out == nullptr) return EXACTA_INVALID_ARGUMENT;
+  std::int64_t n[3], stride[3] = {0, 0, 0};
+  as_3d(shape, ndim, n);
+  for (int axis = 0; axis < ndim; ++axis) stride[3 - ndim + axis] = strides[axis];
+  boundary(mask, n, stride, ndim, out, threads_for(num_threads));
+  return EXACTA_OK;
 }

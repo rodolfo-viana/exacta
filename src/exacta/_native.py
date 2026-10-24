@@ -29,7 +29,7 @@ def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> T
     """
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
-    features = features.to(torch.uint8).contiguous()
+    features = _as_bytes(features)
     out = torch.empty(features.shape, dtype=torch.float64)
     _C.edt_sq(features, out, [float(s) for s in spacing], batch_ndim)
     return out
@@ -162,6 +162,30 @@ def binary_mask(values: Tensor) -> Tensor | None:
     out = torch.empty(values.shape, dtype=torch.bool)
     ok = _C.binary_mask(values.contiguous().reshape(-1), out.view(torch.uint8).reshape(-1))
     return out if ok else None
+
+
+def boundary(mask: Tensor) -> Tensor:
+    """Elements of a CPU 1-D to 3-D mask (any strides) with a face neighbour outside the mask or
+    outside the image, as a contiguous bool tensor."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    if mask.dtype == torch.bool:
+        mask = mask.view(torch.uint8)  # keeps the strides of a view
+    elif mask.dtype != torch.uint8:
+        mask = (mask != 0).to(torch.uint8)
+    out = torch.empty(mask.shape, dtype=torch.bool)
+    _C.boundary(mask, out.view(torch.uint8))
+    return out
+
+
+def masked_sqrt(values: Tensor, mask: Tensor) -> Tensor:
+    """``sqrt(values[mask])`` of a CPU float64 tensor, correctly rounded, in one parallel pass."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    flat_mask = _as_bytes(mask).reshape(-1)
+    out = torch.empty(int(torch.count_nonzero(flat_mask)), dtype=torch.float64)
+    _C.masked_sqrt(values.to(torch.float64).contiguous().reshape(-1), flat_mask, out)
+    return out
 
 
 def sort_pairs(keys: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
