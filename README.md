@@ -7,7 +7,8 @@ disagree: [Podobnik & Vrtovec (2024)](https://arxiv.org/abs/2410.02630) compared
 tools and found that distance-based metrics such as HD95 and NSD can differ substantially across
 tools for the same segmentation pair. exacta aims to be the one implementation you can trust and
 cite: every metric states its exact definition and is tested against independent reference
-implementations.
+implementations (SciPy, MONAI, MedPy and DeepMind's surface-distance), and where they disagree
+with each other, exacta can reproduce each of them through an explicit argument.
 
 Status: early development (v0.0.1). The first release targets 3D medical image segmentation.
 
@@ -86,7 +87,8 @@ Each convention is an explicit argument, because this is where libraries disagre
     bit for bit.
   - `DiceLoss` and `DiceCELoss` run as two fused kernels, one forward and one backward, that
     keep nothing for the backward pass but the logits: 7-13x faster than the PyTorch path on 3-D
-    batches, without its 0.3-1.1 GiB of intermediates (`benchmarks/bench_losses.py`).
+    batches, without its 0.3-1.1 GiB of intermediates (`benchmarks/bench_losses.py`). They
+    work under `torch.compile` without graph breaks.
 
 ## Development
 
