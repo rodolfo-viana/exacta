@@ -1,9 +1,10 @@
 // Distance from points to the nearest element of a mesh: triangles (3-D) or segments (2-D).
 //
 // A k-d tree over the elements, split at the median of their centroids and searched depth-first.
-// Each node keeps the bounding box of its elements' vertices, which holds the elements, so a node
-// (or an element) whose box is farther from the query than the best distance so far cannot hold a
-// closer element. The result is the exact minimum over elements of the point-to-element distance.
+// Each node keeps the bounding box of its elements' vertices, and each element its own box (in
+// single precision, rounded outward); a box holds what it bounds, so a node or element whose box
+// is farther from the query than the best distance so far cannot hold a closer element. The
+// result is the exact minimum over elements of the point-to-element distance.
 //
 // The tree is stored in heap order (the children of node i are 2i + 1 and 2i + 2), so subtrees
 // are built in parallel, and the elements are copied in tree order, so a leaf's are contiguous.
@@ -102,10 +103,21 @@ double point_segment(const double *p, const double *a, const double *b, int dim)
   return std::sqrt(s);
 }
 
+// x in single precision, rounded towards `direction` (+-1) so that it does not cross x.
+float rounded(double x, float direction) {
+  constexpr float kMax = std::numeric_limits<float>::max();
+  const float inf = std::numeric_limits<float>::infinity();
+  if (x > kMax) return direction > 0 ? inf : kMax;
+  if (x < -kMax) return direction > 0 ? -kMax : -inf;
+  const float f = static_cast<float>(x);
+  return (direction > 0 ? f < x : f > x) ? std::nextafter(f, direction * inf) : f;
+}
+
 struct Tree {
   int dim;
   std::vector<Item> items;             // centroids, in tree order once built
   std::unique_ptr<double[]> elements;  // vertices (dim x dim each), in tree order
+  std::unique_ptr<float[]> boxes;      // each element's box (lo, then hi), rounded outward
   std::vector<Node> nodes;             // heap order; unused slots are empty leaves
   double scale = 0.0;                  // largest coordinate magnitude of the vertices
 
@@ -190,36 +202,52 @@ struct Tree {
     return box_squared(node.lo, node.hi, p);
   }
 
-  // Squared distance from p to the bounding box of element k's vertices.
-  double element_box_squared(const double *p, std::int64_t k) const {
+  // Element k's box in single precision, rounded outward so that it still holds the element.
+  void fit_element(std::int64_t k) {
     const double *v = elements.get() + k * dim * dim;
-    double lo[3], hi[3];
-    for (int i = 0; i < dim; ++i) lo[i] = hi[i] = v[i];
-    for (int j = 1; j < dim; ++j) {
-      for (int i = 0; i < dim; ++i) {
-        lo[i] = std::min(lo[i], v[j * dim + i]);
-        hi[i] = std::max(hi[i], v[j * dim + i]);
+    float *box = boxes.get() + k * 2 * dim;
+    for (int i = 0; i < dim; ++i) {
+      double lo = v[i], hi = v[i];
+      for (int j = 1; j < dim; ++j) {
+        lo = std::min(lo, v[j * dim + i]);
+        hi = std::max(hi, v[j * dim + i]);
       }
+      box[i] = rounded(lo, -1.0f);
+      box[dim + i] = rounded(hi, 1.0f);
     }
-    return box_squared(lo, hi, p);
+  }
+
+  // Squared distance from p to element k's box: at most its distance to the element.
+  double element_box_squared(const double *p, std::int64_t k) const {
+    const float *box = boxes.get() + k * 2 * dim;
+    double s = 0.0;
+    for (int i = 0; i < dim; ++i) {
+      const double d = std::max(0.0, std::max(box[i] - p[i], p[i] - box[dim + i]));
+      s += d * d;
+    }
+    return s;
   }
 
   double nearest(const double *p) const {
     // The tree is balanced (depth < 64 for any realistic mesh), and each level adds at most one
     // pending node, so a small fixed stack suffices. A node or element whose box is farther than
     // the best distance so far (compared squared, with a margin far above the rounding errors of
-    // either distance) cannot hold a closer element.
+    // either distance) cannot hold a closer element. Pending nodes keep the box distance found
+    // when their parent was opened, so those pruned later are never read again.
     double magnitude = scale;
     for (int i = 0; i < dim; ++i) magnitude = std::max(magnitude, std::abs(p[i]));
     const double margin = 1e-9 * (magnitude + 1.0);
     std::int64_t stack[128];
+    double distance[128];
     int top = 0;
     double best = kInf, bound = kInf;
-    stack[top++] = 0;
+    stack[top] = 0;
+    distance[top++] = box_squared(nodes[0], p);
     while (top > 0) {
-      const std::int64_t index = stack[--top];
+      --top;
+      if (distance[top] > bound) continue;
+      const std::int64_t index = stack[top];
       const Node &node = nodes[index];
-      if (box_squared(node, p) > bound) continue;
       if (leaf(node)) {
         for (std::int64_t k = node.begin; k < node.end; ++k) {
           if (element_box_squared(p, k) > bound) continue;
@@ -232,13 +260,19 @@ struct Tree {
         continue;
       }
       // Visit the nearer child first (pushed last), so `best` shrinks early.
-      const std::int64_t left = 2 * index + 1, right = 2 * index + 2;
-      if (box_squared(nodes[left], p) < box_squared(nodes[right], p)) {
-        stack[top++] = right;
-        stack[top++] = left;
-      } else {
-        stack[top++] = left;
-        stack[top++] = right;
+      std::int64_t near = 2 * index + 1, far = 2 * index + 2;
+      double d_near = box_squared(nodes[near], p), d_far = box_squared(nodes[far], p);
+      if (d_far < d_near) {
+        std::swap(near, far);
+        std::swap(d_near, d_far);
+      }
+      if (d_far <= bound) {
+        stack[top] = far;
+        distance[top++] = d_far;
+      }
+      if (d_near <= bound) {
+        stack[top] = near;
+        distance[top++] = d_near;
       }
     }
     return best;
@@ -294,6 +328,9 @@ int point_mesh_distances(const double *points, std::int64_t n_points, const doub
     const double *v = elements + tree.items[k].element * stride;
     std::copy(v, v + stride, tree.elements.get() + k * stride);
   }
+  tree.boxes.reset(new float[static_cast<std::size_t>(n_elements) * 2 * dim]);
+#pragma omp parallel for num_threads(threads) schedule(static)
+  for (std::int64_t k = 0; k < n_elements; ++k) tree.fit_element(k);
   for (int d = depth; d >= 0; --d) {  // vertex boxes, bottom-up
     const std::int64_t first = (std::int64_t(1) << d) - 1, last = (std::int64_t(2) << d) - 1;
 #pragma omp parallel for num_threads(threads) schedule(static)

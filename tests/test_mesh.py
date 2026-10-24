@@ -134,6 +134,18 @@ def test_native_neighbour_codes_match_torch(shape):
         assert torch.equal(code, _neighbour_code_torch(mask))
 
 
+@pytest.mark.parametrize("scale", [1e-42, 1.0, 1e39])
+def test_point_mesh_distances_at_any_coordinate_scale(scale):
+    # The boxes are kept in single precision, rounded outward; past its range (1e39) and among its
+    # subnormals (1e-42) they must still hold their elements.
+    rng = np.random.default_rng(7)
+    elements = torch.from_numpy(rng.random((300, 3, 3)) * 10 * scale)
+    points = torch.from_numpy((rng.random((200, 3)) * 12 - 1) * scale)
+    got = _native.point_mesh_distances(points, elements)
+    each = torch.stack([_native.point_mesh_distances(points, element[None]) for element in elements])
+    assert torch.equal(got, each.min(0).values)
+
+
 def test_point_mesh_distances_on_a_tree_built_in_parallel():
     # Large meshes are built in parallel; the answer must equal that of small trees over parts.
     rng = np.random.default_rng(3)
