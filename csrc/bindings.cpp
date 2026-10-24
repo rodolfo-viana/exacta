@@ -101,6 +101,53 @@ void class_extents(nb::ndarray<const T, nb::device::cpu, nb::c_contig> labels,
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }
 
+template <typename T>
+using Flat = nb::ndarray<const T, nb::ndim<1>, nb::device::cpu, nb::c_contig>;
+using Counts = nb::ndarray<std::int64_t, nb::ndim<1>, nb::device::cpu, nb::c_contig>;
+
+// Returns false when a label lies outside [0, classes).
+template <typename T, int (*Kernel)(const T *, const T *, int64_t, int64_t, int64_t *, int)>
+bool confusion(Flat<T> pred, Flat<T> target, nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu,
+               nb::c_contig> out, int num_threads) {
+  if (pred.shape(0) != target.shape(0) || out.shape(0) != out.shape(1)) {
+    throw std::invalid_argument("pred and target (N,) and out (C, C) do not agree");
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = Kernel(pred.data(), target.data(), static_cast<std::int64_t>(pred.shape(0)),
+                    static_cast<std::int64_t>(out.shape(0)), out.data(), num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT) {
+    throw std::runtime_error(exacta_status_string(status));
+  }
+  return status == EXACTA_OK;
+}
+
+// Returns false when a value is not 0 or 1.
+template <typename T, int (*Kernel)(const T *, const T *, int64_t, int64_t, int64_t *, int64_t *,
+                                    int64_t *, int)>
+bool channel_counts(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_contig> pred,
+                    nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_contig> target,
+                    Counts both, Counts in_pred, Counts in_target, int num_threads) {
+  const auto count = pred.shape(0);
+  if (target.shape(0) != count || target.shape(1) != pred.shape(1) || both.shape(0) != count ||
+      in_pred.shape(0) != count || in_target.shape(0) != count) {
+    throw std::invalid_argument("pred and target (C, N) and the counts (C,) do not agree");
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = Kernel(pred.data(), target.data(), static_cast<std::int64_t>(count),
+                    static_cast<std::int64_t>(pred.shape(1)), both.data(), in_pred.data(),
+                    in_target.data(), num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT) {
+    throw std::runtime_error(exacta_status_string(status));
+  }
+  return status == EXACTA_OK;
+}
+
 using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
 using Indices = nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
 
@@ -194,6 +241,28 @@ NB_MODULE(_C, m) {
         nb::arg("lo"), nb::arg("hi"), nb::arg("num_threads") = 0, extents_doc);
   m.def("class_extents", &class_extents<std::int64_t, exacta_class_extents_i64>, nb::arg("labels"),
         nb::arg("lo"), nb::arg("hi"), nb::arg("num_threads") = 0, extents_doc);
+  const char *confusion_doc =
+      "Write into `out` (int64, (C, C)) the confusion matrix of the label maps `pred` and `target` "
+      "(N,); returns False if a label lies outside [0, C).";
+  m.def("confusion", &confusion<std::uint8_t, exacta_confusion_u8>, nb::arg("pred"),
+        nb::arg("target"), nb::arg("out"), nb::arg("num_threads") = 0, confusion_doc);
+  m.def("confusion", &confusion<std::int32_t, exacta_confusion_i32>, nb::arg("pred"),
+        nb::arg("target"), nb::arg("out"), nb::arg("num_threads") = 0, confusion_doc);
+  m.def("confusion", &confusion<std::int64_t, exacta_confusion_i64>, nb::arg("pred"),
+        nb::arg("target"), nb::arg("out"), nb::arg("num_threads") = 0, confusion_doc);
+  const char *counts_doc =
+      "Write into `both`, `in_pred` and `in_target` (int64, (C,)) the elements of each pair of "
+      "binary masks `pred`, `target` (C, N) in both, in pred and in target; returns False if a "
+      "value is not 0 or 1.";
+  m.def("channel_counts", &channel_counts<std::uint8_t, exacta_channel_counts_u8>,
+        nb::arg("pred"), nb::arg("target"), nb::arg("both"), nb::arg("in_pred"),
+        nb::arg("in_target"), nb::arg("num_threads") = 0, counts_doc);
+  m.def("channel_counts", &channel_counts<std::int64_t, exacta_channel_counts_i64>,
+        nb::arg("pred"), nb::arg("target"), nb::arg("both"), nb::arg("in_pred"),
+        nb::arg("in_target"), nb::arg("num_threads") = 0, counts_doc);
+  m.def("channel_counts", &channel_counts<float, exacta_channel_counts_f32>, nb::arg("pred"),
+        nb::arg("target"), nb::arg("both"), nb::arg("in_pred"), nb::arg("in_target"),
+        nb::arg("num_threads") = 0, counts_doc);
   m.def("mask_extents", &mask_extents, nb::arg("masks"), nb::arg("lo"), nb::arg("hi"),
         nb::arg("num_threads") = 0,
         "Write into `lo` and `hi` (int64, (C, ndim)) the bounding box of each mask of `masks` "

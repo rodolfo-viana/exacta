@@ -20,6 +20,7 @@ from typing import Any, Literal
 import torch
 from torch import Tensor
 
+from exacta import _native
 from exacta._inputs import InputFormat, Segmentations, like_input, to_torch, validate
 
 # Voxels per bincount call, bounding the int64 index buffer to 128 MiB.
@@ -48,14 +49,7 @@ def dice(
     Returns:
         A float64 array of shape (B, C), in the array library of ``pred``.
     """
-    seg = validate(
-        to_torch(pred),
-        to_torch(target),
-        input_format=input_format,
-        num_classes=num_classes,
-        include_background=include_background,
-    )
-    tp, fp, fn = _counts(seg)
+    tp, fp, fn, _ = _confusion_counts(pred, target, input_format, num_classes, include_background)
     return like_input(_ratio(2 * tp, 2 * tp + fp + fn, both_empty), pred)
 
 
@@ -72,14 +66,7 @@ def iou(
 
     Arguments and return value as in :func:`dice`.
     """
-    seg = validate(
-        to_torch(pred),
-        to_torch(target),
-        input_format=input_format,
-        num_classes=num_classes,
-        include_background=include_background,
-    )
-    tp, fp, fn = _counts(seg)
+    tp, fp, fn, _ = _confusion_counts(pred, target, input_format, num_classes, include_background)
     return like_input(_ratio(tp, tp + fp + fn, both_empty), pred)
 
 
@@ -202,17 +189,43 @@ def relative_volume_difference(
 def _confusion_counts(
     pred: Any, target: Any, input_format: InputFormat, num_classes: int | None, include_background: bool
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """TP, FP, FN and TN, each (B, C)."""
-    seg = validate(
-        to_torch(pred),
-        to_torch(target),
-        input_format=input_format,
-        num_classes=num_classes,
-        include_background=include_background,
-    )
-    tp, fp, fn = _counts(seg)
+    """TP, FP, FN and TN, each (B, C).
+
+    On CPU, native kernels count in one pass and check values as they go (labels in range, one-hot
+    masks binary), so validation skips its own passes over the values.
+    """
+    p, t = to_torch(pred), to_torch(target)
+    kw = dict(input_format=input_format, num_classes=num_classes, include_background=include_background)
+    native = p.device.type == "cpu" and _native.available()
+    seg = validate(p, t, check_values=not native, **kw)  # type: ignore[arg-type]
+    counts = _native_counts(seg) if native else _counts(seg)
+    if counts is None:  # values the kernels reject: the full validation raises the right error
+        validate(p, t, **kw)  # type: ignore[arg-type]
+        raise AssertionError("validation accepted values that the counting kernels rejected")
+    tp, fp, fn = counts
     voxels = math.prod(seg.pred.shape[seg.pred.ndim - seg.ndim :])
     return tp, fp, fn, voxels - tp - fp - fn
+
+
+def _native_counts(seg: Segmentations) -> tuple[Tensor, Tensor, Tensor] | None:
+    """TP, FP, FN (each (B, C)) from the native kernels, or None if they reject a value."""
+    if seg.one_hot:
+        batch, classes = seg.pred.shape[:2]
+        found = _native.channel_counts(seg.pred.flatten(0, 1), seg.target.flatten(0, 1))
+        if found is None:
+            return None
+        both, in_pred, in_target = (x.view(batch, classes)[:, seg.first_class :] for x in found)
+        return both, in_pred - both, in_target - both
+    matrices = []
+    for b in range(seg.batch):
+        cm = _native.confusion(seg.pred[b], seg.target[b], seg.num_classes)
+        if cm is None:
+            return None
+        matrices.append(cm)
+    cm = torch.stack(matrices)
+    tp = cm.diagonal(dim1=1, dim2=2)
+    keep = slice(seg.first_class, None)
+    return tp[:, keep], (cm.sum(2) - tp)[:, keep], (cm.sum(1) - tp)[:, keep]
 
 
 def _counts(seg: Segmentations) -> tuple[Tensor, Tensor, Tensor]:

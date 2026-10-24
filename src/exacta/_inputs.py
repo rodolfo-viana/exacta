@@ -123,7 +123,14 @@ def validate(
     input_format: InputFormat,
     num_classes: int | None,
     include_background: bool,
+    check_values: bool = True,
 ) -> Segmentations:
+    """Check shapes, formats and (unless ``check_values`` is False) values.
+
+    ``check_values=False`` leaves the label range unchecked and one-hot inputs as they are, for
+    callers whose kernels check values as they read them; such callers must validate again with
+    the default when a kernel rejects the input, for the error message.
+    """
     if pred.shape != target.shape:
         raise ValueError(
             f"pred and target must have the same shape, got {tuple(pred.shape)} and {tuple(target.shape)}"
@@ -132,7 +139,7 @@ def validate(
         raise ValueError(f"pred and target are on different devices ({pred.device} and {target.device})")
 
     if input_format == "index":
-        num_classes = _check_index(pred, target, num_classes)
+        num_classes = _check_index(pred, target, num_classes, check_values)
         one_hot, spatial_ndim = False, pred.ndim - 1
     elif input_format == "one-hot":
         if pred.ndim not in (4, 5):
@@ -142,7 +149,8 @@ def validate(
             )
         if num_classes is not None and num_classes != pred.shape[1]:
             raise ValueError(f"num_classes={num_classes} but inputs have {pred.shape[1]} channels")
-        pred, target = _binary(pred, "pred"), _binary(target, "target")
+        if check_values:
+            pred, target = _binary(pred, "pred"), _binary(target, "target")
         num_classes = pred.shape[1]
         one_hot, spatial_ndim = True, pred.ndim - 2
     else:
@@ -155,7 +163,7 @@ def validate(
     )
 
 
-def _check_index(pred: Tensor, target: Tensor, num_classes: int | None) -> int:
+def _check_index(pred: Tensor, target: Tensor, num_classes: int | None, check_values: bool = True) -> int:
     """Validate index label maps and return ``num_classes``, which they require."""
     if pred.ndim not in (3, 4):
         raise ValueError(
@@ -169,7 +177,7 @@ def _check_index(pred: Tensor, target: Tensor, num_classes: int | None) -> int:
                 f"{name} must hold integer class indices, got {x.dtype}; "
                 "apply argmax (multi-class) or a threshold (binary) first"
             )
-    if pred.numel():
+    if check_values and pred.numel():
         lo_p, lo_t, hi_p, hi_t = torch.stack(
             [pred.min().long(), target.min().long(), pred.max().long(), target.max().long()]
         ).tolist()

@@ -101,3 +101,34 @@ def dilate(mask: Tensor, connectivity: int, steps: int) -> Tensor:
     out = torch.empty(mask.shape, dtype=torch.uint8)
     _C.dilate(_as_bytes(mask), out, int(connectivity), int(steps))
     return out.view(torch.bool)
+
+
+def confusion(pred: Tensor, target: Tensor, classes: int) -> Tensor | None:
+    """(classes, classes) int64 confusion matrix of two CPU label maps (any shape), counted in one
+    pass; None if a label lies outside [0, classes)."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    if pred.dtype == torch.bool:
+        pred, target = pred.view(torch.uint8), target.view(torch.uint8)
+    elif pred.dtype not in (torch.uint8, torch.int32, torch.int64):
+        pred, target = pred.long(), target.long()
+    out = torch.empty((classes, classes), dtype=torch.int64)
+    ok = _C.confusion(pred.contiguous().reshape(-1), target.contiguous().reshape(-1), out)
+    return out if ok else None
+
+
+def channel_counts(pred: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor] | None:
+    """Per mask of two CPU stacks of binary masks (C, ...): elements in both, in pred and in
+    target (int64, (C,)), counted in one pass; None if a value is not 0 or 1."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    if pred.dtype == torch.bool:
+        pred, target = pred.view(torch.uint8), target.view(torch.uint8)
+    elif pred.dtype not in (torch.uint8, torch.int64, torch.float32):
+        dtype = torch.float32 if pred.dtype.is_floating_point else torch.int64
+        pred, target = pred.to(dtype), target.to(dtype)
+    count = pred.shape[0]
+    flat = [x.contiguous().reshape(count, -1) for x in (pred, target)]
+    both, in_pred, in_target = (torch.empty(count, dtype=torch.int64) for _ in range(3))
+    ok = _C.channel_counts(*flat, both, in_pred, in_target)
+    return (both, in_pred, in_target) if ok else None

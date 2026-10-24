@@ -74,6 +74,29 @@ int exacta_mask_extents_u8(const uint8_t *masks, int64_t count, const int64_t *s
 int exacta_dilate_u8(const uint8_t *mask, uint8_t *out, const int64_t *shape, int ndim,
                      int connectivity, int steps, int num_threads);
 
+/* Confusion matrix of two label maps of `n` elements: out[i * classes + j] (classes x classes) is
+ * the number of elements labelled i in `pred` and j in `target`. Returns EXACTA_INVALID_ARGUMENT
+ * if a label lies outside [0, classes).
+ */
+int exacta_confusion_u8(const uint8_t *pred, const uint8_t *target, int64_t n, int64_t classes,
+                        int64_t *out, int num_threads);
+int exacta_confusion_i32(const int32_t *pred, const int32_t *target, int64_t n, int64_t classes,
+                         int64_t *out, int num_threads);
+int exacta_confusion_i64(const int64_t *pred, const int64_t *target, int64_t n, int64_t classes,
+                         int64_t *out, int num_threads);
+
+/* For each of `count` pairs of binary masks of `n` elements (mask-major, C order), the number of
+ * elements in both, in `pred` and in `target`. Returns EXACTA_INVALID_ARGUMENT if a value is not
+ * 0 or 1.
+ */
+int exacta_channel_counts_u8(const uint8_t *pred, const uint8_t *target, int64_t count, int64_t n,
+                             int64_t *both, int64_t *in_pred, int64_t *in_target, int num_threads);
+int exacta_channel_counts_i64(const int64_t *pred, const int64_t *target, int64_t count, int64_t n,
+                              int64_t *both, int64_t *in_pred, int64_t *in_target,
+                              int num_threads);
+int exacta_channel_counts_f32(const float *pred, const float *target, int64_t count, int64_t n,
+                              int64_t *both, int64_t *in_pred, int64_t *in_target, int num_threads);
+
 int exacta_class_extents_u8(const uint8_t *labels, const int64_t *shape, int ndim,
                             int64_t num_classes, int64_t *lo, int64_t *hi, int num_threads);
 int exacta_class_extents_i32(const int32_t *labels, const int64_t *shape, int ndim,
