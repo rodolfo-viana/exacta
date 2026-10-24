@@ -20,7 +20,7 @@ from typing import Any, Literal
 import torch
 from torch import Tensor
 
-from exacta import _native
+from exacta import _native, _triton_counts
 from exacta._inputs import InputFormat, Segmentations, like_input, to_torch, validate
 
 # Voxels per bincount call, bounding the int64 index buffer to 128 MiB.
@@ -191,14 +191,24 @@ def _confusion_counts(
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """TP, FP, FN and TN, each (B, C).
 
-    On CPU, native kernels count in one pass and check values as they go (labels in range, one-hot
-    masks binary), so validation skips its own passes over the values.
+    Native kernels (CPU) and Triton kernels (GPU) count in one pass and check values as they go
+    (labels in range, one-hot masks binary), so validation skips its own passes over the values.
     """
     p, t = to_torch(pred), to_torch(target)
     kw = dict(input_format=input_format, num_classes=num_classes, include_background=include_background)
     native = p.device.type == "cpu" and _native.available()
-    seg = validate(p, t, check_values=not native, **kw)  # type: ignore[arg-type]
-    counts = _native_counts(seg) if native else _counts(seg)
+    gpu = (
+        p.device.type == "cuda"
+        and _triton_counts.available()
+        and (input_format == "one-hot" or (num_classes is not None and _triton_counts.fits(num_classes)))
+    )
+    seg = validate(p, t, check_values=not (native or gpu), **kw)  # type: ignore[arg-type]
+    if native:
+        counts = _native_counts(seg)
+    elif gpu:
+        counts = _triton_counts_of(seg)
+    else:
+        counts = _counts(seg)
     if counts is None:  # values the kernels reject: the full validation raises the right error
         validate(p, t, **kw)  # type: ignore[arg-type]
         raise AssertionError("validation accepted values that the counting kernels rejected")
@@ -210,22 +220,23 @@ def _confusion_counts(
 def _native_counts(seg: Segmentations) -> tuple[Tensor, Tensor, Tensor] | None:
     """TP, FP, FN (each (B, C)) from the native kernels, or None if they reject a value."""
     if seg.one_hot:
-        batch, classes = seg.pred.shape[:2]
-        found = _native.channel_counts(seg.pred.flatten(0, 1), seg.target.flatten(0, 1))
-        if found is None:
-            return None
-        both, in_pred, in_target = (x.view(batch, classes)[:, seg.first_class :] for x in found)
-        return both, in_pred - both, in_target - both
+        return _from_channels(seg, _native.channel_counts(seg.pred.flatten(0, 1), seg.target.flatten(0, 1)))
     matrices = []
     for b in range(seg.batch):
         cm = _native.confusion(seg.pred[b], seg.target[b], seg.num_classes)
         if cm is None:
             return None
         matrices.append(cm)
-    cm = torch.stack(matrices)
-    tp = cm.diagonal(dim1=1, dim2=2)
-    keep = slice(seg.first_class, None)
-    return tp[:, keep], (cm.sum(2) - tp)[:, keep], (cm.sum(1) - tp)[:, keep]
+    return _from_confusion(seg, torch.stack(matrices))
+
+
+def _triton_counts_of(seg: Segmentations) -> tuple[Tensor, Tensor, Tensor] | None:
+    """TP, FP, FN (each (B, C)) from the Triton kernels, or None if they reject a value."""
+    if seg.one_hot:
+        found = _triton_counts.channel_counts(seg.pred.flatten(0, 1), seg.target.flatten(0, 1))
+        return _from_channels(seg, found)
+    cm = _triton_counts.confusion(seg.pred, seg.target, seg.num_classes)
+    return None if cm is None else _from_confusion(seg, cm)
 
 
 def _counts(seg: Segmentations) -> tuple[Tensor, Tensor, Tensor]:
@@ -234,7 +245,22 @@ def _counts(seg: Segmentations) -> tuple[Tensor, Tensor, Tensor]:
         p, t = seg.pred[:, seg.first_class :], seg.target[:, seg.first_class :]
         tp = _count(p & t)
         return tp, _count(p) - tp, _count(t) - tp
-    cm = _confusion(seg.pred, seg.target, seg.num_classes)
+    return _from_confusion(seg, _confusion(seg.pred, seg.target, seg.num_classes))
+
+
+def _from_channels(
+    seg: Segmentations, found: tuple[Tensor, Tensor, Tensor] | None
+) -> tuple[Tensor, Tensor, Tensor] | None:
+    """TP, FP, FN from per-channel counts (in both, in pred, in target; each (B * C,))."""
+    if found is None:
+        return None
+    batch, classes = seg.pred.shape[:2]
+    both, in_pred, in_target = (x.view(batch, classes)[:, seg.first_class :] for x in found)
+    return both, in_pred - both, in_target - both
+
+
+def _from_confusion(seg: Segmentations, cm: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    """TP, FP, FN from (B, C, C) confusion matrices."""
     tp = cm.diagonal(dim1=1, dim2=2)
     keep = slice(seg.first_class, None)  # drop excluded classes only after summing full rows/columns
     return tp[:, keep], (cm.sum(2) - tp)[:, keep], (cm.sum(1) - tp)[:, keep]

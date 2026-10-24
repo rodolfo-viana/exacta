@@ -5,6 +5,7 @@ import torch
 import exacta.functional as EF
 import reference
 from _data import pair
+from exacta import _triton_counts
 
 
 @pytest.mark.parametrize("shape", [(32, 40), (24, 28, 20)])
@@ -69,9 +70,55 @@ def test_native_counts_match_torch_for_one_hot_dtypes(dtype):
         assert torch.equal(ours, theirs)
 
 
-def test_native_counts_keep_the_validation_errors():
-    zeros = torch.zeros(1, 4, 4, dtype=torch.long)
+def test_counting_kernels_keep_the_validation_errors(device):
+    zeros = torch.zeros(1, 4, 4, dtype=torch.long, device=device)
     with pytest.raises(ValueError, match=r"found values in \[0, 7\]"):
-        EF.dice(torch.full((1, 4, 4), 7), zeros, num_classes=4)
+        EF.dice(torch.full((1, 4, 4), 7, device=device), zeros, num_classes=4)
+    with pytest.raises(ValueError, match=r"found values in \[-1, 0\]"):
+        EF.dice(torch.full((1, 4, 4), -1, device=device), zeros, num_classes=4)
     with pytest.raises(ValueError, match="must be binary"):
-        EF.dice(torch.full((1, 2, 4, 4), 0.5), torch.zeros(1, 2, 4, 4), input_format="one-hot")
+        one_hot = torch.full((1, 2, 4, 4), 0.5, device=device)
+        EF.dice(one_hot, torch.zeros(1, 2, 4, 4, device=device), input_format="one-hot")
+
+
+GPU_COUNTS = pytest.mark.skipif(
+    not (torch.cuda.is_available() and _triton_counts.available()), reason="needs CUDA and Triton"
+)
+
+
+@GPU_COUNTS
+@pytest.mark.parametrize("dtype", [torch.bool, torch.uint8, torch.int16, torch.int32, torch.int64])
+@pytest.mark.parametrize("classes", [2, 5, 31])
+def test_triton_counts_match_torch_for_label_dtypes(dtype, classes):
+    from exacta.functional.overlap import _counts, _triton_counts_of
+    from exacta._inputs import validate
+
+    if dtype == torch.bool and classes > 2:
+        pytest.skip("a boolean label map has two classes")
+    pred, target = (torch.from_numpy(a).to(dtype).cuda() for a in pair((20, 22, 24), classes, seed=7))
+    seg = validate(pred, target, input_format="index", num_classes=classes, include_background=False)
+    for ours, theirs in zip(_triton_counts_of(seg), _counts(seg)):
+        assert torch.equal(ours, theirs)
+
+
+@GPU_COUNTS
+@pytest.mark.parametrize(
+    "dtype", [torch.bool, torch.uint8, torch.int32, torch.int64, torch.float16, torch.float32, torch.float64]
+)
+def test_triton_counts_match_torch_for_one_hot_dtypes(dtype):
+    from exacta.functional.overlap import _counts, _triton_counts_of
+    from exacta._inputs import validate
+
+    rng = np.random.default_rng(8)
+    pred, target = (torch.from_numpy(rng.random((2, 3, 9, 10, 11)) < 0.3).to(dtype).cuda() for _ in range(2))
+    kw = dict(input_format="one-hot", num_classes=None, include_background=True)
+    raw, checked = validate(pred, target, check_values=False, **kw), validate(pred, target, **kw)
+    for ours, theirs in zip(_triton_counts_of(raw), _counts(checked)):
+        assert torch.equal(ours, theirs)
+
+
+@GPU_COUNTS
+def test_gpu_dice_with_many_classes_matches_cpu():
+    assert not _triton_counts.fits(40)  # counted with bincount
+    pred, target = (torch.from_numpy(a) for a in pair((20, 22, 24), 40, seed=9))
+    assert torch.equal(EF.dice(pred.cuda(), target.cuda(), num_classes=40).cpu(), EF.dice(pred, target, num_classes=40))
