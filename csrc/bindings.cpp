@@ -101,6 +101,57 @@ void class_extents(nb::ndarray<const T, nb::device::cpu, nb::c_contig> labels,
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }
 
+using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
+using Indices = nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
+
+void mask_extents(Bytes masks, Indices lo, Indices hi, int num_threads) {
+  const int ndim = static_cast<int>(masks.ndim()) - 1;
+  if (ndim < 1 || lo.shape(0) != masks.shape(0) || hi.shape(0) != masks.shape(0) ||
+      static_cast<int>(lo.shape(1)) != ndim || static_cast<int>(hi.shape(1)) != ndim) {
+    throw std::invalid_argument("masks (C, *spatial), lo and hi (C, ndim) do not agree");
+  }
+  std::vector<std::int64_t> shape(ndim);
+  for (int axis = 0; axis < ndim; ++axis) {
+    shape[axis] = static_cast<std::int64_t>(masks.shape(axis + 1));
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_mask_extents_u8(masks.data(), static_cast<std::int64_t>(masks.shape(0)),
+                                    shape.data(), ndim, lo.data(), hi.data(), num_threads);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) {
+    throw std::invalid_argument("mask_extents: masks must have 1 to 3 spatial dimensions");
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
+
+void dilate(Bytes mask, nb::ndarray<std::uint8_t, nb::device::cpu, nb::c_contig> out,
+            int connectivity, int steps, int num_threads) {
+  const int ndim = static_cast<int>(mask.ndim());
+  if (out.ndim() != mask.ndim()) {
+    throw std::invalid_argument("mask and out must have the same shape");
+  }
+  std::vector<std::int64_t> shape(ndim);
+  for (int axis = 0; axis < ndim; ++axis) {
+    if (out.shape(axis) != mask.shape(axis)) {
+      throw std::invalid_argument("mask and out must have the same shape");
+    }
+    shape[axis] = static_cast<std::int64_t>(mask.shape(axis));
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_dilate_u8(mask.data(), out.data(), shape.data(), ndim, connectivity, steps,
+                              num_threads);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) {
+    throw std::invalid_argument(
+        "dilate: mask must have 1 to 3 dimensions, with 1 <= connectivity <= ndim and steps >= 0");
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
+
 using Points = nb::ndarray<const double, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
 using Elements = nb::ndarray<const double, nb::ndim<3>, nb::device::cpu, nb::c_contig>;
 
@@ -143,6 +194,14 @@ NB_MODULE(_C, m) {
         nb::arg("lo"), nb::arg("hi"), nb::arg("num_threads") = 0, extents_doc);
   m.def("class_extents", &class_extents<std::int64_t, exacta_class_extents_i64>, nb::arg("labels"),
         nb::arg("lo"), nb::arg("hi"), nb::arg("num_threads") = 0, extents_doc);
+  m.def("mask_extents", &mask_extents, nb::arg("masks"), nb::arg("lo"), nb::arg("hi"),
+        nb::arg("num_threads") = 0,
+        "Write into `lo` and `hi` (int64, (C, ndim)) the bounding box of each mask of `masks` "
+        "(uint8, (C, *spatial)); shape and -1 for an empty mask.");
+  m.def("dilate", &dilate, nb::arg("mask"), nb::arg("out"), nb::arg("connectivity"),
+        nb::arg("steps"), nb::arg("num_threads") = 0,
+        "Write into `out` (uint8, same shape) the binary dilation of `mask` by `steps` steps of "
+        "the `connectivity` neighbourhood, as scipy.ndimage.binary_dilation.");
   m.def("point_mesh_distances", &point_mesh_distances, nb::arg("points"), nb::arg("elements"),
         nb::arg("out"), nb::arg("num_threads") = 0,
         "Write into `out` the distance from each point (N, d) to the nearest triangle (d = 3) or "

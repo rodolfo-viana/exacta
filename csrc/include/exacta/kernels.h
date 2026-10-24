@@ -59,6 +59,21 @@ int exacta_label_u8(const uint8_t *mask, int32_t *out, const int64_t *shape, int
 int exacta_point_mesh_distances_f64(const double *points, int64_t n_points, const double *elements,
                                     int64_t n_elements, int dim, double *out, int num_threads);
 
+/* Bounding box of each of `count` binary masks (count x shape, C order, nonzero = inside) of 1 to 3
+ * dimensions: lo[c * ndim + a] and hi[c * ndim + a] are the first and last index along axis a of
+ * mask c's nonzero elements, shape[a] and -1 for an empty mask.
+ */
+int exacta_mask_extents_u8(const uint8_t *masks, int64_t count, const int64_t *shape, int ndim,
+                           int64_t *lo, int64_t *hi, int num_threads);
+
+/* Binary dilation of a 1-D to 3-D mask by `steps` steps (scipy.ndimage.binary_dilation with
+ * `iterations=steps` and generate_binary_structure(ndim, connectivity)): neighbours differ by at
+ * most 1 along each axis and along at most `connectivity` axes, and nothing lies beyond the image.
+ * Writes 0/1 to `out`.
+ */
+int exacta_dilate_u8(const uint8_t *mask, uint8_t *out, const int64_t *shape, int ndim,
+                     int connectivity, int steps, int num_threads);
+
 int exacta_class_extents_u8(const uint8_t *labels, const int64_t *shape, int ndim,
                             int64_t num_classes, int64_t *lo, int64_t *hi, int num_threads);
 int exacta_class_extents_i32(const int32_t *labels, const int64_t *shape, int ndim,

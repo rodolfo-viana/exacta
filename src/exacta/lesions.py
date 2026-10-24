@@ -47,7 +47,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from exacta import components
+from exacta import _native, components
 from exacta._inputs import InputFormat, as_spacing, like_input, to_torch, validate
 from exacta.functional.surface import Backend, Surface, hausdorff_distance
 
@@ -405,7 +405,10 @@ def _match(
 
 def _dilate(mask: Tensor, steps: int, connectivity: int) -> Tensor:
     """Binary dilation by ``steps`` steps of the ``connectivity`` neighbourhood, with nothing
-    beyond the image (``scipy.ndimage.binary_dilation`` with ``iterations=steps``)."""
+    beyond the image (``scipy.ndimage.binary_dilation`` with ``iterations=steps``): a native
+    kernel on CPU, convolutions on GPU."""
+    if mask.device.type == "cpu" and _native.available():
+        return _native.dilate(mask, connectivity, steps)
     ndim = mask.ndim
     offsets = torch.stack(torch.meshgrid(*[torch.arange(-1, 2)] * ndim, indexing="ij"))
     structure = (offsets.abs().sum(0) <= connectivity).to(torch.float32)

@@ -14,7 +14,7 @@ find_package(OpenMP)
 # Kernels behind a plain C interface (csrc/include/exacta/kernels.h). They take raw pointers
 # and never link against PyTorch, so the wheel does not depend on a specific torch version.
 add_library(exacta_kernels STATIC csrc/cpu/edt.cpp csrc/cpu/extents.cpp csrc/cpu/label.cpp
-            csrc/cpu/mesh.cpp)
+            csrc/cpu/mesh.cpp csrc/cpu/morphology.cpp)
 target_include_directories(exacta_kernels PUBLIC csrc/include)
 set_target_properties(exacta_kernels PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(OpenMP_CXX_FOUND)

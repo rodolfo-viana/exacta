@@ -42,8 +42,7 @@ def label(mask: Tensor, connectivity: int) -> tuple[Tensor, int]:
     """
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
-    # A bool tensor already holds one byte of 0 or 1 per element; viewing it avoids a copy.
-    mask = mask.contiguous().view(torch.uint8) if mask.dtype == torch.bool else (mask != 0).to(torch.uint8)
+    mask = _as_bytes(mask)
     out = torch.empty(mask.shape, dtype=torch.int32)
     count = _C.label(mask, out, int(connectivity))
     return out, count
@@ -75,3 +74,30 @@ def point_mesh_distances(points: Tensor, elements: Tensor) -> Tensor:
     out = torch.empty(points.shape[0], dtype=torch.float64)
     _C.point_mesh_distances(points, elements, out)
     return out
+
+
+def _as_bytes(mask: Tensor) -> Tensor:
+    """0/1 (or nonzero) mask as contiguous uint8; a bool tensor is viewed without a copy."""
+    if mask.dtype == torch.bool:
+        return mask.contiguous().view(torch.uint8)
+    return (mask != 0).to(torch.uint8).contiguous()
+
+
+def mask_extents(masks: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    """Presence (C,), first and last index (C, ndim) of each of the CPU masks (C, *spatial)."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    masks = _as_bytes(masks)
+    lo = torch.empty((masks.shape[0], masks.ndim - 1), dtype=torch.int64)
+    hi = torch.empty_like(lo)
+    _C.mask_extents(masks, lo, hi)
+    return hi[:, 0] >= 0, lo, hi
+
+
+def dilate(mask: Tensor, connectivity: int, steps: int) -> Tensor:
+    """Binary dilation of a CPU mask (bool), as scipy.ndimage.binary_dilation with ``iterations``."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    out = torch.empty(mask.shape, dtype=torch.uint8)
+    _C.dilate(_as_bytes(mask), out, int(connectivity), int(steps))
+    return out.view(torch.bool)

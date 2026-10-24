@@ -87,8 +87,8 @@ def _extent(
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Presence (C,), first and last index (C, ndim) of every class in one (C, *spatial) one-hot
     volume or one (*spatial) label map; indices are meaningless where a class is absent."""
-    if native and not one_hot and volume.device.type == "cpu" and _native.available():
-        return _native.class_extents(volume, num_classes)  # one multithreaded pass
+    if native and volume.device.type == "cpu" and _native.available():  # one multithreaded pass
+        return _native.mask_extents(volume) if one_hot else _native.class_extents(volume, num_classes)
     spatial = volume.shape[1:] if one_hot else volume.shape
     if volume.numel() == 0:  # no class anywhere
         corners = torch.zeros((num_classes, len(spatial)), dtype=torch.int64, device=volume.device)
