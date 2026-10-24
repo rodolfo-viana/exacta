@@ -4,7 +4,9 @@ The same algorithm as the native CPU kernel (``csrc/cpu/edt.cpp``), with one GPU
 each axis pass computes, for every line along the axis, the lower envelope of the parabolas
 ``(h*(q - p))^2 + f[p]`` and evaluates it, keeping every parabola that ties within rounding
 error so that the result is the exact floating-point minimum over p. Where lanes diverge
-(popping the envelope, scanning tied parabolas) the block loops until no lane is active.
+(popping the envelope, scanning tied parabolas) the block loops until no lane is active. The
+first axis needs no envelope: its input is 0 at features and inf elsewhere, so two sweeps find
+each element's nearest feature on the line.
 
 Two details keep the results bit-identical to the CPU kernel and to a brute-force minimum:
 kernels are compiled with ``enable_fp_fusion=False``, since a fused multiply-add rounds
@@ -26,7 +28,7 @@ try:
 except ImportError:  # CPU-only PyTorch builds ship without Triton
     triton = None
 
-_BLOCK = 128  # lanes (lines) per program
+_BLOCK = 32  # lanes (lines) per program, one warp: small blocks wait less on divergent lanes
 _SCRATCH_BYTES = 256 << 20  # budget for the per-lane envelope stacks
 
 
@@ -41,13 +43,20 @@ def edt_sq(features: Tensor, spacing: Sequence[float]) -> Tensor:
     """
     if triton is None:
         raise RuntimeError("Triton is not installed")
-    out = torch.zeros(features.shape, dtype=torch.float64, device=features.device)
-    out.masked_fill_(~features.bool(), math.inf)
+    out = torch.empty(features.shape, dtype=torch.float64, device=features.device)
     if out.numel() == 0:
         return out
-    buf = torch.empty_like(out)
+    features = features.bool().contiguous()
     total = out.numel()
-    for axis, h in enumerate(spacing):
+    n = out.shape[0]
+    stride = total // n
+    consts = torch.tensor([float(spacing[0])], dtype=torch.float64, device=out.device)
+    _first_pass[(triton.cdiv(stride, _BLOCK),)](
+        features, out, consts, n, stride, BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False
+    )
+    buf = torch.empty_like(out)
+    for axis in range(1, out.ndim):
+        h = spacing[axis]
         n = out.shape[axis]
         stride = math.prod(out.shape[axis + 1 :])
         lines = total // n
@@ -60,13 +69,38 @@ def edt_sq(features: Tensor, spacing: Sequence[float]) -> Tensor:
             [float(h), 64.0 * torch.finfo(torch.float64).eps], dtype=torch.float64, device=out.device
         )
         _edt_pass[(programs,)](
-            out, buf, v, z, consts, n, stride, lines, lanes, BLOCK=_BLOCK, num_warps=4, enable_fp_fusion=False
+            out, buf, v, z, consts, n, stride, lines, lanes, BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False
         )
         out, buf = buf, out
     return out
 
 
 if triton is not None:
+
+    @triton.jit(do_not_specialize=["n", "stride"])
+    def _first_pass(features, dst, consts, n, stride, BLOCK: tl.constexpr):
+        # Along axis 0 the input is 0 at features and inf elsewhere, so the envelope minimum is
+        # (h * k)^2 for the distance k to the nearest feature on the line: two sweeps suffice.
+        line = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
+        valid = line < stride
+        stride64 = stride.to(tl.int64)
+        h = tl.load(consts)
+        inf = float("inf")
+        last = tl.full([BLOCK], -1, dtype=tl.int32)  # nearest feature at or before q, -1: none
+        for q in range(0, n):
+            hit = tl.load(features + line + q * stride64, mask=valid, other=0) != 0
+            last = tl.where(hit, q, last)
+            dx = h * (q - last).to(tl.float64)
+            tl.store(dst + line + q * stride64, tl.where(last >= 0, dx * dx, inf), mask=valid)
+        nxt = tl.full([BLOCK], -1, dtype=tl.int32)  # nearest feature at or after q
+        for r in range(0, n):
+            q = n - 1 - r
+            hit = tl.load(features + line + q * stride64, mask=valid, other=0) != 0
+            nxt = tl.where(hit, q, nxt)
+            dx = h * (q - nxt).to(tl.float64)
+            ahead = tl.where(nxt >= 0, dx * dx, inf)
+            behind = tl.load(dst + line + q * stride64, mask=valid, other=inf)
+            tl.store(dst + line + q * stride64, tl.minimum(behind, ahead), mask=valid)
 
     @triton.jit
     def _slot(index, lanes, slot):
