@@ -104,7 +104,7 @@ Each convention is an explicit argument, because this is where libraries disagre
     bit for bit.
   - `DiceLoss` and `DiceCELoss` run as two fused kernels, one forward and one backward, that
     keep nothing for the backward pass but the logits: 7-13x faster than the PyTorch path on 3-D
-    batches, without its 0.3-1.1 GiB of intermediates (`benchmarks/bench_losses.py`). They
+    batches, without its 0.3-2.2 GiB of intermediates (`benchmarks/bench_losses.py`). They
     work under `torch.compile` without graph breaks.
 
 ## Benchmarks
@@ -115,45 +115,46 @@ median of 5 runs. Reproduce with `python benchmarks/bench_metrics.py --sizes 128
 
 ### Metrics
 
-One synthetic 3-D prediction/target pair with 4 classes, spacing 1.5 × 0.8 × 0.8 mm. MONAI and
-the other references run on CPU (MONAI's GPU path needs cuCIM, which is not installed here).
+One synthetic 3-D prediction/target pair with 4 classes, spacing 1.5 × 0.8 × 0.8 mm. The
+references run on CPU (MONAI's GPU path needs cuCIM, which is not installed here).
 
 | Metric | Volume | exacta CPU | exacta GPU | MONAI | Other reference |
 |---|---|---:|---:|---:|---|
-| Dice | 128³ | 8.4 | 0.7 | | NumPy 11.6 |
-| | 256³ | 77 | 5.5 | | NumPy 88 |
-| HD95 | 128³ | 95 | 17 | 735 | SciPy EDT 2,618 |
-| | 256³ | 817 | 106 | 9,858 | SciPy EDT 16,227 |
-| NSD, voxels | 128³ | 68 | 17 | 731 | |
-| | 256³ | 731 | 106 | 9,809 | |
-| NSD, surfels | 128³ | 93 | 18 | 1,570 | DeepMind 1,683 |
-| | 256³ | 906 | 118 | 30,791 | DeepMind 13,799 |
-| Connected components, 26-conn. | 128³ | 2.5 | 1.7 | | SciPy 15.4 |
-| | 256³ | 17.5 | 7.8 | | SciPy 110 |
-| Largest component, 26-conn. | 128³ | 4.8 | 2.5 | 21.6 | |
-| | 256³ | 61 | 13.5 | 169 | |
+| Dice | 128³ | 7.7 | 0.7 | | NumPy 10.0 |
+| | 256³ | 74 | 5.5 | | NumPy 84 |
+| HD95 | 128³ | 84 | 14 | 711 | SciPy EDT 2,607 |
+| | 256³ | 746 | 101 | 9,600 | SciPy EDT 18,486 |
+| NSD, voxels | 128³ | 59 | 14 | 697 | |
+| | 256³ | 686 | 101 | 9,548 | |
+| NSD, surfels | 128³ | 71 | 16 | 1,547 | DeepMind 1,600 |
+| | 256³ | 751 | 112 | 29,869 | DeepMind 12,580 |
+| HD95, mesh | 128³ | 788 | | | MeshMetrics 17,484 |
+| | 256³ | 5,708 | | | MeshMetrics 190,634 |
+| Connected components, 26-conn. | 128³ | 2.4 | 1.8 | | SciPy 14.8 |
+| | 256³ | 16.9 | 7.8 | | SciPy 109 |
+| Largest component, 26-conn. | 128³ | 4.7 | 2.5 | 21.2 | |
+| | 256³ | 34 | 13.5 | 159 | |
 | BraTS 2023 lesion-wise, 3 regions | 240×240×155 | 990 | 40 | | BraTS-2023-Metrics 7,700 |
 
 "SciPy EDT" is exacta's test reference (`tests/reference.py`): the textbook implementation on
 `scipy.ndimage.distance_transform_edt`. exacta's plain-PyTorch GPU fallback (`backend="torch"`)
-takes 3,786 ms for HD95 at 256³.
+takes 3,020 ms for HD95 at 256³. Mesh distances run on the CPU, also for CUDA inputs.
 
 ### Losses
 
 `DiceCELoss`, forward plus backward on GPU, index targets. Extra memory is the peak allocation
 beyond the logits and their gradient.
 
-| Logits | dtype | PyTorch | | Fused (Triton) | |
+| Logits | dtype | PyTorch time | PyTorch extra memory | Fused time | Fused extra memory |
 |---|---|---:|---:|---:|---:|
-| | | time | extra memory | time | extra memory |
-| 2×4×128³ | float32 | 5.6 | 320 MiB | 0.9 | 0 |
+| 2×4×128³ | float32 | 5.6 | 320 MiB | 0.8 | 0 |
 | 2×4×160³ | float32 | 11.0 | 629 MiB | 1.2 | 1 MiB |
-| 2×14×128³ | float32 | 21.5 | 1,120 MiB | 1.6 | 0 |
-| 2×14×160³ | float32 | 42.9 | 2,191 MiB | 3.0 | 1 MiB |
-| 2×4×128³ | bfloat16 | 6.2 | 320 MiB | 0.7 | 0 |
-| 2×4×160³ | bfloat16 | 12.3 | 629 MiB | 1.0 | 0 |
-| 2×14×128³ | bfloat16 | 23.6 | 1,120 MiB | 1.2 | 0 |
-| 2×14×160³ | bfloat16 | 46.4 | 2,190 MiB | 2.2 | 0 |
+| 2×14×128³ | float32 | 21.3 | 1,120 MiB | 1.6 | 0 |
+| 2×14×160³ | float32 | 41.9 | 2,191 MiB | 3.0 | 1 MiB |
+| 2×4×128³ | bfloat16 | 6.1 | 320 MiB | 0.7 | 0 |
+| 2×4×160³ | bfloat16 | 12.0 | 629 MiB | 0.9 | 0 |
+| 2×14×128³ | bfloat16 | 23.1 | 1,120 MiB | 1.2 | 0 |
+| 2×14×160³ | bfloat16 | 45.4 | 2,190 MiB | 2.1 | 0 |
 
 ## Development
 
