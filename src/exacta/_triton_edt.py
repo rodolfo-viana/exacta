@@ -66,23 +66,35 @@ def _transform(features: Tensor, spacing: Sequence[float], batch_ndim: int) -> T
     for axis in range(batch_ndim + 1, out.ndim):
         h = spacing[axis - batch_ndim]
         n = out.shape[axis]
+        tol = _tolerance(spacing, out.shape[batch_ndim:], axis - batch_ndim)
         stride = math.prod(out.shape[axis + 1 :])
         lines = total // n
-        programs = min(triton.cdiv(lines, _BLOCK), max(1, _SCRATCH_BYTES // (_BLOCK * (n + 1) * 12)))
+        programs = min(triton.cdiv(lines, _BLOCK), max(1, _SCRATCH_BYTES // (_BLOCK * (n + 1) * 20)))
         # Scratch only for lanes that have a line: a few very long lines would otherwise get a full
         # block of stacks each. Lanes past the last line never touch their (absent) column.
         lanes = min(programs * _BLOCK, lines)
         v = torch.empty((n + 1) * lanes, dtype=torch.int32, device=out.device)
         z = torch.empty((n + 1) * lanes, dtype=torch.float64, device=out.device)
-        # h, and 64 epsilon for the tie tolerance, as float64
-        consts = torch.tensor(
-            [float(h), 64.0 * torch.finfo(torch.float64).eps], dtype=torch.float64, device=out.device
-        )
+        g = torch.empty((n + 1) * lanes, dtype=torch.float64, device=out.device)
+        consts = torch.tensor([float(h), tol], dtype=torch.float64, device=out.device)
         _edt_pass[(programs,)](
-            out, buf, v, z, consts, n, stride, lines, lanes, BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False
+            out, buf, v, z, g, consts, n, stride, lines, lanes, BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False
         )
         out, buf = buf, out
     return out
+
+
+def _tolerance(spacing: Sequence[float], shape: Sequence[int], axis: int) -> float:
+    """Tie tolerance of the breakpoints in the pass along spatial ``axis``, as the CPU kernel
+    computes it: 64 epsilon times the largest term of a breakpoint, divided by h. The input of
+    that pass is at most the sum of squared extents of the axes before it."""
+    bound = 0.0
+    for h, n in zip(spacing[:axis], shape[:axis]):
+        extent = float(h) * float(n - 1)
+        bound += extent * extent
+    h = float(spacing[axis])
+    xmax = h * float(shape[axis])
+    return 64.0 * torch.finfo(torch.float64).eps * (bound + xmax * xmax) / h
 
 
 if triton is not None:
@@ -128,27 +140,20 @@ if triton is not None:
 
     # Sizes stay runtime values: Triton would otherwise turn those equal to 1 into constants.
     @triton.jit(do_not_specialize=["n", "stride", "lines", "lanes"])
-    def _edt_pass(src, dst, v_buf, z_buf, consts, n, stride, lines, lanes, BLOCK: tl.constexpr):
+    def _edt_pass(src, dst, v_buf, z_buf, g_buf, consts, n, stride, lines, lanes, BLOCK: tl.constexpr):
         pid = tl.program_id(0)
         lane = tl.arange(0, BLOCK)
         slot = (pid * BLOCK + lane).to(tl.int64)  # this lane's column in the scratch stacks
         stride = stride.to(tl.int64)  # offsets can pass 2^31 on large volumes
         lanes = lanes.to(tl.int64)
         h = tl.load(consts)
-        eps64 = tl.load(consts + 1)
+        tol = tl.load(consts + 1)
         inf = float("inf")
-        xmax = h * n.to(tl.float64)
 
         for block in range(pid, tl.cdiv(lines, BLOCK), tl.num_programs(0)):
             line = (block * BLOCK + lane).to(tl.int64)
             valid = line < lines
             base = (line // stride) * n * stride + line % stride
-
-            fmax = tl.zeros([BLOCK], dtype=tl.float64)
-            for q in range(0, n):
-                fq = tl.load(src + base + q * stride, mask=valid, other=inf)
-                fmax = tl.where(fq != inf, tl.maximum(fmax, fq), fmax)
-            tol = eps64 * (fmax + xmax * xmax) / h
 
             # Lower envelope; k is the top of each lane's stack (-1: empty).
             k = tl.full([BLOCK], -1, dtype=tl.int32)
@@ -156,23 +161,29 @@ if triton is not None:
                 fq = tl.load(src + base + q * stride, mask=valid, other=inf)
                 finite = fq != inf
                 xq = h * q.to(tl.float64)
-                s = tl.full([BLOCK], -inf, dtype=tl.float64)
+                gq = fq + xq * xq
+                # Breakpoint num / den with the top of the stack; pops compare num with
+                # (z - tol) * den (den > 0), so only the breakpoint that is kept is divided.
+                num = tl.zeros([BLOCK], dtype=tl.float64)
+                den = tl.full([BLOCK], 1.0, dtype=tl.float64)
                 active = finite & (k >= 0)
                 while tl.max(active.to(tl.int32), axis=0) > 0:
                     at = _slot(k, lanes, slot)
                     vk = tl.load(v_buf + at, mask=active, other=0)
                     zk = tl.load(z_buf + at, mask=active, other=0.0)
-                    fv = tl.load(src + base + vk.to(tl.int64) * stride, mask=active, other=0.0)
+                    gv = tl.load(g_buf + at, mask=active, other=0.0)  # f[v] + xv * xv
                     xv = h * vk.to(tl.float64)
-                    s_k = ((fq + xq * xq) - (fv + xv * xv)) / (2.0 * (xq - xv))
-                    s = tl.where(active, s_k, s)
-                    pop = active & (s_k <= zk - tol)  # v[k] neither lowest anywhere nor tied
+                    num = tl.where(active, gq - gv, num)
+                    den = tl.where(active, 2.0 * (xq - xv), den)
+                    pop = active & (num <= (zk - tol) * den)  # v[k] neither lowest anywhere nor tied
                     k = tl.where(pop, k - 1, k)
                     active = pop & (k >= 0)
+                s = tl.where(k >= 0, num / den, -inf)  # an empty stack stays empty only before the first push
                 k = tl.where(finite, k + 1, k)
                 at = _slot(k, lanes, slot)
                 z_prev = tl.load(z_buf + at - lanes, mask=finite & (k > 0), other=-inf)
                 tl.store(v_buf + at, q + tl.zeros([BLOCK], dtype=tl.int32), mask=finite)
+                tl.store(g_buf + at, gq, mask=finite)
                 tl.store(z_buf + at, tl.where(k == 0, s, tl.maximum(s, z_prev)), mask=finite)
                 tl.store(z_buf + at + lanes, tl.full([BLOCK], inf, dtype=tl.float64), mask=finite)
 
