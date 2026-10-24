@@ -19,6 +19,39 @@ def iou(p: np.ndarray, t: np.ndarray) -> float:
     return np.nan if union == 0 else (p & t).sum() / union
 
 
+def _divide(num: float, den: float, zero_division: float) -> float:
+    return zero_division if den == 0 else num / den
+
+
+def sensitivity(p: np.ndarray, t: np.ndarray, zero_division: float = np.nan) -> float:
+    return _divide((p & t).sum(), t.sum(), zero_division)
+
+
+def precision(p: np.ndarray, t: np.ndarray, zero_division: float = np.nan) -> float:
+    return _divide((p & t).sum(), p.sum(), zero_division)
+
+
+def specificity(p: np.ndarray, t: np.ndarray, zero_division: float = np.nan) -> float:
+    return _divide((~p & ~t).sum(), (~t).sum(), zero_division)
+
+
+def volume_similarity(
+    p: np.ndarray, t: np.ndarray, convention: str = "taha", zero_division: float = np.nan
+) -> float:
+    vp, vt = int(p.sum()), int(t.sum())
+    if vp + vt == 0:
+        return zero_division
+    return 1 - abs(vp - vt) / (vp + vt) if convention == "taha" else 2 * (vp - vt) / (vp + vt)
+
+
+def relative_volume_difference(
+    p: np.ndarray, t: np.ndarray, absolute: bool = False, zero_division: float = np.nan
+) -> float:
+    vp, vt = int(p.sum()), int(t.sum())
+    difference = abs(vp - vt) if absolute else vp - vt
+    return _divide(difference, vt, zero_division)
+
+
 def boundary(m: np.ndarray) -> np.ndarray:
     structure = ndimage.generate_binary_structure(m.ndim, 1)
     return m & ~ndimage.binary_erosion(m, structure=structure, border_value=0)

@@ -1,9 +1,21 @@
-"""Overlap metrics computed from per-case, per-class confusion counts."""
+"""Overlap and volume metrics, computed from per-case, per-class confusion counts.
+
+TP, FP, FN and TN count voxels: predicted and in the target, predicted only, in the target
+only, and in neither. |P| = TP + FP and |T| = TP + FN are the predicted and target volumes, in
+voxels; the metrics here are ratios, so voxel spacing does not change them.
+
+Where a ratio's denominator is zero, tools disagree. MONAI returns NaN. MedPy 0.5.2 means to
+return 0 (and raises for the relative volume difference), and does with NumPy 1.x; with NumPy 2,
+``np.count_nonzero`` returns a NumPy integer, dividing it by zero no longer raises, and MedPy
+returns NaN. ``zero_division`` (``both_empty`` for Dice and IoU, whose denominator is zero exactly
+when both masks are empty) sets the value; NaN by default, which the stateful metrics skip when
+averaging.
+"""
 
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from torch import Tensor
@@ -69,6 +81,138 @@ def iou(
     )
     tp, fp, fn = _counts(seg)
     return like_input(_ratio(tp, tp + fp + fn, both_empty), pred)
+
+
+def sensitivity(
+    pred: Any,
+    target: Any,
+    *,
+    input_format: InputFormat = "index",
+    num_classes: int | None = None,
+    include_background: bool = True,
+    zero_division: float = math.nan,
+) -> Any:
+    """Sensitivity (recall, true positive rate) ``TP / (TP + FN) = |P ∩ T| / |T|``.
+
+    Args:
+        zero_division: Value when the class is absent from the target.
+        Others: As in :func:`dice`.
+    """
+    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_ratio(tp, tp + fn, zero_division), pred)
+
+
+def precision(
+    pred: Any,
+    target: Any,
+    *,
+    input_format: InputFormat = "index",
+    num_classes: int | None = None,
+    include_background: bool = True,
+    zero_division: float = math.nan,
+) -> Any:
+    """Precision (positive predictive value) ``TP / (TP + FP) = |P ∩ T| / |P|``.
+
+    Args:
+        zero_division: Value when the class is absent from the prediction.
+        Others: As in :func:`dice`.
+    """
+    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_ratio(tp, tp + fp, zero_division), pred)
+
+
+def specificity(
+    pred: Any,
+    target: Any,
+    *,
+    input_format: InputFormat = "index",
+    num_classes: int | None = None,
+    include_background: bool = True,
+    zero_division: float = math.nan,
+) -> Any:
+    """Specificity (true negative rate) ``TN / (TN + FP)``.
+
+    Args:
+        zero_division: Value when the target covers the whole image (no negatives).
+        Others: As in :func:`dice`.
+    """
+    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    return like_input(_ratio(tn, tn + fp, zero_division), pred)
+
+
+def volume_similarity(
+    pred: Any,
+    target: Any,
+    *,
+    convention: Literal["taha", "itk"] = "taha",
+    input_format: InputFormat = "index",
+    num_classes: int | None = None,
+    include_background: bool = True,
+    zero_division: float = math.nan,
+) -> Any:
+    """Volume similarity: how close the predicted and target volumes are, whatever the overlap.
+
+    Two different quantities go by this name:
+
+    * ``convention="taha"``: ``1 - ||P| - |T|| / (|P| + |T|)``, in [0, 1] with 1 for equal
+      volumes (Taha & Hanbury, BMC Medical Imaging 2015).
+    * ``convention="itk"``: ``2 (|P| - |T|) / (|P| + |T|)``, signed, in [-2, 2] with 0 for equal
+      volumes (SimpleITK's ``LabelOverlapMeasuresImageFilter.GetVolumeSimilarity``).
+
+    Args:
+        zero_division: Value when the class is absent from both prediction and target.
+        Others: As in :func:`dice`.
+    """
+    if convention not in ("taha", "itk"):
+        raise ValueError(f"convention must be 'taha' or 'itk', got {convention!r}")
+    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    size_p, size_t = tp + fp, tp + fn
+    if convention == "taha":
+        similarity = 1 - (size_p - size_t).abs().double() / (size_p + size_t).clamp_min(1)
+    else:
+        similarity = 2 * (size_p - size_t).double() / (size_p + size_t).clamp_min(1)
+    both_empty = size_p + size_t == 0
+    return like_input(torch.where(both_empty, torch.full_like(similarity, zero_division), similarity), pred)
+
+
+def relative_volume_difference(
+    pred: Any,
+    target: Any,
+    *,
+    absolute: bool = False,
+    input_format: InputFormat = "index",
+    num_classes: int | None = None,
+    include_background: bool = True,
+    zero_division: float = math.nan,
+) -> Any:
+    """Relative volume difference ``(|P| - |T|) / |T|``, as MedPy's ``ravd``.
+
+    Positive when the prediction is too large. ``absolute=True`` gives ``||P| - |T|| / |T|``,
+    the unsigned form some challenges report (often as a percentage).
+
+    Args:
+        zero_division: Value when the class is absent from the target (MedPy raises).
+        Others: As in :func:`dice`.
+    """
+    tp, fp, fn, tn = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    difference = fp - fn  # = |P| - |T|
+    return like_input(_ratio(difference.abs() if absolute else difference, tp + fn, zero_division), pred)
+
+
+def _confusion_counts(
+    pred: Any, target: Any, input_format: InputFormat, num_classes: int | None, include_background: bool
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """TP, FP, FN and TN, each (B, C)."""
+    seg = validate(
+        to_torch(pred),
+        to_torch(target),
+        input_format=input_format,
+        num_classes=num_classes,
+        include_background=include_background,
+    )
+    tp, fp, fn = _counts(seg)
+    voxels = math.prod(seg.pred.shape[seg.pred.ndim - seg.ndim :])
+    return tp, fp, fn, voxels - tp - fp - fn
 
 
 def _counts(seg: Segmentations) -> tuple[Tensor, Tensor, Tensor]:

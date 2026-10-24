@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Literal
 
 from torch import Tensor
 
@@ -46,6 +46,96 @@ class IoU(_OverlapMetric):
     """Intersection over union per case and class; see :func:`exacta.functional.iou`."""
 
     _fn = staticmethod(functional.iou)
+
+
+class _RatioMetric(PerCaseMetric):
+    _fn: Any
+
+    def __init__(
+        self,
+        *,
+        input_format: InputFormat = "index",
+        num_classes: int | None = None,
+        include_background: bool = True,
+        zero_division: float = math.nan,
+        **definition: Any,
+    ) -> None:
+        super().__init__()
+        self._kwargs = dict(
+            input_format=input_format,
+            num_classes=num_classes,
+            include_background=include_background,
+            zero_division=zero_division,
+            **definition,
+        )
+
+    def _batch(self, pred: Tensor, target: Tensor) -> Tensor:
+        return self._fn(pred, target, **self._kwargs)
+
+
+class Sensitivity(_RatioMetric):
+    """Sensitivity (recall) per case and class; see :func:`exacta.functional.sensitivity`."""
+
+    _fn = staticmethod(functional.sensitivity)
+
+
+class Precision(_RatioMetric):
+    """Precision per case and class; see :func:`exacta.functional.precision`."""
+
+    _fn = staticmethod(functional.precision)
+
+
+class Specificity(_RatioMetric):
+    """Specificity per case and class; see :func:`exacta.functional.specificity`."""
+
+    _fn = staticmethod(functional.specificity)
+
+
+class VolumeSimilarity(_RatioMetric):
+    """Volume similarity per case and class; see :func:`exacta.functional.volume_similarity`."""
+
+    _fn = staticmethod(functional.volume_similarity)
+
+    def __init__(
+        self,
+        *,
+        convention: Literal["taha", "itk"] = "taha",
+        input_format: InputFormat = "index",
+        num_classes: int | None = None,
+        include_background: bool = True,
+        zero_division: float = math.nan,
+    ) -> None:
+        super().__init__(
+            input_format=input_format,
+            num_classes=num_classes,
+            include_background=include_background,
+            zero_division=zero_division,
+            convention=convention,
+        )
+
+
+class RelativeVolumeDifference(_RatioMetric):
+    """Relative volume difference per case and class; see
+    :func:`exacta.functional.relative_volume_difference`."""
+
+    _fn = staticmethod(functional.relative_volume_difference)
+
+    def __init__(
+        self,
+        *,
+        absolute: bool = False,
+        input_format: InputFormat = "index",
+        num_classes: int | None = None,
+        include_background: bool = True,
+        zero_division: float = math.nan,
+    ) -> None:
+        super().__init__(
+            input_format=input_format,
+            num_classes=num_classes,
+            include_background=include_background,
+            zero_division=zero_division,
+            absolute=absolute,
+        )
 
 
 class _SurfaceMetric(PerCaseMetric):

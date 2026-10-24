@@ -42,6 +42,10 @@ result.mean        # scalar
 # Stateless functions accept PyTorch, NumPy, CuPy or JAX arrays and return the same type
 EF.hd95(pred_np, target_np, spacing=(1.5, 0.8, 0.8), num_classes=4)  # -> np.ndarray (B, C)
 
+# Volume and detection rates: sensitivity, precision, specificity, volume similarity, RVD
+EF.sensitivity(pred, target, num_classes=4, zero_division=0.0)          # 0 where the target is empty
+EF.volume_similarity(pred, target, num_classes=4, convention="itk")      # SimpleITK's signed variant
+
 # Match another tool's definition explicitly
 EF.hd95(pred, target, spacing=s, num_classes=4, combine="pooled")    # MedPy's hd95
 EF.assd(pred, target, spacing=s, num_classes=4, combine="mean")      # MedPy 0.4's assd
@@ -67,6 +71,9 @@ Each convention is an explicit argument, because this is where libraries disagre
 | ASSD | `combine="pooled"` (default): mean over the surface elements of both masks, as in MONAI and MedPy 0.5.2. `"mean"`: mean of the two directed means, as in MedPy 0.4 (DeepMind returns the two directed means). |
 | NSD | Fraction of the surface of both masks within `tolerance` of the other surface, `d ≤ tolerance`, as in MONAI and DeepMind. Each distance is the exact floating-point minimum of the expression SciPy evaluates, so distances that tie with the tolerance land on the same side as in MedPy and DeepMind. MONAI compares in float32. |
 | Class absent from both | `both_empty`, default NaN (skipped when averaging). |
+| Zero denominators | `zero_division` for sensitivity, precision, specificity, volume similarity and relative volume difference; default NaN, as in MONAI. MedPy 0.5.2 returns 0 with NumPy 1.x but NaN with NumPy 2 (its `ZeroDivisionError` handler no longer fires). |
+| Volume similarity | `convention="taha"` (default): `1 - ||P| - |T|| / (|P| + |T|)`, in [0, 1] (Taha & Hanbury 2015). `"itk"`: `2(|P| - |T|) / (|P| + |T|)`, signed, as SimpleITK's `GetVolumeSimilarity`. |
+| Relative volume difference | `(|P| - |T|) / |T|`, as MedPy's `ravd`; `absolute=True` for the unsigned form. |
 | Class absent from one | Dice/IoU give 0. Distance metrics give `one_empty`: default `inf` for HD/ASSD, 0 for NSD. |
 | Aggregation | Per case, then the NaN-ignoring mean over cases, then over classes. |
 | Connectivity | Required for connected components: 1 = faces (6 neighbours in 3-D, SciPy's default), 2 = and edges (18), 3 = and corners (26, MONAI's default). |
