@@ -21,6 +21,8 @@ jobs:
     env:
       OMP_NUM_THREADS: "2"
       MKL_NUM_THREADS: "2"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
       # Torch 2.4's compiler enables an internal decomposition assertion whenever
       # CI is nonempty. It fails on valid NLL operations; fullgraph tests stay on.
       CI: ""
@@ -31,28 +33,50 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.10"
-      - name: Build and test an installed sdist with minimum dependencies
+      - name: Build and validate the sdist
+        timeout-minutes: 5
         run: |
-          exec > >(tee "$RUNNER_TEMP/source-test.log") 2>&1
-          python -m pip install build==1.6.1 twine==7.0.0 mypy
-          python -m build --sdist
-          python -m twine check --strict dist/*
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1
-          python -m pip install 'numpy<2' dist/*.tar.gz pytest hypothesis scipy 'setuptools>=70'
-          python -c 'import exacta, exacta._C; print(exacta.__file__, exacta._C.__file__)'
-          python -m pytest -q
-          python -m mypy src/exacta
+          log="$RUNNER_TEMP/source-build.log"
+          trap 'cat "$log"' EXIT
+          {
+            python -m pip install build==1.6.1 twine==7.0.0 mypy
+            python -m build --sdist
+            python -m twine check --strict dist/*
+          } > "$log" 2>&1
+      - name: Install the sdist with minimum dependencies
+        timeout-minutes: 7
+        run: |
+          log="$RUNNER_TEMP/source-install.log"
+          trap 'cat "$log"' EXIT
+          {
+            python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1
+            python -m pip install 'numpy<2' dist/*.tar.gz pytest hypothesis scipy 'setuptools>=70'
+            python -c 'import exacta, exacta._C; print(exacta.__file__, exacta._C.__file__)'
+          } > "$log" 2>&1
+      - name: Test the installed source distribution
+        timeout-minutes: 8
+        run: |
+          log="$RUNNER_TEMP/source-test.log"
+          trap 'cat "$log"' EXIT
+          python -m pytest -v --durations=10 > "$log" 2>&1
+      - name: Check types with minimum dependencies
+        timeout-minutes: 3
+        run: |
+          log="$RUNNER_TEMP/source-types.log"
+          trap 'cat "$log"' EXIT
+          python -m mypy src/exacta > "$log" 2>&1
       - name: Expose failure details in the check annotations
         if: failure()
         run: |
           python - <<'PY'
           import os
           from pathlib import Path
-          log = Path(os.environ["RUNNER_TEMP"]) / "source-test.log"
-          if log.exists():
+          logs = list(Path(os.environ["RUNNER_TEMP"]).glob("source-*.log"))
+          if logs:
+              log = max(logs, key=lambda p: p.stat().st_mtime)
               message = "\n".join(log.read_text()[-3000:].splitlines()[-35:])
               message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-              print(f"::error title=Source build or test failure::{message}")
+              print(f"::error title={log.stem} failure::{message}")
           PY
 
   wheels:

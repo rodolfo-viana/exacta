@@ -25,6 +25,8 @@ jobs:
       EXPECTED_VERSION: ${{ inputs.version }}
       OMP_NUM_THREADS: "2"
       MKL_NUM_THREADS: "2"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
       # Match development CI's minimum-Torch compiler environment.
       CI: ""
     steps:

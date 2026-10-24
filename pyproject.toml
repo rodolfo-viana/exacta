@@ -46,7 +46,7 @@ test-requires = ["pytest>=8", "hypothesis>=6", "numpy<2", "scipy>=1.10", "setupt
 before-test = "python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1"
 test-command = "python -m pytest -q {project}/tests"
 # Empty CI disables Torch 2.4's internal-only decomposition assertion, not tests.
-environment = { OMP_NUM_THREADS = "2", MKL_NUM_THREADS = "2", CMAKE_BUILD_PARALLEL_LEVEL = "2", CI = "" }
+environment = { OMP_NUM_THREADS = "2", MKL_NUM_THREADS = "2", CMAKE_BUILD_PARALLEL_LEVEL = "2", TORCHINDUCTOR_COMPILE_THREADS = "1", CI = "" }
 
 [tool.cibuildwheel.linux]
 manylinux-x86_64-image = "manylinux_2_28"
