@@ -87,7 +87,10 @@ class Segmentations:
     def masks(self, case: int, cls: int, box: tuple[slice, ...] = ()) -> tuple[Tensor, Tensor]:
         """Boolean (*spatial) masks of class ``cls`` in one case, restricted to ``box``."""
         if self.one_hot:
-            return self.pred[case, cls][box], self.target[case, cls][box]
+            # Counting kernels can validate numeric binary arrays without converting
+            # them. A shared evaluation still needs boolean masks for morphology;
+            # convert only the cropped views, not the complete one-hot volumes.
+            return self.pred[case, cls][box].bool(), self.target[case, cls][box].bool()
         return self.pred[case][box] == cls, self.target[case][box] == cls
 
     def extents(self, case: int) -> tuple[Tensor, Tensor, Tensor]:

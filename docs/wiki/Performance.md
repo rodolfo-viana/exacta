@@ -68,5 +68,24 @@ from exacta.losses import DiceCELoss
 loss_fn = torch.compile(DiceCELoss(backend="torch"), fullgraph=True)
 ```
 
+## Unreleased: shared metrics and composed losses
+
+At revision [`12af1d4`](https://github.com/rodolfo-viana/exacta/commit/12af1d4762ef03b5724b2603ca26f80051bf9f75),
+float32 Dice–focal on the same RTX 5070, with `2×4×128³` logits, took 0.861 ms for combined
+Triton forward/backward, 1.622 ms for separate fused Dice and focal calls, and 3.390 ms for
+compiled native Torch. Additional GPU peak allocation was 0.0, 64.0 and 256.0 MiB respectively,
+using the baseline definition above. CPU native Torch also benefited from compilation.
+
+Shared evaluation of seven count metrics plus HD95, ASSD and NSD on two synthetic `128³`
+cuboid cases took 6.714 ms versus 27.696 ms for separate CPU calls, and 5.659 ms versus
+15.260 ms for separate CUDA calls. Spacing was anisotropic and background was excluded.
+All figures are medians of 20 repetitions after five warm-ups, using 16 threads.
+
+The [measurement record](https://github.com/rodolfo-viana/exacta/blob/dev/benchmarks/results/composition-collection-2026-10-24.md)
+contains the full environment, code revision, CPU results, bfloat16 runs, masked class-weighted
+CE combinations, exact commands and limitations. The scripts are `bench_losses.py` and
+`bench_collection.py`. Distributed correctness tests do not establish multi-GPU throughput;
+NCCL benchmarks require additional hardware.
+
 Avoid running performance measurements alongside other workloads. Measure sparse and dense
 targets, different class counts and representative MRI sizes before choosing an implementation.

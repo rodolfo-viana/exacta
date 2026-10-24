@@ -109,7 +109,8 @@ def main() -> None:
     print(f"exacta {__version__}, torch {torch.__version__}, CUDA {torch.version.cuda}, {hardware}, "
           f"threads={torch.get_num_threads()}, seed={args.seed}, warmup={args.warmup}, repeat={args.repeat}")
     print(f"activation={args.activation}, ignore_fraction={args.ignore_fraction}, "
-          f"mask_fraction={args.mask_fraction}; remaining arguments use defaults; median forward + backward\n")
+          f"mask_fraction={args.mask_fraction}, class_weight={args.class_weight}; "
+          "remaining arguments use defaults; median forward + backward\n")
     print("| loss | logits | dtype | backend | included (%) | time (ms) | extra memory (MiB) |")
     print("|---|---|---|---|---:|---:|---:|")
     for dtype_name in args.dtypes:

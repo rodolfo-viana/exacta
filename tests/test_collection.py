@@ -128,3 +128,18 @@ def test_empty_batch(device):
     for result in collection.compute().values():
         assert result.per_case.shape == (0, 3)
         assert result.per_class.isnan().all() and result.mean.isnan()
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.uint8, torch.int64])
+@pytest.mark.parametrize('representation', ['voxels', 'surfels', 'mesh'])
+def test_numeric_binary_targets_preserve_surface_semantics(device, dtype, representation):
+    pred, target = _inputs(device, (1, 5, 7, 9))
+    pred, target = [torch.nn.functional.one_hot(x, 3).movedim(-1, 1).to(dtype) for x in (pred, target)]
+    selection = {'dice': {}, 'hd95': {'surface': representation}}
+    actual = EF.evaluate(pred, target, metrics=selection, input_format='one-hot', spacing=1)
+    expected = EF.hd95(pred, target, input_format='one-hot', spacing=1, surface=representation)
+    torch.testing.assert_close(actual['hd95'], expected, rtol=0, atol=0, equal_nan=True)
+    pred = pred.float()
+    pred[0, 0, 0, 0, 0] = 0.5
+    with pytest.raises(ValueError):
+        EF.evaluate(pred, target, metrics=selection, input_format='one-hot', spacing=1)
