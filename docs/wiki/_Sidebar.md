@@ -10,4 +10,4 @@
 - [Performance](https://github.com/rodolfo-viana/exacta/wiki/Performance)
 - [Development](https://github.com/rodolfo-viana/exacta/wiki/Development)
 
-Released: **0.0.1a2**. Unreleased features are marked **dev**.
+Released: **0.0.1a3**. Development branch: **dev**.

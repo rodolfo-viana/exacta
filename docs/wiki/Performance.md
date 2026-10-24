@@ -35,9 +35,9 @@ beyond inputs and the logits' gradient. Scratch allocations can fit below that b
 These are synthetic local measurements, not guaranteed speedups on other hardware or complete
 training pipelines. Record code version, shapes, classes, dtype, threads and environment.
 
-## Unreleased: masked losses
+## Masked losses
 
-The `dev` benchmark supports `--ignore-fraction` and `--mask-fraction`. At code revision
+The loss benchmark supports `--ignore-fraction` and `--mask-fraction`. At code revision
 [`d3ba67f`](https://github.com/rodolfo-viana/exacta/commit/d3ba67fbe8b24ec6b65bdc1f1fa3f813fcb6ad9c),
 independently excluding 25% of labels and 20% through a boolean mask retained 60.01% of voxels
 on the GPU input. On the same RTX 5070 with float32 `2×4×128³` logits, seed 0, five warm-up
@@ -68,7 +68,7 @@ from exacta.losses import DiceCELoss
 loss_fn = torch.compile(DiceCELoss(backend="torch"), fullgraph=True)
 ```
 
-## Unreleased: shared metrics and composed losses
+## Shared metrics and composed losses
 
 At revision [`12af1d4`](https://github.com/rodolfo-viana/exacta/commit/12af1d4762ef03b5724b2603ca26f80051bf9f75),
 float32 Dice–focal on the same RTX 5070, with `2×4×128³` logits, took 0.861 ms for combined

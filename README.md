@@ -11,26 +11,26 @@ implementations (SciPy, MONAI, MedPy, DeepMind's surface-distance, MeshMetrics, 
 Panoptica and the BraTS 2023 evaluation code), and where they disagree with each other, exacta
 can reproduce each of them through an explicit argument.
 
-Status: early development (v0.0.1a2). Current releases target 3D medical image segmentation.
+Status: early development (v0.0.1a3). Current releases target 3D medical image segmentation.
 
 Documentation: [GitHub Wiki](https://github.com/rodolfo-viana/exacta/wiki) ·
-[versioned sources](https://github.com/rodolfo-viana/exacta/tree/dev/docs/wiki).
+[versioned sources](https://github.com/rodolfo-viana/exacta/tree/v0.0.1a3/docs/wiki).
 The guides cover installation, a complete quickstart, metrics, losses, mathematical conventions,
-lesion evaluation and performance. Unreleased features are labeled separately from the PyPI release.
+lesion evaluation and performance for this release.
 
 ## Installation
 
 Install the alpha from PyPI with Python 3.10 or newer:
 
 ```bash
-python -m pip install exacta==0.0.1a2
+python -m pip install exacta==0.0.1a3
 ```
 
-This release is a **source distribution**. Installation builds the native extension locally
-and requires a C++17 compiler and Python development headers; OpenMP is optional. On
-Debian/Ubuntu, install `build-essential` and the development headers matching your Python
-version first. Portable Linux x86-64 wheel builds are available in development CI; they
-will be published with the next release.
+This release includes **Linux x86-64 wheels** for glibc 2.28 or newer: Python 3.10 and 3.11
+wheels, plus a Python 3.12 stable-ABI wheel also tested on Python 3.13 and 3.14.
+Other platforms install from source and require a C++17 compiler and Python development
+headers; OpenMP is optional. On Debian/Ubuntu, install `build-essential` and the development
+headers matching your Python version before building from source.
 
 ## Usage
 
@@ -144,6 +144,8 @@ For probabilities `p` and targets `g`, the definitions and reductions are explic
 |---|---|
 | `DiceLoss` | `1 - (2 Σ p·g + s) / (Σ p + Σ g + s)`, averaged over cases and classes. |
 | `DiceCELoss` | `lambda_dice * DiceLoss + lambda_ce * CE`; CE is ordinary cross-entropy for softmax, BCE for sigmoid, and always includes every channel. |
+| `DiceFocalLoss` | `lambda_dice * DiceLoss + lambda_focal * FocalLoss`. |
+| `GeneralizedDiceCELoss` | `lambda_dice * GeneralizedDiceLoss + lambda_ce * CE`; sigmoid uses BCE. |
 | `TverskyLoss` | `1 - (TP+s)/(TP+alpha*FP+beta*FN+s)`, with `TP=Σ p·g`, `FP=Σ p·(1-g)`, `FN=Σ (1-p)·g`. Average over cases and classes. |
 | `GeneralizedDiceLoss` | `1 - (2 Σ_c w_c Σ p_c·g_c + s)/(Σ_c w_c Σ (p_c+g_c) + s)`, averaged over cases; weights derive from target class volumes. |
 | `FocalLoss`, softmax | `-Σ_c w_c*g_c*(1-p_c)^gamma*log(p_c)`, averaged over cases and voxels. |
@@ -201,6 +203,44 @@ import torch
 
 loss_fn = torch.compile(DiceCELoss(backend="torch"), fullgraph=True)
 ```
+
+### Ignored labels and voxel masks
+
+All segmentation losses accept constructor argument `ignore_index` for integer targets
+and a keyword-only boolean `mask=` in forward:
+
+```python
+loss_fn = DiceCELoss(ignore_index=-100)
+loss = loss_fn(logits, target, mask=annotated_voxels)
+```
+
+The mask has shape `(B, *spatial)` or `(B, 1, *spatial)` on the input device. True includes
+a voxel; ignored labels and False entries exclude it from all classes. CE/focal average
+only included voxels; overlap averages omit entirely ignored cases. An entirely ignored
+batch returns zero loss and gradients. Annotated background remains valid. GPU kernels
+apply exclusions during their existing passes without full-volume masked intermediates.
+See the [loss guide](https://github.com/rodolfo-viana/exacta/wiki/Losses) for a complete example.
+
+### Shared evaluation and training composition
+
+Version `0.0.1a3` adds these APIs:
+
+| API | Purpose |
+|---|---|
+| `functional.evaluate`, `metrics.MetricCollection` | Share counts and surface distances across several requested metrics |
+| `losses.DeepSupervisionLoss` | Weighted loss over explicitly paired prediction/target resolutions and optional masks |
+| `losses.DiceFocalLoss`, `losses.GeneralizedDiceCELoss` | Combinations with shared GPU passes and explicit term coefficients |
+| `class_weight` in Dice–CE and generalized Dice–CE | CE class weights with explicit index/soft-target normalization |
+| `distributed=True` in segmentation losses | Global statistics and DDP-correct parameter gradients; overlap also requires `batch_dice=True` |
+
+See the Wiki's [metrics](https://github.com/rodolfo-viana/exacta/wiki/Metrics) and
+[losses](https://github.com/rodolfo-viana/exacta/wiki/Losses) guides for examples, reduction
+definitions and distributed participation requirements. Run
+`python -m pytest tests/test_collection.py tests/test_deep_supervision.py tests/test_composed_losses.py tests/test_distributed_losses.py`
+to exercise these additions. CPU and single-GPU CUDA validation includes two Gloo ranks.
+**The multi-GPU NCCL path is experimental and unverified in this release:** the two-GPU
+tests have not been run on suitable hardware. Gloo checks do not establish NCCL correctness
+or multi-GPU training throughput.
 
 ## Architecture
 
@@ -315,8 +355,8 @@ float64, sigmoid activation and other batch, class and volume sizes.
 
 ## Development
 
-Feature development takes place on `dev`; `main` is reserved for releases. The current
-development version is `0.0.1a3.dev0`. See the
+Feature development takes place on `dev`; `main` is reserved for releases. This release is
+`0.0.1a3`. See the
 [segmentation roadmap](docs/segmentation-roadmap.md) for priorities.
 
 ```bash
@@ -351,41 +391,6 @@ Loss checks include independent NumPy formulas, MONAI comparisons with explicit 
 adjustments, float64 finite-difference gradient checks, higher-order PyTorch gradients,
 CPU/GPU agreement, mixed precision, extreme logits and full-graph compilation:
 `python -m pytest tests/test_losses.py tests/test_weighted_losses.py tests/test_generalized_dice.py tests/test_masked_losses.py`.
-
-### Unreleased: ignored labels and voxel masks
-
-On `dev`, all segmentation losses accept constructor argument `ignore_index` for integer targets
-and a keyword-only boolean `mask=` in forward:
-
-```python
-loss_fn = DiceCELoss(ignore_index=-100)
-loss = loss_fn(logits, target, mask=annotated_voxels)
-```
-
-The mask has shape `(B, *spatial)` or `(B, 1, *spatial)` on the input device. True includes
-a voxel; ignored labels and False entries exclude it from all classes. CE/focal average
-only included voxels; overlap averages omit entirely ignored cases. An entirely ignored
-batch returns zero loss and gradients. Annotated background remains valid. GPU kernels
-apply exclusions during their existing passes without full-volume masked intermediates.
-See the [loss guide](https://github.com/rodolfo-viana/exacta/wiki/Losses) for a complete example.
-
-### Unreleased: shared evaluation and training composition
-
-The `dev` branch also provides these APIs, pending the next PyPI release:
-
-| API | Purpose |
-|---|---|
-| `functional.evaluate`, `metrics.MetricCollection` | Share counts and surface distances across several requested metrics |
-| `losses.DeepSupervisionLoss` | Weighted loss over explicitly paired prediction/target resolutions and optional masks |
-| `losses.DiceFocalLoss`, `losses.GeneralizedDiceCELoss` | Combinations with shared GPU passes and explicit term coefficients |
-| `class_weight` in Dice–CE and generalized Dice–CE | CE class weights with explicit index/soft-target normalization |
-| `distributed=True` in segmentation losses | Global statistics and DDP-correct parameter gradients; overlap also requires `batch_dice=True` |
-
-See the Wiki's [metrics](https://github.com/rodolfo-viana/exacta/wiki/Metrics) and
-[losses](https://github.com/rodolfo-viana/exacta/wiki/Losses) guides for examples, reduction
-definitions and distributed participation requirements. Run
-`python -m pytest tests/test_collection.py tests/test_deep_supervision.py tests/test_composed_losses.py tests/test_distributed_losses.py`
-to exercise these additions; CUDA/NCCL tests require suitable hardware.
 
 ## License
 

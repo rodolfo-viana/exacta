@@ -11,13 +11,15 @@ Let `p` be activated predictions, `g` the target and `s` smoothing. The released
 |---|---|
 | `DiceLoss` | `1 - (2 sum(p*g)+s)/(sum(p)+sum(g)+s)`, averaged across cases and selected classes |
 | `DiceCELoss` | `lambda_dice * DiceLoss + lambda_ce * CE`; sigmoid uses BCE |
+| `DiceFocalLoss` | `lambda_dice * DiceLoss + lambda_focal * FocalLoss` |
+| `GeneralizedDiceCELoss` | `lambda_dice * GeneralizedDiceLoss + lambda_ce * CE`; sigmoid uses BCE |
 | `TverskyLoss` | `1 - (TP+s)/(TP+alpha*FP+beta*FN+s)`, averaged across cases and selected classes |
 | `GeneralizedDiceLoss` | Ratio of class-weighted overlap sums; class weights derive from target volumes |
 | `FocalLoss` | Focal CE/BCE with exponent `gamma`; softmax sums classes then averages voxels, sigmoid averages all entries |
 
 Overlap losses support `activation="softmax"`, `"sigmoid"` or `"none"`. Dice-CE and focal
 require logits and use softmax or sigmoid. `batch_dice=True` pools overlap statistics across
-the local batch before division. The unreleased explicit global option is documented below.
+the local batch before division. The explicit global option is documented below.
 `include_background=False` excludes channel zero from overlap only. CE/BCE and focal include
 all channels.
 
@@ -46,10 +48,9 @@ selects PyTorch when targets require gradients. Full-graph `torch.compile` is te
 local losses. Distributed losses are tested in eager execution; compiled collectives are
 not part of the current compatibility guarantee.
 
-## Unreleased: ignored labels and voxel masks
+## Ignored labels and voxel masks
 
-This section requires the `dev` branch (`0.0.1a3.dev0`), not PyPI 0.0.1a2. Every loss accepts
-constructor argument `ignore_index` for index targets and keyword-only `mask=` in forward.
+Every loss accepts constructor argument `ignore_index` for index targets and keyword-only `mask=` in forward.
 Masks must be boolean, on the input device, with shape `(B, *spatial)` or `(B, 1, *spatial)`.
 True includes a voxel; False excludes it from every class. Both exclusions combine.
 
@@ -77,7 +78,7 @@ raise eagerly; compiled Triton returns NaN. Soft/one-hot targets use `mask`, not
 The GPU kernels read exclusion information directly and count valid voxels in their existing
 passes. They do not create full-volume masked probability or one-hot buffers.
 
-## Unreleased: loss combinations and CE weights
+## Loss combinations and CE weights
 
 `DiceFocalLoss` adds Dice and focal terms; `GeneralizedDiceCELoss` adds generalized Dice and
 CE/BCE. Their GPU implementations share one activation/target pass forward and one backward.
@@ -110,7 +111,7 @@ therefore produce different weighted CE scales, as in PyTorch. `include_backgrou
 still affects only the overlap term. Use focal's `alpha` for its documented positive/negative
 or background/foreground weighting.
 
-## Unreleased: deep supervision
+## Deep supervision
 
 `DeepSupervisionLoss` applies one scalar loss to explicitly paired resolutions. Weights are
 used as supplied, without normalization; zero-weight levels are not evaluated and receive
@@ -125,7 +126,7 @@ loss_fn = DeepSupervisionLoss(DiceCELoss(ignore_index=-100), weights=[1.0, 0.5, 
 loss = loss_fn(predictions, targets, masks=voxel_masks)
 ```
 
-## Unreleased: global distributed losses
+## Global distributed losses
 
 Set `distributed=True` to pool statistics over the default `torch.distributed` process group.
 Overlap losses and their combinations also require `batch_dice=True`. This computes the
@@ -154,6 +155,7 @@ their nonlinear Dice ratios into one larger-batch ratio.
 Only small statistics communicate. NCCL keeps these on the rank's CUDA device. Gloo uses CPU
 buffers, also allowing two CUDA workers on a single GPU for correctness tests. Local tests
 cover CPU and fused CUDA with two Gloo ranks, uneven batches, empty ranks, ignored ranks and
-all-ignored batches. The two-GPU NCCL test is hardware-dependent; Gloo timings do not establish
-multi-GPU training throughput. Loss configuration and valid input shapes must agree across
-ranks; as with ordinary distributed training, a rank-local error can interrupt its peers.
+all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in 0.0.1a3:**
+the two-GPU tests have not been run on suitable hardware. Gloo checks do not establish NCCL
+correctness or multi-GPU training throughput. Loss configuration and valid input shapes
+must agree across ranks; as with ordinary distributed training, a rank-local error can interrupt its peers.

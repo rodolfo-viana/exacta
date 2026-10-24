@@ -5,24 +5,22 @@ Install PyTorch for your hardware using its [installation guide](https://pytorch
 then install the pinned Exacta release:
 
 ```bash
-python -m pip install exacta==0.0.1a2
+python -m pip install exacta==0.0.1a3
 python -c "import exacta; print(exacta.__version__)"
 ```
 
-Version 0.0.1a2 is distributed as source. Installation builds the CPU extension and requires
-a C++17 compiler and Python development headers; OpenMP is optional. On Debian/Ubuntu,
-install `build-essential` and development headers matching your Python interpreter.
-Portable prebuilt wheels are not yet published.
+Version 0.0.1a3 includes Linux x86-64 wheels for glibc 2.28 or newer. Python 3.10 and 3.11
+have dedicated wheels; the Python 3.12 stable-ABI wheel is also tested on Python 3.13 and 3.14.
 
-The `dev` CI workflow builds portable Linux x86-64 wheel artifacts for glibc 2.28 or newer.
-It covers Python 3.10 and 3.11 and a stable-ABI wheel built on 3.12, also tested on 3.13/3.14.
-These are development artifacts; PyPI will gain wheels in the next release. Other platforms
-continue to require a source build.
+Other platforms install from source, which builds the CPU extension and requires a C++17
+compiler and Python development headers; OpenMP is optional. On Debian/Ubuntu, install
+`build-essential` and development headers matching your Python interpreter.
+Development CI tests the same wheel configurations and provides artifacts for unreleased commits.
 
 ## CPU and GPU
 
-CPU kernels compile during installation. CUDA loss and metric kernels use Triton at runtime;
-their first invocation can include compilation. The CPU extension does not link against a
+CPU kernels are precompiled in wheels and compile during source installation. CUDA loss and
+metric kernels use Triton at runtime; their first invocation can include compilation. The CPU extension does not link against a
 specific PyTorch binary. Local validation covers Linux x86-64 CPU and NVIDIA CUDA execution;
 other hardware/platform combinations should be verified before use.
 
@@ -35,9 +33,9 @@ describes test environments.
 
 ## Development checkout
 
-Unreleased features, including shared metric evaluation, loss combinations, deep supervision,
-global distributed losses, ignored labels and voxel masks, live on `dev`.
-Install that branch explicitly when evaluating those features:
+Use `dev` to contribute or evaluate changes beyond the published release. Shared metric
+evaluation, loss combinations, deep supervision, global distributed losses, ignored labels
+and voxel masks are included in 0.0.1a3; they do not require a development checkout.
 
 ```bash
 git clone --branch dev https://github.com/rodolfo-viana/exacta.git

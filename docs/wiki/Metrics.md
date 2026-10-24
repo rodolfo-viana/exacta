@@ -53,12 +53,12 @@ updates. With NCCL, set each rank's current CUDA device. Avoid samplers that pad
 cases. If no rank has any cases, `compute()` raises `RuntimeError`.
 
 See [Conventions](https://github.com/rodolfo-viana/exacta/wiki/Conventions) for empty masks,
-surface representations and reference-library differences. Loss masking on `dev` does not
+surface representations and reference-library differences. Loss masking does not
 add masking to these metrics; excluding a region from a surface metric needs its own definition.
 
-## Unreleased: shared metric evaluation
+## Shared metric evaluation
 
-On `dev`, `functional.evaluate` shares confusion counts across overlap/volume metrics and
+`functional.evaluate` shares confusion counts across overlap/volume metrics and
 surface distances across compatible boundary metrics. It returns a dictionary of `(B, K)`
 arrays. Choose names as a sequence, or map names to their individual options:
 

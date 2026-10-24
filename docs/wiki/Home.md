@@ -4,8 +4,8 @@ Exacta provides reference-validated segmentation metrics and differentiable loss
 and GPU. Its current focus is 3D medical image segmentation, including MRI anatomy and lesions.
 Definitions, empty-mask behavior and aggregation are explicit so results can be reproduced.
 
-These pages document **PyPI 0.0.1a2**. Features available only on the **`dev` branch** are
-marked as unreleased. `main` is reserved for releases.
+These pages document **PyPI 0.0.1a3**. Feature development takes place on **`dev`**;
+**`main` is reserved for releases**.
 
 Start with the pages that match your task:
 
@@ -20,7 +20,7 @@ Start with the pages that match your task:
 | Choose and benchmark a backend | [Performance](https://github.com/rodolfo-viana/exacta/wiki/Performance) |
 | Work on the library | [Development](https://github.com/rodolfo-viana/exacta/wiki/Development) |
 
-The [PyPI project](https://pypi.org/project/exacta/0.0.1a2/),
+The [PyPI project](https://pypi.org/project/exacta/0.0.1a3/),
 [source repository](https://github.com/rodolfo-viana/exacta), and
 [issue tracker](https://github.com/rodolfo-viana/exacta/issues) are maintained by Rodolfo Viana.
 Exacta is licensed under Apache 2.0. This is an alpha library; benchmark and validate the

@@ -2,9 +2,10 @@
 
 Release notes for Exacta's alpha versions.
 
-## Unreleased (`dev`)
+## 0.0.1a3 — 2026-10-24
 
-Development now takes place on `dev`; `main` is reserved for releases.
+This release adds shared metric evaluation, masked and composed losses, deep supervision,
+global distributed reductions and portable Linux wheels.
 
 - Add integer `ignore_index` and boolean voxel masks to every segmentation loss, including
   the fused GPU paths. Normalize CE/focal over included voxels and omit entirely ignored
@@ -22,8 +23,13 @@ Development now takes place on `dev`; `main` is reserved for releases.
 - Add opt-in distributed loss reductions over the global batch, with DDP-correct gradients,
   including uneven batches and empty or entirely ignored ranks.
 - Add automatic development CI and installed-artifact tests for portable Linux x86-64
-  wheels, including stable-ABI checks on newer Python versions. Future releases publish
-  these wheels alongside the source distribution; no new PyPI release is made on `dev`.
+  wheels for Python 3.10/3.11 and the Python 3.12 stable ABI, tested through Python 3.14.
+  Publish these wheels alongside the source distribution.
+- Trigger the guarded publishing workflow when a release-version change reaches `main`;
+  retain manual dispatch, installed-artifact tests and the `pypi` environment controls.
+
+Multi-GPU NCCL execution is experimental and unverified in this release. CPU and single-GPU
+CUDA tests cover two Gloo ranks; the separate two-GPU NCCL tests still need suitable hardware.
 
 ## 0.0.1a2
 

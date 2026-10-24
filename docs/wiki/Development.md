@@ -1,7 +1,7 @@
 # Development
 
-Feature work belongs on **`dev`**. **`main` is reserved for releases**. The current development
-version is `0.0.1a3.dev0`; the documented public release is `0.0.1a2`.
+Feature work belongs on **`dev`**. **`main` is reserved for releases**. These pages document
+public release `0.0.1a3`; the development branch may contain newer changes.
 
 Install a checkout and run the tests with:
 

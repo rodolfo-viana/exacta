@@ -3,13 +3,15 @@
 This document is for maintainers. `README.md` is also the package description on PyPI;
 keep release procedures here and installation and usage instructions in the README.
 
-The manual [publishing workflow](../.github/workflows/publish.yml) runs only from `main`.
+The [publishing workflow](../.github/workflows/publish.yml) runs only from `main`.
+Pushing a release-version change in `src/exacta/__init__.py` to `main` starts it automatically;
+manual dispatch remains available for retries. Development and local versions are rejected.
 It builds a source distribution, checks the metadata and requested version, installs that
 artifact with PyTorch 2.4.1 and NumPy 1.x, and runs the tests before publishing. The reusable
 Linux wheel workflow builds and repairs manylinux_2_28 x86-64 wheels for Python 3.10, 3.11
 and the Python 3.12 stable ABI. Each wheel is tested after installation; the stable-ABI
 wheel is also tested on Python 3.13 and 3.14. Publishing waits for all these jobs.
-These wheels enter PyPI with the next release; 0.0.1a2 remains source-only.
+Version 0.0.1a3 includes these wheels; 0.0.1a2 remains source-only.
 
 ## Branch policy
 
@@ -21,7 +23,9 @@ Development CI runs on `dev` pushes and pull requests targeting `dev` or `main`.
 an installed sdist with Python 3.10, Torch 2.4.1 and NumPy 1.x, checks types, and builds/tests
 the same portable wheels. It never uploads to PyPI. Download wheel artifacts from the
 workflow run for pre-release installation checks. CI is CPU-only; run the CUDA and NCCL
-tests separately on suitable hardware before release. The minimum-Torch test jobs clear
+tests separately on suitable hardware before claiming those paths are validated. Version
+0.0.1a3 has CPU and single-GPU CUDA coverage with two Gloo ranks; multi-GPU NCCL remains
+explicitly experimental and unverified until its two-GPU tests run. The minimum-Torch test jobs clear
 the `CI` variable to avoid a Torch 2.4 internal decomposition assertion; full-graph
 compilation tests remain enabled.
 
@@ -58,10 +62,12 @@ Each release must use a new version. Prepare and review the source before runnin
    directory with `python -m build --sdist --outdir <output-directory>` and
    `python -m twine check --strict <output-directory>/*.tar.gz`. Inspect the README as it will
    appear on PyPI.
-3. Commit and push the reviewed release preparation to `dev`. When the release is ready,
-   merge it into `main` and push `main` using Rodolfo Viana's Git identity and SSH.
-4. In GitHub **Actions → Publish to PyPI → Run workflow**, select `main` and enter the exact
-   source version.
+3. Commit and push the reviewed release preparation to `dev`. Wait for CI on that exact
+   commit. When the release is ready, merge it into `main` and push `main` using Rodolfo
+   Viana's Git identity and SSH. This push starts publishing when the version file changed.
+4. Open GitHub **Actions → Publish to PyPI** and inspect the run for that commit. For a manual
+   retry, select **Run workflow**, choose `main` and enter the exact source version. Check
+   PyPI first if a previous upload failed partway; existing filenames cannot be replaced.
 5. Review the build and test results, then approve the `pypi` deployment if prompted.
 6. Verify the version, distribution files and rendered description on
    [the PyPI project page](https://pypi.org/project/exacta/).

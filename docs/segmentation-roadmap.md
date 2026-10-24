@@ -21,24 +21,24 @@ problem-dependent approach in [Metrics Reloaded](https://doi.org/10.1038/s41592-
 | Individual lesions | Matching, lesion F1, SQ/PQ, lesion Dice/HD95 and BraTS 2023 conventions |
 | Training baseline | Dice, Dice plus CE/BCE, Tversky and focal losses |
 | Class-volume imbalance | Generalized Dice, with inverse-square, inverse-volume and uniform weighting |
-| Partial annotations (unreleased, `dev`) | Ignored labels and boolean voxel masks in all segmentation losses, including fused GPU paths |
+| Partial annotations | Ignored labels and boolean voxel masks in all segmentation losses, including fused GPU paths |
 
 Generalized Dice follows [Sudre et al. (2017)](https://arxiv.org/abs/1707.03237).
 Its default absent-class weighting follows MONAI, while an explicit empty-target option
 avoids silently ignoring false positives in entirely empty foreground cases. It reuses the
 fused GPU overlap passes and native PyTorch operations on CPU.
 
-Ignored labels and voxel masks are implemented on `dev` (`0.0.1a3.dev0`). They exclude
+Ignored labels and voxel masks are included in `0.0.1a3`. They exclude
 unannotated voxels from every loss term and gradient, normalize CE/focal over included
 voxels, and omit entirely ignored cases from overlap averages. Entirely ignored batches
 return zero. GPU kernels read exclusions directly in their existing passes. This does not
 add masking to surface metrics: cropping a mask can create artificial surfaces and needs
 a separate definition.
 
-## Implemented on dev
+## Added in 0.0.1a3
 
-The following additions are available on `dev` (`0.0.1a3.dev0`). They have explicit reduction
-definitions and tests; see the Wiki's unreleased sections for examples and constraints.
+The following additions are included in `0.0.1a3`. They have explicit reduction definitions
+and tests; see the Wiki for examples and constraints.
 
 1. **Shared metric calculations.** `functional.evaluate` and `MetricCollection` compute counts
    once and share distances for compatible surface metrics. Each metric retains its options.
@@ -52,7 +52,8 @@ definitions and tests; see the Wiki's unreleased sections for examples and const
 4. **Distributed training reductions.** `distributed=True` reduces loss statistics globally.
    Overlap losses also require `batch_dice=True`; the default still means the local batch.
    Two-rank DDP tests compare values and parameter gradients with one concatenated batch,
-   including uneven, empty and fully ignored ranks. NCCL coverage requires two GPUs.
+   including uneven, empty and fully ignored ranks using Gloo. The multi-GPU NCCL path remains
+   experimental and unverified until the two-GPU tests run on suitable hardware.
 
 Development CI also builds and tests installed sdists and portable Linux wheels. `main`
 remains reserved for releases. GPU performance and multi-GPU transport need their own

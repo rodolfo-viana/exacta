@@ -1,12 +1,15 @@
 name: Publish to PyPI
 
 on:
+  push:
+    branches: [main]
+    paths: [src/exacta/__init__.py]
   workflow_dispatch:
     inputs:
       version:
         description: Exact package version to publish (must match the source)
         required: true
-        default: 0.0.1a2
+        default: 0.0.1a3
         type: string
 
 permissions:
@@ -48,17 +51,21 @@ jobs:
           from pathlib import Path
           from packaging.version import Version
 
-          expected = os.environ["EXPECTED_VERSION"]
-          Version(expected)  # Reject malformed version input before constructing a filename.
           archives = list(Path("dist").glob("*.tar.gz"))
           assert len(archives) == 1, "Expected exactly one source distribution"
           archive = archives[0]
-          assert archive.name == f"exacta-{expected}.tar.gz", "Source version does not match requested release"
           with tarfile.open(archive) as source:
-              metadata = source.extractfile(f"exacta-{expected}/PKG-INFO")
+              metadata = source.extractfile(f"{archive.name.removesuffix('.tar.gz')}/PKG-INFO")
               assert metadata is not None
               message = email.message_from_bytes(metadata.read())
+          expected = os.environ["EXPECTED_VERSION"] or message["Version"]
+          version = Version(expected)
+          assert str(version) == expected, "Use a canonical package version"
+          assert not version.is_devrelease and version.local is None, "Development versions cannot be published"
+          assert archive.name == f"exacta-{expected}.tar.gz", "Source version does not match requested release"
           assert message["Name"] == "exacta" and message["Version"] == expected
+          with open(os.environ["GITHUB_ENV"], "a") as environment:
+              environment.write(f"EXPECTED_VERSION={expected}\n")
           PY
       - name: Install the artifact with the minimum supported PyTorch
         run: |
