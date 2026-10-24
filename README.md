@@ -13,6 +13,11 @@ can reproduce each of them through an explicit argument.
 
 Status: early development (v0.0.1a2). Current releases target 3D medical image segmentation.
 
+Documentation: [GitHub Wiki](https://github.com/rodolfo-viana/exacta/wiki) ·
+[versioned sources](https://github.com/rodolfo-viana/exacta/tree/dev/docs/wiki).
+The guides cover installation, a complete quickstart, metrics, losses, mathematical conventions,
+lesion evaluation and performance. Unreleased features are labeled separately from the PyPI release.
+
 ## Installation
 
 Install the alpha from PyPI with Python 3.10 or newer:
@@ -309,6 +314,10 @@ float64, sigmoid activation and other batch, class and volume sizes.
 
 ## Development
 
+Feature development takes place on `dev`; `main` is reserved for releases. The current
+development version is `0.0.1a3.dev0`. See the
+[segmentation roadmap](docs/segmentation-roadmap.md) for priorities.
+
 ```bash
 python -m venv ~/.venvs/exacta && source ~/.venvs/exacta/bin/activate
 pip install torch scikit-build-core nanobind cmake ninja
@@ -340,7 +349,24 @@ updates using Gloo; their NCCL variants require two GPUs and are skipped otherwi
 Loss checks include independent NumPy formulas, MONAI comparisons with explicit reduction
 adjustments, float64 finite-difference gradient checks, higher-order PyTorch gradients,
 CPU/GPU agreement, mixed precision, extreme logits and full-graph compilation:
-`python -m pytest tests/test_losses.py tests/test_weighted_losses.py tests/test_generalized_dice.py`.
+`python -m pytest tests/test_losses.py tests/test_weighted_losses.py tests/test_generalized_dice.py tests/test_masked_losses.py`.
+
+### Unreleased: ignored labels and voxel masks
+
+On `dev`, all five losses accept constructor argument `ignore_index` for integer targets
+and a keyword-only boolean `mask=` in forward:
+
+```python
+loss_fn = DiceCELoss(ignore_index=-100)
+loss = loss_fn(logits, target, mask=annotated_voxels)
+```
+
+The mask has shape `(B, *spatial)` or `(B, 1, *spatial)` on the input device. True includes
+a voxel; ignored labels and False entries exclude it from all classes. CE/focal average
+only included voxels; overlap averages omit entirely ignored cases. An entirely ignored
+batch returns zero loss and gradients. Annotated background remains valid. GPU kernels
+apply exclusions during their existing passes without full-volume masked intermediates.
+See the [loss guide](https://github.com/rodolfo-viana/exacta/wiki/Losses) for a complete example.
 
 ## License
 

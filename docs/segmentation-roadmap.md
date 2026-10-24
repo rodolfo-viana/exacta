@@ -21,24 +21,28 @@ problem-dependent approach in [Metrics Reloaded](https://doi.org/10.1038/s41592-
 | Individual lesions | Matching, lesion F1, SQ/PQ, lesion Dice/HD95 and BraTS 2023 conventions |
 | Training baseline | Dice, Dice plus CE/BCE, Tversky and focal losses |
 | Class-volume imbalance | Generalized Dice, with inverse-square, inverse-volume and uniform weighting |
+| Partial annotations (unreleased, `dev`) | Ignored labels and boolean voxel masks in all five losses, including fused GPU paths |
 
 Generalized Dice follows [Sudre et al. (2017)](https://arxiv.org/abs/1707.03237).
 Its default absent-class weighting follows MONAI, while an explicit empty-target option
 avoids silently ignoring false positives in entirely empty foreground cases. It reuses the
 fused GPU overlap passes and native PyTorch operations on CPU.
 
+Ignored labels and voxel masks are implemented on `dev` (`0.0.1a3.dev0`). They exclude
+unannotated voxels from every loss term and gradient, normalize CE/focal over included
+voxels, and omit entirely ignored cases from overlap averages. Entirely ignored batches
+return zero. GPU kernels read exclusions directly in their existing passes. This does not
+add masking to surface metrics: cropping a mask can create artificial surfaces and needs
+a separate definition.
+
 ## Next implementation priorities
 
 The largest remaining general-purpose gaps are training semantics and composition. Implement
 them with exact reduction definitions and tests before adding specialized objectives.
 
-1. **Ignored labels and voxel masks.** Exclude unannotated voxels from every overlap term,
-   CE/focal normalization and gradient, with explicit behavior for all-ignored cases. An
-   excluded region is different from background. nnU-Net's
-   [compound losses](https://github.com/MIC-DKFZ/nnUNet/blob/master/nnunetv2/training/loss/compound_losses.py)
-   illustrate the need. Fuse masking into volume passes rather than materializing masked
-   copies on GPU. Surface metrics need a separate definition because cropping a mask creates
-   artificial surfaces; do not apply voxel-loss masking conventions to them automatically.
+1. **Shared metric calculations.** Compute counts once for overlap/volume metrics and surface
+   distances once for HD95, ASSD and NSD requested together. Preserve each metric's conventions
+   while avoiding repeated volume scans, extraction and distance transforms.
 2. **Deep supervision.** Apply a loss to explicitly paired predictions and targets at several
    resolutions, with declared weights and validation of lengths. Avoid implicit label
    interpolation. Check against nnU-Net's
@@ -49,9 +53,6 @@ them with exact reduction definitions and tests before adding specialized object
 4. **Distributed training reductions.** Evaluation already gathers per-case results. Losses'
    `batch_dice=True` currently means the local batch, not all distributed ranks. Offer an
    explicit differentiable global reduction with empty-rank and uneven-batch tests.
-5. **Shared metric calculations.** Compute counts once for overlap/volume metrics and surface
-   distances once for HD95, ASSD and NSD requested together. Preserve each metric's conventions
-   while avoiding repeated volume scans, extraction and distance transforms.
 
 ## Task-dependent extensions
 
