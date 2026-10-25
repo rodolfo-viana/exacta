@@ -1,7 +1,8 @@
 # Metrics
 
-Stateless functions in `exacta.functional` return per-case, per-selected-class arrays of shape
-`(B, K)`. Corresponding classes in `exacta.metrics` accumulate results across batches.
+Overlap and surface functions in `exacta.functional` return per-case, per-selected-class
+arrays of shape `(B, K)`. Corresponding classes in `exacta.metrics` accumulate results across
+batches. Probability and dataset-level metrics use the reductions described below.
 Choose complementary metrics according to the segmentation task; a high overlap score alone
 does not describe lesion detection or boundary errors.
 
@@ -95,9 +96,22 @@ metrics.reset()
 All ranks must use identical metric order and configuration, and must call `compute()`,
 including ranks without updates. The usual sampler and aggregation rules above still apply.
 
-## Unreleased additions
+## Centreline, probability and detection metrics
 
-Development on `feature/advanced-segmentation` adds hard clDice, Brier/NLL, ECE and reliability
-summaries, plus streaming lesion AP/FROC. These are not in PyPI 0.0.1a3. Their docstrings in the
-[feature source](https://github.com/rodolfo-viana/exacta/tree/feature/advanced-segmentation/src/exacta)
-describe hard/soft skeletons, case/voxel aggregation and confidence matching protocols.
+Version 0.0.1a4 adds the following evaluation APIs. The
+[advanced segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation)
+defines their empty-input behavior, probability conventions and matching protocol.
+
+| Functional API | Stateful API | Quantity |
+|---|---|---|
+| `cldice` | `ClDice` | Harmonic mean of hard-skeleton precision and sensitivity; CPU Lee thinning |
+| `brier_score` | `BrierScore` | Mean squared probability error; binary and multiclass scales differ |
+| `negative_log_likelihood` | `NegativeLogLikelihood` | Mean true-class negative log probability, in nats |
+| `expected_calibration_error` | `ExpectedCalibrationError` | Top-label or classwise, equal-width reliability bins |
+| `reliability_diagram` | `Calibration` | Per-case summaries versus pooled voxel bin accumulation |
+| `detection.lesion_detection` | `detection.LesionDetection` | Dataset lesion AP and FROC for fixed candidates ranked by confidence |
+
+Probability metrics accept index targets, optional masks and ignored labels. C=1 is binary
+sigmoid; C>=2 is mutually exclusive multiclass. Independent multilabel probability channels
+are not supported. Stateful probability scores average cases; `Calibration` pools voxels.
+All ranks must participate in distributed computation.

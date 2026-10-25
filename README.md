@@ -11,7 +11,7 @@ implementations (SciPy, MONAI, MedPy, DeepMind's surface-distance, MeshMetrics, 
 Panoptica and the BraTS 2023 evaluation code), and where they disagree with each other, exacta
 can reproduce each of them through an explicit argument.
 
-Status: early development (v0.0.1a3). Current releases target 3D medical image segmentation.
+Status: alpha (v0.0.1a4). Current releases target 3D medical image segmentation.
 
 Documentation: [GitHub Wiki](https://github.com/rodolfo-viana/exacta/wiki).
 The guides cover installation, a complete quickstart, metrics, losses, mathematical conventions,
@@ -22,7 +22,7 @@ lesion evaluation and performance for this release.
 Exacta requires Python 3.10+, PyTorch 2.4+ and NumPy 1.22+. Install the alpha from PyPI:
 
 ```bash
-python -m pip install exacta==0.0.1a3
+python -m pip install exacta==0.0.1a4
 ```
 
 This release includes **Linux x86-64 wheels** for glibc 2.28 or newer: Python 3.10 and 3.11
@@ -87,9 +87,28 @@ kept = components.largest(mask, connectivity=3)                # e.g. nnU-Net-st
 cleaned = components.remove_small(mask, 50, connectivity=1)    # drop components under 50 voxels
 ```
 
+## Centreline, probability and lesion detection scores
+
+`functional.cldice` and `metrics.ClDice` evaluate hard-skeleton overlap. Lee thinning runs
+in C++ on CPU, including transfers for CUDA inputs. `functional.skeletonize` exposes the
+same binary-mask operation, and precomputed skeletons can be reused for clDice.
+
+Probability evaluation includes `brier_score`, `negative_log_likelihood`,
+`expected_calibration_error` and `reliability_diagram`. These accept probabilities or
+`from_logits=True`, integer targets, masks and ignored labels. One channel means binary
+sigmoid; multiple channels mean mutually exclusive softmax classes. Stateful scores average
+cases, while `metrics.Calibration` pools voxel reliability bins.
+
+`exacta.detection.LesionDetection` accumulates confidence-ranked lesion AP and FROC across
+cases. Connected components form fixed candidates before the confidence sweep. Report the
+connectivity, component confidence rule and IoU matching threshold alongside the scores.
+See the [advanced segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation)
+for definitions, empty-input conventions and examples.
+
 ## Conventions
 
-Each convention is an explicit argument, because this is where libraries disagree.
+For hard segmentation metrics, each convention is an explicit argument, because this is
+where libraries disagree. Probability and confidence-ranked metrics use the definitions above.
 
 | Topic | exacta |
 |---|---|
@@ -188,8 +207,8 @@ default mean for the same hard targets. The formulas above define soft targets a
 sums of hard-label losses; sigmoid soft-target behavior differs from MONAI's modulation of a
 single soft-label BCE term. Focal loss expects finite logits and includes every channel.
 
-All losses compute half/bfloat16 inputs in float32 and retain float64 precision.
-`backend="auto"` uses fused Triton on CUDA when available and PyTorch elsewhere. Use
+The overlap and focal losses compute half/bfloat16 inputs in float32 and retain float64 precision.
+Their `backend="auto"` uses fused Triton on CUDA when available and PyTorch elsewhere. Use
 `backend="torch"` for higher-order derivatives; the fused backward explicitly rejects them.
 Targets requiring gradients automatically select PyTorch. Eager execution rejects out-of-range
 indices; compiled Triton execution returns NaN for them without a host synchronization.
@@ -205,7 +224,7 @@ loss_fn = torch.compile(DiceCELoss(backend="torch"), fullgraph=True)
 
 ### Ignored labels and voxel masks
 
-All segmentation losses accept constructor argument `ignore_index` for integer targets
+Overlap, CE and focal losses accept constructor argument `ignore_index` for integer targets
 and a keyword-only boolean `mask=` in forward:
 
 ```python
@@ -219,6 +238,29 @@ only included voxels; overlap averages omit entirely ignored cases. An entirely 
 batch returns zero loss and gradients. Annotated background remains valid. GPU kernels
 apply exclusions during their existing passes without full-volume masked intermediates.
 See the [loss guide](https://github.com/rodolfo-viana/exacta/wiki/Losses) for a complete example.
+
+### Boundary, topology and hard-example losses
+
+Version 0.0.1a4 adds these objectives, with explicit choices for exponents, reductions and
+geometry. The [advanced segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation)
+documents their reference conventions and backend behavior.
+
+| Loss | Definition and requirements |
+|---|---|
+| `FocalTverskyLoss` | Mean of `(1-Tversky)**gamma`; default actual exponent `0.75`, FP weight `0.3`, FN weight `0.7`. Supports masks, ignored labels and global distributed reduction. |
+| `TopKCELoss` | Mean CE over the hardest `ceil(fraction*N_valid)` voxels; default fraction `0.1`. Integer targets and softmax. |
+| `DiceTopKCELoss` | Weighted Dice plus top-k CE, with explicit coefficients and the same hard-example selection. |
+| `LovaszSoftmaxLoss` | Multiclass Jaccard surrogate using stable error sorting; present/all classes and per-image/local-batch options. |
+| `BoundaryLoss` | Mean probability times signed target distance in physical units; may be negative. |
+| `HausdorffDTLoss` | Mean squared probability error weighted by detached prediction/target distance transforms. This surrogate differs from HD95. |
+| `SoftClDiceLoss` | Differentiable finite-iteration skeleton overlap; C++ morphology on eager CPU and PyTorch pooling on CUDA. |
+
+Geometry losses require complete binary target geometry. Their optional masks affect reduction
+only; they have no `ignore_index`. Soft-clDice accepts neither ignored labels nor masks because
+removing voxels changes connectivity. Cache distance maps or soft skeletons only while target
+geometry and spacing remain unchanged. Uniform masks can yield zero Hausdorff-DT distances;
+combine geometry/topology terms with regional supervision. Apart from Focal Tversky, these new
+objectives reduce each rank's local batch rather than pooling statistics globally.
 
 ### Shared evaluation and training composition
 

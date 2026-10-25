@@ -84,7 +84,10 @@ not part of the current compatibility guarantee.
 
 ## Ignored labels and voxel masks
 
-Every loss accepts constructor argument `ignore_index` for index targets and keyword-only `mask=` in forward.
+Dice, Tversky, generalized Dice, focal and their regional combinations accept constructor
+argument `ignore_index` for index targets and keyword-only `mask=` in forward. Focal Tversky,
+top-k CE and Lovasz-Softmax also support exclusions. Geometry/topology losses have different
+requirements, described below.
 Masks must be boolean, on the input device, with shape `(B, *spatial)` or `(B, 1, *spatial)`.
 True includes a voxel; False excludes it from every class. Both exclusions combine.
 
@@ -189,15 +192,20 @@ their nonlinear Dice ratios into one larger-batch ratio.
 Only small statistics communicate. NCCL keeps these on the rank's CUDA device. Gloo uses CPU
 buffers, also allowing two CUDA workers on a single GPU for correctness tests. Local tests
 cover CPU and fused CUDA with two Gloo ranks, uneven batches, empty ranks, ignored ranks and
-all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in 0.0.1a3:**
+all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in 0.0.1a4:**
 the two-GPU tests have not been run on suitable hardware. Gloo checks do not establish NCCL
 correctness or multi-GPU training throughput. Loss configuration and valid input shapes
 must agree across ranks; as with ordinary distributed training, a rank-local error can interrupt its peers.
 
-## Unreleased additions
+## Boundary, topology and hard-example objectives
 
-Development on `feature/advanced-segmentation` adds Focal Tversky, top-k CE, Dice/top-k CE,
-Lovasz-Softmax, boundary, Hausdorff-DT and soft-clDice objectives. These are not in PyPI
-0.0.1a3. The loss docstrings in the
-[feature source](https://github.com/rodolfo-viana/exacta/tree/feature/advanced-segmentation/src/exacta/losses)
-describe their APIs, masking restrictions and empty-mask definitions.
+Version 0.0.1a4 adds `FocalTverskyLoss`, `TopKCELoss`, `DiceTopKCELoss`, `LovaszSoftmaxLoss`,
+`BoundaryLoss`, `HausdorffDTLoss` and `SoftClDiceLoss`. Their formulas, reductions, defaults,
+reference conventions and CPU/GPU paths are documented in the
+[advanced segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation).
+
+Focal Tversky supports the global distributed reduction above. Top-k/Lovasz selection and
+geometry/topology losses operate on each rank's local batch. Geometry masks affect reduction
+only; complete target geometry is required. Geometry/topology losses have no `ignore_index`,
+and soft-clDice has no mask argument. Distance-transform and skeleton objectives should be
+combined with regional supervision according to the task.

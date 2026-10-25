@@ -5,11 +5,11 @@ Install PyTorch for your hardware using its [installation guide](https://pytorch
 then install the pinned Exacta release:
 
 ```bash
-python -m pip install exacta==0.0.1a3
+python -m pip install exacta==0.0.1a4
 python -c "import exacta; print(exacta.__version__)"
 ```
 
-Version 0.0.1a3 includes Linux x86-64 wheels for glibc 2.28 or newer. Python 3.10 and 3.11
+Version 0.0.1a4 includes Linux x86-64 wheels for glibc 2.28 or newer. Python 3.10 and 3.11
 have dedicated wheels; the Python 3.12 stable-ABI wheel is also tested on Python 3.13 and 3.14.
 
 Other platforms install from source, which builds the CPU extension and requires a C++17
@@ -33,9 +33,8 @@ describes test environments.
 ## Development checkout
 
 Use `main` to evaluate merged changes beyond the published release. Create a feature branch
-from it when contributing. Shared metric
-evaluation, loss combinations, deep supervision, global distributed losses, ignored labels
-and voxel masks are included in 0.0.1a3; they do not require a development checkout.
+from it when contributing. The advanced segmentation losses, hard clDice, probability
+metrics and lesion AP/FROC documented here are included in 0.0.1a4.
 
 ```bash
 git clone --branch main https://github.com/rodolfo-viana/exacta.git

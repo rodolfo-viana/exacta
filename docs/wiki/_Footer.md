@@ -1,3 +1,3 @@
-Exacta · [PyPI](https://pypi.org/project/exacta/0.0.1a3/) ·
+Exacta · [PyPI](https://pypi.org/project/exacta/0.0.1a4/) ·
 [Source](https://github.com/rodolfo-viana/exacta) ·
 [Issues](https://github.com/rodolfo-viana/exacta/issues) · Apache 2.0

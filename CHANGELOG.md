@@ -2,9 +2,10 @@
 
 Release notes for Exacta's alpha versions.
 
-## Unreleased
+## 0.0.1a4 — 2026-10-24
 
-Development toward the next alpha release uses feature branches merged into `main`.
+This release adds boundary and topology objectives, probability metrics and confidence-ranked
+lesion evaluation, with explicit mathematical conventions and CPU/GPU backend choices.
 
 - Restrict distributions to package/build files and licenses; keep documentation drafts,
   plans and measurement outputs local, and limit the README to the PyPI package description.
@@ -21,8 +22,7 @@ Development toward the next alpha release uses feature branches merged into `mai
 - Add confidence-ranked lesion AP/FROC with one-to-one matching, grouped confidence
   ties, missed-lesion accounting and streaming/distributed dataset accumulation.
 - Add independent reference/gradient tests, frozen Lee skeleton fixtures, reproducible
-  CPU/GPU benchmarks and an unreleased guide covering definitions and backend tradeoffs.
-
+  CPU/GPU benchmark scripts and Wiki documentation covering definitions and backend tradeoffs.
 - Run source-distribution tests and type checks on all branch pushes and pull requests into
   `main`. Build and test the portable-wheel matrix only for published GitHub Releases.
 - Publish to PyPI only when a GitHub Release is published; branch merges and tag pushes do
