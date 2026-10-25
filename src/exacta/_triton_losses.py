@@ -35,7 +35,7 @@ import math
 import torch
 from torch import Tensor
 
-from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms, masked_overlap_terms
+from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms, masked_overlap_terms, overlap_power
 from exacta._distributed import sum_ranks
 
 try:
@@ -71,11 +71,12 @@ def seg_loss(
     class_weight: Tensor | None = None,
     focal: tuple[float, float | None] | None = None,
     distributed: bool = False,
+    overlap_power: float = 1.0,
 ) -> Tensor:
     """Overlap losses share volume passes; only their small final reductions differ."""
     config = (
         activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce,
-        cross_entropy, tversky, generalized, ignore_index, focal, distributed,
+        cross_entropy, tversky, generalized, overlap_power, ignore_index, focal, distributed,
     )
     return _SegLoss.apply(logits, target, mask, class_weight, config)
 
@@ -95,7 +96,7 @@ class _SegLoss(torch.autograd.Function):
     def forward(ctx, logits: Tensor, target: Tensor, mask: Tensor | None, class_weight: Tensor | None,
                 config: tuple) -> Tensor:  # type: ignore[override]
         (activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce,
-         ce, tversky, generalized, ignore_index, focal, distributed) = config
+         ce, tversky, generalized, power, ignore_index, focal, distributed) = config
         logits, target = logits.contiguous(), target.contiguous()
         mask = None if mask is None else mask.contiguous()
         masked = mask is not None or ignore_index is not None or distributed
@@ -153,10 +154,15 @@ class _SegLoss(torch.autograd.Function):
             num, den, scale = masked_overlap_terms(
                 num, den, valid_counts.sum() if batch_dice else valid_counts,
             )
-            loss = lambda_dice * ((1 - num / den) * scale).sum()
+            loss = lambda_dice * (overlap_power(1 - num / den, power) * scale).sum()
         else:
             scale = 1 / num.numel()
-            loss = lambda_dice * (1 - (num / den).mean())
+            loss = lambda_dice * ((1 - (num / den).mean()) if power == 1 else
+                                  overlap_power(1 - num / den, power).mean())
+        if power != 1:
+            error = 1 - num / den
+            factor = power * torch.where(error == 0, 1, error).pow(power - 1)
+            scale = scale * torch.where(error == 0, 0, factor)
         ce_scale = torch.zeros((), dtype=torch.float64, device=logits.device)
         if ce:
             elements = (batch * voxels * (classes if activation == "sigmoid" else 1)
@@ -175,8 +181,8 @@ class _SegLoss(torch.autograd.Function):
             coef[:, 0, first:classes] = lambda_dice * 2 * scale / den
             coef[:, 1, first:classes] = lambda_dice * scale * num / (den * den)
         else:
-            coef[:, 0, first:classes] = scale * (den - (1 - alpha - beta) * num) / (den * den)
-            coef[:, 1, first:classes] = scale * alpha * num / (den * den)
+            coef[:, 0, first:classes] = lambda_dice * scale * (den - (1 - alpha - beta) * num) / (den * den)
+            coef[:, 1, first:classes] = lambda_dice * scale * alpha * num / (den * den)
         ctx.save_for_backward(logits, target, coef, ce_scale, mask, class_weight)
         ctx.config = config
         loss = torch.where(invalid > 0, torch.nan, loss)

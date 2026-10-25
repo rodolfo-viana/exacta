@@ -1,0 +1,209 @@
+{
+  "exacta": "0.0.1a4.dev0",
+  "torch": "2.14.1+cu130",
+  "cuda": "13.0",
+  "numpy": "2.5.4",
+  "python": "3.14.4",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+  "hardware": "NVIDIA GeForce RTX 5070",
+  "git_revision": "b0cec539ca9e9d4c4cce98f17b42f4f5cc6398f4",
+  "git_dirty": true,
+  "source_sha256": "f63ec46ac0747cfe812d1045720358ef2c68440d870987152ade6cddf871c428",
+  "config": {
+    "device": "cuda",
+    "size": 64,
+    "batch": 1,
+    "classes": 3,
+    "iterations": 10,
+    "threads": 2,
+    "seed": 723,
+    "warmup": 3,
+    "repeat": 10,
+    "compiled": true,
+    "only": null,
+    "output": "benchmarks/results/advanced-gpu64-2026-10-24.json"
+  },
+  "dtype": "float32",
+  "spacing": [
+    1.0,
+    1.0,
+    2.0
+  ],
+  "rows": [
+    {
+      "name": "focal_tversky_torch",
+      "median_ms": 0.6584290022146888,
+      "min_ms": 0.6033280078554526,
+      "max_ms": 0.7660200062673539,
+      "extra_mib": 12.001953125
+    },
+    {
+      "name": "focal_tversky_torch_compiled",
+      "median_ms": 0.2627339999889955,
+      "min_ms": 0.25477299641352147,
+      "max_ms": 0.29595399973914027,
+      "extra_mib": 3.0009765625
+    },
+    {
+      "name": "focal_tversky_auto",
+      "median_ms": 0.6916889979038388,
+      "min_ms": 0.6653890013694763,
+      "max_ms": 0.7193299970822409,
+      "extra_mib": 0.0029296875
+    },
+    {
+      "name": "focal_tversky_auto_compiled",
+      "median_ms": 0.3058145011891611,
+      "min_ms": 0.29525400896091014,
+      "max_ms": 0.6886390037834644,
+      "extra_mib": 6.001953125
+    },
+    {
+      "name": "topk_ce",
+      "median_ms": 0.5296420058584772,
+      "min_ms": 0.5161959998076782,
+      "max_ms": 0.5571270012296736,
+      "extra_mib": 6.0009765625
+    },
+    {
+      "name": "topk_ce_compiled",
+      "median_ms": 0.42816099448828027,
+      "min_ms": 0.4142760008107871,
+      "max_ms": 0.43909599480684847,
+      "extra_mib": 2.0009765625
+    },
+    {
+      "name": "dice_topk_ce",
+      "median_ms": 1.0972199961543083,
+      "min_ms": 1.0895049927057698,
+      "max_ms": 1.1279150057816878,
+      "extra_mib": 6.001953125
+    },
+    {
+      "name": "lovasz",
+      "median_ms": 1.5588750029564835,
+      "min_ms": 1.5370509936474264,
+      "max_ms": 1.6061009955592453,
+      "extra_mib": 25.80859375
+    },
+    {
+      "name": "lovasz_compiled",
+      "median_ms": 0.5234764976194128,
+      "min_ms": 0.5078859976492822,
+      "max_ms": 0.5602070013992488,
+      "extra_mib": 14.32421875
+    },
+    {
+      "name": "boundary",
+      "median_ms": 1.2990120012545958,
+      "min_ms": 1.2788169988198206,
+      "max_ms": 1.4452489995164797,
+      "extra_mib": 38.60107421875
+    },
+    {
+      "name": "boundary_cached",
+      "median_ms": 0.3016339978785254,
+      "min_ms": 0.2916240046033636,
+      "max_ms": 0.3226039989385754,
+      "extra_mib": 9.0009765625
+    },
+    {
+      "name": "hausdorff_dt",
+      "median_ms": 2.4270174908451736,
+      "min_ms": 2.4022619909374043,
+      "max_ms": 2.7034359954996035,
+      "extra_mib": 37.22021484375
+    },
+    {
+      "name": "hausdorff_dt_cached",
+      "median_ms": 1.5401204946101643,
+      "min_ms": 1.4802289952058345,
+      "max_ms": 1.8489240028429776,
+      "extra_mib": 37.22021484375
+    },
+    {
+      "name": "soft_cldice_torch",
+      "median_ms": 9.924051497364417,
+      "min_ms": 9.757009000168182,
+      "max_ms": 10.598480992484838,
+      "extra_mib": 697.0
+    },
+    {
+      "name": "soft_cldice",
+      "median_ms": 9.937257003912237,
+      "min_ms": 9.796939993975684,
+      "max_ms": 10.339357002521865,
+      "extra_mib": 697.0
+    },
+    {
+      "name": "soft_cldice_compiled",
+      "median_ms": 2.2951904975343496,
+      "min_ms": 2.243759998236783,
+      "max_ms": 2.3439310025423765,
+      "extra_mib": 188.50244140625
+    },
+    {
+      "name": "soft_cldice_cached",
+      "median_ms": 8.341465989360586,
+      "min_ms": 8.138318007695489,
+      "max_ms": 8.485693004331551,
+      "extra_mib": 685.0009765625
+    },
+    {
+      "name": "soft_cldice_cached_compiled",
+      "median_ms": 2.555064005719032,
+      "min_ms": 2.4861130077624694,
+      "max_ms": 2.7077059930888936,
+      "extra_mib": 191.0009765625
+    },
+    {
+      "name": "brier",
+      "median_ms": 0.40432500099996105,
+      "min_ms": 0.39623500197194517,
+      "max_ms": 0.4182350094197318,
+      "extra_mib": 7.251953125
+    },
+    {
+      "name": "nll",
+      "median_ms": 0.37874499685131013,
+      "min_ms": 0.37317500391509384,
+      "max_ms": 0.3985450020991266,
+      "extra_mib": 5.5
+    },
+    {
+      "name": "ece",
+      "median_ms": 0.6408984991139732,
+      "min_ms": 0.6336290098261088,
+      "max_ms": 0.6536589935421944,
+      "extra_mib": 8.50146484375
+    },
+    {
+      "name": "reliability",
+      "median_ms": 0.6512240070151165,
+      "min_ms": 0.6354979996103793,
+      "max_ms": 0.9249719878425822,
+      "extra_mib": 8.50146484375
+    },
+    {
+      "name": "cldice",
+      "median_ms": 4.5812660100637,
+      "min_ms": 4.556979998596944,
+      "max_ms": 4.713632006314583,
+      "extra_mib": 3.25537109375
+    },
+    {
+      "name": "lesion_detection",
+      "median_ms": 2.547559000959154,
+      "min_ms": 2.508812991436571,
+      "max_ms": 2.610654992167838,
+      "extra_mib": 6.5029296875
+    },
+    {
+      "name": "skeleton_cpp",
+      "median_ms": 0.9777430022950284,
+      "min_ms": 0.9636030008550733,
+      "max_ms": 0.9905230108415708,
+      "extra_mib": 0.75
+    }
+  ]
+}

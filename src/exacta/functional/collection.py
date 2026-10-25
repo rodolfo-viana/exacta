@@ -8,10 +8,12 @@ from typing import Any
 
 from exacta._inputs import InputFormat, like_input, to_torch, validate
 from exacta.functional import overlap, surface as sf
+from exacta.functional.topology import cldice
 
 MetricSelection = Sequence[str] | Mapping[str, Mapping[str, Any]]
 
 _DEFAULTS: dict[str, dict[str, Any]] = {
+    "cldice": {"both_empty": math.nan},
     "dice": {"both_empty": math.nan},
     "iou": {"both_empty": math.nan},
     "sensitivity": {"zero_division": math.nan},
@@ -64,7 +66,7 @@ def evaluate(
     retained after this call, so subsequent input mutation cannot return stale scores.
     """
     requests = _selection(metrics)
-    counts_names = [n for n, options in requests.items() if "surface" not in options]
+    counts_names = [n for n, options in requests.items() if "surface" not in options and n != "cldice"]
     if counts_names:
         counts, seg = overlap._confusion_counts_and_seg(
             pred, target, input_format, num_classes, include_background,
@@ -76,6 +78,10 @@ def evaluate(
         results = {}
     groups: dict[str, list[tuple[str, Any]]] = {}
     for name, options in requests.items():
+        if name == "cldice":
+            results[name] = cldice(seg.pred, seg.target, input_format=input_format,
+                                   num_classes=num_classes, include_background=include_background, **options)
+            continue
         if name in counts_names:
             continue
         score = _surface_score(name, options, seg.classes)

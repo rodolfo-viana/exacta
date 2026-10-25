@@ -159,3 +159,10 @@ all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in
 the two-GPU tests have not been run on suitable hardware. Gloo checks do not establish NCCL
 correctness or multi-GPU training throughput. Loss configuration and valid input shapes
 must agree across ranks; as with ordinary distributed training, a rank-local error can interrupt its peers.
+
+## Unreleased additions
+
+Development on `feature/advanced-segmentation` adds Focal Tversky, top-k CE, Dice/top-k CE,
+Lovasz-Softmax, boundary, Hausdorff-DT and soft-clDice objectives. These are not in PyPI
+0.0.1a3; see the [versioned development guide](https://github.com/rodolfo-viana/exacta/blob/feature/advanced-segmentation/docs/advanced-segmentation.md)
+for APIs, masking restrictions, empty-mask definitions and measured backend choices.

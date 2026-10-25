@@ -13,6 +13,11 @@ can reproduce each of them through an explicit argument.
 
 Status: early development (v0.0.1a3). Current releases target 3D medical image segmentation.
 
+Unreleased development adds boundary/Hausdorff surrogate, Focal Tversky, Dice/top-k CE,
+Lovasz-Softmax and soft-clDice losses; hard clDice, probability/calibration scores and lesion
+AP/FROC. See the [advanced segmentation guide](docs/advanced-segmentation.md) for APIs,
+definitions and CPU/GPU performance. These additions are not in the PyPI version below.
+
 Documentation: [GitHub Wiki](https://github.com/rodolfo-viana/exacta/wiki) ·
 [versioned sources](https://github.com/rodolfo-viana/exacta/tree/v0.0.1a3/docs/wiki).
 The guides cover installation, a complete quickstart, metrics, losses, mathematical conventions,

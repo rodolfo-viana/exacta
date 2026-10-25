@@ -15,7 +15,7 @@ find_package(OpenMP)
 # and never link against PyTorch, so the wheel does not depend on a specific torch version.
 add_library(exacta_kernels STATIC csrc/cpu/counts.cpp csrc/cpu/edt.cpp csrc/cpu/extents.cpp
             csrc/cpu/label.cpp csrc/cpu/mesh.cpp csrc/cpu/meshing.cpp csrc/cpu/morphology.cpp
-            csrc/cpu/sort.cpp)
+            csrc/cpu/sort.cpp csrc/cpu/skeleton.cpp csrc/cpu/pooling.cpp)
 target_include_directories(exacta_kernels PUBLIC csrc/include)
 set_target_properties(exacta_kernels PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # The kernels reproduce reference expressions to the last bit, so the compiler must round every

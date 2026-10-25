@@ -25,7 +25,7 @@ class _OverlapMetric(PerCaseMetric):
         both_empty: float = math.nan,
     ) -> None:
         super().__init__()
-        self._kwargs = dict(
+        self._kwargs: dict[str, Any] = dict(
             input_format=input_format,
             num_classes=num_classes,
             include_background=include_background,
@@ -46,6 +46,17 @@ class IoU(_OverlapMetric):
     """Intersection over union per case and class; see :func:`exacta.functional.iou`."""
 
     _fn = staticmethod(functional.iou)
+
+
+class ClDice(_OverlapMetric):
+    """Hard centreline Dice per case/class, using C++ Lee skeletonization."""
+
+    _fn = staticmethod(functional.cldice)
+
+    def update(self, pred: Any, target: Any, *, pred_skeleton: Any = None,
+               target_skeleton: Any = None) -> Tensor:
+        return self._record(self._fn(to_torch(pred), to_torch(target), pred_skeleton=pred_skeleton,
+                                     target_skeleton=target_skeleton, **self._kwargs))
 
 
 class _RatioMetric(PerCaseMetric):

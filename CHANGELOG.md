@@ -6,6 +6,19 @@ Release notes for Exacta's alpha versions.
 
 Development toward the next alpha release uses feature branches merged into `main`.
 
+- Add Focal Tversky (including fused CUDA and global distributed reduction), top-k CE,
+  Dice/top-k CE and Lovasz-Softmax losses with explicit exponents, selection and masking.
+- Add boundary and Hausdorff distance-transform surrogate losses using existing C++/Triton
+  EDT kernels, physical spacing and optional precomputed target maps.
+- Add hard clDice with C++ Lee thinning, precomputed skeleton support and collection
+  integration; add differentiable soft-clDice with fused C++ CPU morphology and native PyTorch CUDA pooling.
+- Add Brier, NLL, top-label/classwise ECE and reliability summaries, with case-averaged
+  metrics and pooled calibration bins, including distributed accumulation.
+- Add confidence-ranked lesion AP/FROC with one-to-one matching, grouped confidence
+  ties, missed-lesion accounting and streaming/distributed dataset accumulation.
+- Add independent reference/gradient tests, frozen Lee skeleton fixtures, reproducible
+  CPU/GPU benchmarks and an unreleased guide covering definitions and backend tradeoffs.
+
 - Run source-distribution tests and type checks on all branch pushes and pull requests into
   `main`. Build and test the portable-wheel matrix only for published GitHub Releases.
 - Publish to PyPI only when a GitHub Release is published; branch merges and tag pushes do

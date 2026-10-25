@@ -149,6 +149,44 @@ bool channel_counts(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_con
 }
 
 using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
+
+template <typename T, int (*Kernel)(const T*, T*, int64_t*, const int64_t*, int, int, int)>
+void soft_pool(nb::ndarray<const T, nb::device::cpu, nb::c_contig> input,
+               nb::ndarray<T, nb::device::cpu, nb::c_contig> output,
+               nb::ndarray<int64_t, nb::device::cpu, nb::c_contig> indices, bool erosion, int threads) {
+  if (input.ndim() != output.ndim()) throw std::invalid_argument("pool input/output shapes differ");
+  std::vector<int64_t> shape(input.ndim());
+  if (indices.size() && indices.ndim() != input.ndim()) throw std::invalid_argument("pool index shape differs");
+  for (std::size_t i=0; i<input.ndim(); ++i) {
+    if (input.shape(i) != output.shape(i) || (indices.size() && input.shape(i) != indices.shape(i)))
+      throw std::invalid_argument("pool array shapes differ");
+    shape[i] = static_cast<int64_t>(input.shape(i));
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = Kernel(input.data(), output.data(), indices.size() ? indices.data() : nullptr,
+                     shape.data(), static_cast<int>(shape.size()), erosion, threads);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) throw std::invalid_argument("pool expects (B,C,H,W) or (B,C,D,H,W)");
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
+
+void skeleton(Bytes mask, nb::ndarray<std::uint8_t, nb::device::cpu, nb::c_contig> out) {
+  if (mask.ndim() != out.ndim()) throw std::invalid_argument("mask and out differ in shape");
+  std::vector<std::int64_t> shape(mask.ndim());
+  for (std::size_t i = 0; i < mask.ndim(); ++i) {
+    if (mask.shape(i) != out.shape(i)) throw std::invalid_argument("mask and out differ in shape");
+    shape[i] = static_cast<std::int64_t>(mask.shape(i));
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_skeleton_u8(mask.data(), out.data(), shape.data(), static_cast<int>(shape.size()));
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) throw std::invalid_argument("skeleton requires a 2-D or 3-D mask");
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
 using Indices = nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
 
 void boundary(nb::ndarray<const std::uint8_t, nb::device::cpu> mask,
@@ -537,4 +575,9 @@ NB_MODULE(_C, m) {
   m.def("label", &label, nb::arg("mask"), nb::arg("out"), nb::arg("connectivity"),
         "Write into `out` (int32, same shape) the connected-component labels of `mask` (uint8), "
         "numbered as scipy.ndimage.label numbers them, and return the number of components.");
+  m.def("skeleton", &skeleton, nb::arg("mask"), nb::arg("out"), "Lee thinning of a 2-D or 3-D CPU mask.");
+  m.def("soft_pool", &soft_pool<float, exacta_soft_pool_f32>, nb::arg("input"), nb::arg("out"),
+        nb::arg("indices"), nb::arg("erosion"), nb::arg("num_threads") = 0);
+  m.def("soft_pool", &soft_pool<double, exacta_soft_pool_f64>, nb::arg("input"), nb::arg("out"),
+        nb::arg("indices"), nb::arg("erosion"), nb::arg("num_threads") = 0);
 }

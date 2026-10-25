@@ -1,0 +1,124 @@
+{
+  "exacta": "0.0.1a4.dev0",
+  "torch": "2.14.1+cu130",
+  "cuda": "13.0",
+  "numpy": "2.5.4",
+  "python": "3.14.4",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+  "hardware": "NVIDIA GeForce RTX 5070",
+  "git_revision": "b0cec539ca9e9d4c4cce98f17b42f4f5cc6398f4",
+  "git_dirty": true,
+  "source_sha256": "f63ec46ac0747cfe812d1045720358ef2c68440d870987152ade6cddf871c428",
+  "config": {
+    "device": "cuda",
+    "size": 128,
+    "batch": 1,
+    "classes": 3,
+    "iterations": 10,
+    "threads": 2,
+    "seed": 723,
+    "warmup": 3,
+    "repeat": 10,
+    "compiled": true,
+    "only": [
+      "focal_tversky",
+      "topk_ce",
+      "lovasz",
+      "boundary",
+      "hausdorff_dt"
+    ],
+    "output": "benchmarks/results/advanced-gpu128-2026-10-24.json"
+  },
+  "dtype": "float32",
+  "spacing": [
+    1.0,
+    1.0,
+    2.0
+  ],
+  "rows": [
+    {
+      "name": "focal_tversky_torch",
+      "median_ms": 1.869195002655033,
+      "min_ms": 1.8548640073277056,
+      "max_ms": 1.9655669893836603,
+      "extra_mib": 96.001953125
+    },
+    {
+      "name": "focal_tversky_torch_compiled",
+      "median_ms": 0.5051765037933365,
+      "min_ms": 0.4953169991495088,
+      "max_ms": 0.5190270021557808,
+      "extra_mib": 24.0009765625
+    },
+    {
+      "name": "focal_tversky_auto",
+      "median_ms": 0.7456149978679605,
+      "min_ms": 0.7278400007635355,
+      "max_ms": 0.7834999996703118,
+      "extra_mib": 0.0029296875
+    },
+    {
+      "name": "focal_tversky_auto_compiled",
+      "median_ms": 0.6037879938958213,
+      "min_ms": 0.5935780063737184,
+      "max_ms": 0.6890590011607856,
+      "extra_mib": 48.001953125
+    },
+    {
+      "name": "topk_ce",
+      "median_ms": 0.8051309996517375,
+      "min_ms": 0.8029710006667301,
+      "max_ms": 0.8111100032692775,
+      "extra_mib": 48.0009765625
+    },
+    {
+      "name": "topk_ce_compiled",
+      "median_ms": 0.5407970020314679,
+      "min_ms": 0.5291770066833124,
+      "max_ms": 0.6502279866253957,
+      "extra_mib": 16.0009765625
+    },
+    {
+      "name": "lovasz",
+      "median_ms": 2.958658995339647,
+      "min_ms": 2.944118998129852,
+      "max_ms": 3.058011003304273,
+      "extra_mib": 206.392578125
+    },
+    {
+      "name": "lovasz_compiled",
+      "median_ms": 2.0332519998191856,
+      "min_ms": 2.0171359938103706,
+      "max_ms": 2.042027990682982,
+      "extra_mib": 114.517578125
+    },
+    {
+      "name": "boundary",
+      "median_ms": 5.762752000009641,
+      "min_ms": 5.738565989304334,
+      "max_ms": 5.910537991439924,
+      "extra_mib": 291.24658203125
+    },
+    {
+      "name": "boundary_cached",
+      "median_ms": 1.1788710035034455,
+      "min_ms": 1.164914996479638,
+      "max_ms": 1.1819659994216636,
+      "extra_mib": 72.0009765625
+    },
+    {
+      "name": "hausdorff_dt",
+      "median_ms": 11.553653501323424,
+      "min_ms": 11.49600300414022,
+      "max_ms": 11.713865009369329,
+      "extra_mib": 288.87646484375
+    },
+    {
+      "name": "hausdorff_dt_cached",
+      "median_ms": 7.073723500070628,
+      "min_ms": 7.059383991872892,
+      "max_ms": 7.273467010236345,
+      "extra_mib": 288.87646484375
+    }
+  ]
+}

@@ -88,3 +88,10 @@ metrics.reset()
 
 All ranks must use identical metric order and configuration, and must call `compute()`,
 including ranks without updates. The usual sampler and aggregation rules above still apply.
+
+## Unreleased additions
+
+Development on `feature/advanced-segmentation` adds hard clDice, Brier/NLL, ECE and reliability
+summaries, plus streaming lesion AP/FROC. These are not in PyPI 0.0.1a3; the
+[development guide](https://github.com/rodolfo-viana/exacta/blob/feature/advanced-segmentation/docs/advanced-segmentation.md)
+distinguishes hard/soft skeletons, case/voxel aggregation and confidence matching protocols.

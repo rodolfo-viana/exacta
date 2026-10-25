@@ -11,3 +11,9 @@ src/exacta/functional/_mesh_tables.py: the triangles and segments that VTK's
 vtkDiscreteMarchingCubes and vtkDiscreteFlyingEdges2D produce for each
 configuration of a 2x2(x2) block of voxels. Copyright Ken Martin, Will
 Schroeder, Bill Lorensen, licensed under the BSD 3-Clause License.
+
+This product includes Lee skeletonization tables and deletion order adapted
+from scikit-image's _skeletonize_lee_cy.pyx.in, in csrc/cpu/skeleton.cpp.
+Copyright 2009-2022 the scikit-image team; original implementation by
+Ignacio Arganda-Carreras based on Hanno Homann. See THIRD_PARTY_LICENSES
+for the BSD 3-Clause terms and attribution.

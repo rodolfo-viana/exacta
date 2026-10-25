@@ -11,8 +11,14 @@ from exacta.functional.overlap import (
 )
 from exacta.functional.surface import assd, hausdorff_distance, hd95, nsd
 from exacta.functional.collection import evaluate
+from exacta.functional.topology import cldice, skeletonize
+from exacta.functional.calibration import (
+    ReliabilityDiagram, brier_score, negative_log_likelihood, expected_calibration_error, reliability_diagram,
+)
 
 __all__ = [
+    "cldice", "skeletonize", "ReliabilityDiagram", "brier_score", "negative_log_likelihood",
+    "expected_calibration_error", "reliability_diagram",
     "assd",
     "dice",
     "evaluate",

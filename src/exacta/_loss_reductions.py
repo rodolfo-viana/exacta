@@ -11,6 +11,14 @@ WeightType = Literal["square", "simple", "uniform"]
 EmptyTarget = Literal["zero", "uniform"]
 
 
+def overlap_power(error: Tensor, power: float) -> Tensor:
+    """Power with a zero derivative at the exact-zero endpoint."""
+    if power == 1:
+        return error
+    zero = error == 0
+    return torch.where(zero, 0, torch.where(zero, 1, error).pow(power))
+
+
 def masked_overlap_terms(
     numerator: Tensor, denominator: Tensor, valid_counts: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor]:

@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from exacta import _triton_losses
+from exacta import _triton_losses, _loss_reductions
 from exacta._distributed import sum_ranks
 from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms, masked_overlap_terms
 
@@ -70,6 +70,9 @@ class _OverlapLoss(nn.Module):
     def _generalized_config(self) -> tuple[WeightType, EmptyTarget] | None:
         return None
 
+    def _overlap_power(self) -> float:
+        return 1.0
+
     def forward(self, input: Tensor, target: Tensor, *, mask: Tensor | None = None) -> Tensor:
         mask = _check_mask(mask, input)
         if _use_triton(self.backend, input, target, allow_empty=self.distributed):
@@ -106,7 +109,8 @@ class _OverlapLoss(nn.Module):
             if self.distributed:
                 intersection, fp, fn, valid_counts = _global_overlap(intersection, fp, fn, valid_counts, input)
             return _overlap_mean(intersection + self.smooth,
-                                 intersection + alpha * fp + beta * fn + self.smooth, valid_counts).to(input.dtype)
+                                 intersection + alpha * fp + beta * fn + self.smooth, valid_counts,
+                                 power=self._overlap_power()).to(input.dtype)
         prediction, truth = probs.sum(dims), onehot.sum(dims)
         if self.distributed:
             intersection, prediction, truth, valid_counts = _global_overlap(
@@ -149,6 +153,7 @@ class _OverlapLoss(nn.Module):
             ignore_index=self.ignore_index,
             class_weight=class_weight, focal=focal,
             distributed=self.distributed,
+            overlap_power=self._overlap_power(),
         )
 
 
@@ -213,6 +218,32 @@ class TverskyLoss(_OverlapLoss):
 
     def _tversky_weights(self) -> tuple[float, float]:
         return self.alpha, self.beta
+
+
+class FocalTverskyLoss(TverskyLoss):
+    """Mean of ``(1 - TverskyIndex)**gamma`` over selected cases/classes.
+
+    ``gamma`` is the actual exponent (default 0.75, as in the authors' code),
+    not its reciprocal. ``gamma=1`` equals TverskyLoss, including its gradient.
+    For gamma != 1, an exactly perfect prediction has zero gradient, including
+    the otherwise singular endpoint when gamma < 1.
+    All other options, masking and distributed reduction follow TverskyLoss.
+    """
+
+    def __init__(self, *, gamma: float = 0.75, alpha: float = 0.3, beta: float = 0.7,
+                 activation: Activation = "softmax", target_format: TargetFormat = "index",
+                 include_background: bool = True, batch_dice: bool = False,
+                 distributed: bool = False, smooth: float = 1e-5,
+                 ignore_index: int | None = None, backend: Backend = "auto") -> None:
+        super().__init__(alpha=alpha, beta=beta, activation=activation, target_format=target_format,
+                         include_background=include_background, batch_dice=batch_dice,
+                         distributed=distributed, smooth=smooth, ignore_index=ignore_index, backend=backend)
+        if not math.isfinite(gamma) or gamma <= 0:
+            raise ValueError("gamma must be finite and positive")
+        self.gamma = gamma
+
+    def _overlap_power(self) -> float:
+        return self.gamma
 
 
 class GeneralizedDiceLoss(_OverlapLoss):
@@ -527,11 +558,14 @@ def _class_weight(value: Tensor | Sequence[float] | None) -> Tensor | None:
     return weight
 
 
-def _overlap_mean(numerator: Tensor, denominator: Tensor, valid_counts: Tensor | None) -> Tensor:
+def _overlap_mean(numerator: Tensor, denominator: Tensor, valid_counts: Tensor | None,
+                  *, power: float = 1.0) -> Tensor:
     if valid_counts is None:
-        return 1 - (numerator / denominator).mean()
+        if power == 1:
+            return 1 - (numerator / denominator).mean()
+        return _loss_reductions.overlap_power(1 - numerator / denominator, power).mean()
     numerator, denominator, scale = masked_overlap_terms(numerator, denominator, valid_counts)
-    return ((1 - numerator / denominator) * scale).sum()
+    return (_loss_reductions.overlap_power(1 - numerator / denominator, power) * scale).sum()
 
 
 def _global_overlap(

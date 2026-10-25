@@ -22,6 +22,22 @@ enum exacta_status {
 
 const char *exacta_status_string(int status);
 
+/* Lee thinning of a 2-D or 3-D binary image, with zero exterior padding.
+ * Writes a 0/1 skeleton into `out` (same shape); nonzero inputs are foreground.
+ * Deletion order matches scikit-image's method="lee". Input and output may alias.
+ */
+int exacta_skeleton_u8(const uint8_t *mask, uint8_t *out, const int64_t *shape, int ndim);
+
+/* Soft morphology on (B,C,H,W) or (B,C,D,H,W): erosion=1 uses cross min,
+ * erosion=0 uses full 3x3[x3] max. The image exterior is excluded. `indices`
+ * may be null; otherwise write flattened source indices for backward. Ties
+ * select the first visited neighbour. Input and output must not alias.
+ */
+int exacta_soft_pool_f32(const float *x, float *out, int64_t *indices,
+                         const int64_t *shape, int ndim, int erosion, int num_threads);
+int exacta_soft_pool_f64(const double *x, double *out, int64_t *indices,
+                         const int64_t *shape, int ndim, int erosion, int num_threads);
+
 /* Exact squared Euclidean distance transform.
  *
  * The first `batch_ndim` axes of the `ndim`-dimensional array described by `shape` index

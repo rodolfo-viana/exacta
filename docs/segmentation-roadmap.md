@@ -21,7 +21,7 @@ problem-dependent approach in [Metrics Reloaded](https://doi.org/10.1038/s41592-
 | Individual lesions | Matching, lesion F1, SQ/PQ, lesion Dice/HD95 and BraTS 2023 conventions |
 | Training baseline | Dice, Dice plus CE/BCE, Tversky and focal losses |
 | Class-volume imbalance | Generalized Dice, with inverse-square, inverse-volume and uniform weighting |
-| Partial annotations | Ignored labels and boolean voxel masks in all segmentation losses, including fused GPU paths |
+| Partial annotations | Ignored labels and boolean voxel masks in overlap/pointwise losses, including fused GPU paths; geometry/topology requires complete labels |
 
 Generalized Dice follows [Sudre et al. (2017)](https://arxiv.org/abs/1707.03237).
 Its default absent-class weighting follows MONAI, while an explicit empty-target option
@@ -59,10 +59,11 @@ Development CI tests installed sdists; release jobs build and test portable Linu
 merge into `main`; GitHub Releases select tagged snapshots for publication. GPU performance and multi-GPU transport need their own
 hardware measurements; CPU CI cannot establish either.
 
-## Task-dependent extensions
+## Task-dependent extensions (implemented, unreleased)
 
-Specialized additions should have a concrete evaluation use case and a reference definition.
-They are useful candidates, but are not prerequisites for ordinary tissue or tumor segmentation.
+The specialized additions below are implemented on `feature/advanced-segmentation`, with
+explicit definitions, tests and benchmarks. They are not in PyPI 0.0.1a3. See the
+[advanced guide](advanced-segmentation.md) and [measurements](advanced-performance.md).
 
 | Addition | Use case and implementation concern |
 |---|---|
@@ -71,6 +72,9 @@ They are useful candidates, but are not prerequisites for ordinary tissue or tum
 | clDice and soft-clDice | Vessels or other tubular structures; skeletonization and topology conventions need separate validation. See [Shit et al.](https://arxiv.org/abs/2003.07311). |
 | Lesion sensitivity versus false positives per scan | Detection operating curves require confidence-bearing lesion predictions and threshold/matching rules beyond a single hard mask. |
 | Brier score and calibration summaries | Probabilistic segmentation assessment; specify voxel/case/class weighting so large background regions do not dominate silently. |
+| Focal Tversky | Reuse overlap kernels, apply the actual exponent before averaging, define the exact-zero derivative. |
+| Top-k CE / Dice plus top-k CE | Select only valid voxels using native CPU/CUDA top-k; report the selection fraction and rounding rule. |
+| Lovasz-Softmax | Native CPU/CUDA stable sorting, present/all classes and local-batch/per-image conventions. |
 
 ## Performance acceptance
 

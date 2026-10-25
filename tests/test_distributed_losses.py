@@ -11,10 +11,10 @@ from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from exacta.losses import (
-    DiceLoss, TverskyLoss, GeneralizedDiceLoss, FocalLoss, DiceCELoss, GeneralizedDiceCELoss, DiceFocalLoss,
+    DiceLoss, TverskyLoss, FocalTverskyLoss, GeneralizedDiceLoss, FocalLoss, DiceCELoss, GeneralizedDiceCELoss, DiceFocalLoss,
 )
 
-CLASSES = [DiceLoss, TverskyLoss, GeneralizedDiceLoss, FocalLoss, DiceCELoss, GeneralizedDiceCELoss, DiceFocalLoss]
+CLASSES = [DiceLoss, TverskyLoss, FocalTverskyLoss, GeneralizedDiceLoss, FocalLoss, DiceCELoss, GeneralizedDiceCELoss, DiceFocalLoss]
 
 
 class Affine(nn.Module):
