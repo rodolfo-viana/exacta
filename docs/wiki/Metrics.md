@@ -7,17 +7,23 @@ does not describe lesion detection or boundary errors.
 
 | Functional name | Stateful class | Definition |
 |---|---|---|
-| `dice` | `Dice` | `2 TP / (2 TP + FP + FN)` |
-| `iou` | `IoU` | `TP / (TP + FP + FN)` |
-| `sensitivity` | `Sensitivity` | `TP / (TP + FN)` |
-| `precision` | `Precision` | `TP / (TP + FP)` |
-| `specificity` | `Specificity` | `TN / (TN + FP)` |
-| `volume_similarity` | `VolumeSimilarity` | Default: `1 - abs(Vp - Vt)/(Vp + Vt)` |
-| `relative_volume_difference` | `RelativeVolumeDifference` | `(Vp - Vt)/Vt`; `absolute=True` removes the sign |
+| `dice` | `Dice` | $2\mathrm{TP}/(2\mathrm{TP}+\mathrm{FP}+\mathrm{FN})$ |
+| `iou` | `IoU` | $\mathrm{TP}/(\mathrm{TP}+\mathrm{FP}+\mathrm{FN})$ |
+| `sensitivity` | `Sensitivity` | $\mathrm{TP}/(\mathrm{TP}+\mathrm{FN})$ |
+| `precision` | `Precision` | $\mathrm{TP}/(\mathrm{TP}+\mathrm{FP})$ |
+| `specificity` | `Specificity` | $\mathrm{TN}/(\mathrm{TN}+\mathrm{FP})$ |
+| `volume_similarity` | `VolumeSimilarity` | Default: $1-\lvert V_P-V_T\rvert/(V_P+V_T)$ |
+| `relative_volume_difference` | `RelativeVolumeDifference` | $(V_P-V_T)/V_T$; `absolute=True` removes the sign |
 | `hausdorff_distance` | `HausdorffDistance` | Percentile boundary distance; default percentile 100 |
 | `hd95` | `HD95` | 95th-percentile boundary distance |
 | `assd` | `ASSD` | Average symmetric boundary distance |
 | `nsd` | `NSD` | Fraction of both surfaces within the supplied tolerance |
+
+For each case and class, TP, FP, FN and TN count true-positive, false-positive,
+false-negative and true-negative voxels. $V_P$ and $V_T$ are predicted and target foreground
+voxel counts. The formulas apply when their denominators are nonzero; empty-mask and
+zero-denominator policies are specified in
+[Conventions](https://github.com/rodolfo-viana/exacta/wiki/Conventions).
 
 Inputs use class indices `(B, *spatial)` with `num_classes`, or binary masks `(B, C, *spatial)`
 with `input_format="one-hot"`. `include_background=False` omits channel/class zero.
@@ -92,6 +98,6 @@ including ranks without updates. The usual sampler and aggregation rules above s
 ## Unreleased additions
 
 Development on `feature/advanced-segmentation` adds hard clDice, Brier/NLL, ECE and reliability
-summaries, plus streaming lesion AP/FROC. These are not in PyPI 0.0.1a3; the
-[development guide](https://github.com/rodolfo-viana/exacta/blob/feature/advanced-segmentation/docs/advanced-segmentation.md)
-distinguishes hard/soft skeletons, case/voxel aggregation and confidence matching protocols.
+summaries, plus streaming lesion AP/FROC. These are not in PyPI 0.0.1a3. Their docstrings in the
+[feature source](https://github.com/rodolfo-viana/exacta/tree/feature/advanced-segmentation/src/exacta)
+describe hard/soft skeletons, case/voxel aggregation and confidence matching protocols.

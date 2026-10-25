@@ -24,6 +24,17 @@ test = ["pytest>=8", "hypothesis>=6", "numpy>=1.22", "scipy>=1.10", "setuptools>
 [tool.scikit-build]
 minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"
+# Only runtime Python files and CMake's installed extension belong in the wheel.
+wheel.packages = ["src/exacta"]
+wheel.exclude = ["**/*.json", "**/*.jsonl"]
+# Build source archives from an allowlist, independent of local development files.
+sdist.exclude = ["*"]
+sdist.include = [
+    "/pyproject.toml", "/CMakeLists.txt", "/README.md",
+    "/LICENSE", "/NOTICE", "/THIRD_PARTY_LICENSES",
+    "/src/exacta/**/*.py", "/src/exacta/py.typed",
+    "/csrc/**/*.cpp", "/csrc/include/exacta/*.h",
+]
 # The extension uses the stable ABI, so one wheel per platform serves every Python >= 3.12.
 wheel.py-api = "cp312"
 metadata.version.provider = "scikit_build_core.metadata.regex"

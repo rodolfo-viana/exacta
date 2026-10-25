@@ -6,6 +6,10 @@ Release notes for Exacta's alpha versions.
 
 Development toward the next alpha release uses feature branches merged into `main`.
 
+- Restrict distributions to package/build files and licenses; keep documentation drafts,
+  plans and measurement outputs local, and limit the README to the PyPI package description.
+  Keep Wiki pages, the changelog, benchmark scripts and JSON reference fixtures in the
+  repository; development and test files are excluded from package distributions.
 - Add Focal Tversky (including fused CUDA and global distributed reduction), top-k CE,
   Dice/top-k CE and Lovasz-Softmax losses with explicit exponents, selection and masking.
 - Add boundary and Hausdorff distance-transform surrogate losses using existing C++/Triton

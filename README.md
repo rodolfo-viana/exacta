@@ -13,19 +13,13 @@ can reproduce each of them through an explicit argument.
 
 Status: early development (v0.0.1a3). Current releases target 3D medical image segmentation.
 
-Unreleased development adds boundary/Hausdorff surrogate, Focal Tversky, Dice/top-k CE,
-Lovasz-Softmax and soft-clDice losses; hard clDice, probability/calibration scores and lesion
-AP/FROC. See the [advanced segmentation guide](docs/advanced-segmentation.md) for APIs,
-definitions and CPU/GPU performance. These additions are not in the PyPI version below.
-
-Documentation: [GitHub Wiki](https://github.com/rodolfo-viana/exacta/wiki) ·
-[versioned sources](https://github.com/rodolfo-viana/exacta/tree/v0.0.1a3/docs/wiki).
+Documentation: [GitHub Wiki](https://github.com/rodolfo-viana/exacta/wiki).
 The guides cover installation, a complete quickstart, metrics, losses, mathematical conventions,
 lesion evaluation and performance for this release.
 
 ## Installation
 
-Install the alpha from PyPI with Python 3.10 or newer:
+Exacta requires Python 3.10+, PyTorch 2.4+ and NumPy 1.22+. Install the alpha from PyPI:
 
 ```bash
 python -m pip install exacta==0.0.1a3
@@ -240,164 +234,27 @@ Version `0.0.1a3` adds these APIs:
 
 See the Wiki's [metrics](https://github.com/rodolfo-viana/exacta/wiki/Metrics) and
 [losses](https://github.com/rodolfo-viana/exacta/wiki/Losses) guides for examples, reduction
-definitions and distributed participation requirements. Run
-`python -m pytest tests/test_collection.py tests/test_deep_supervision.py tests/test_composed_losses.py tests/test_distributed_losses.py`
-to exercise these additions. CPU and single-GPU CUDA validation includes two Gloo ranks.
+definitions and distributed participation requirements. CPU and single-GPU CUDA validation
+includes two Gloo ranks.
 **The multi-GPU NCCL path is experimental and unverified in this release:** the two-GPU
 tests have not been run on suitable hardware. Gloo checks do not establish NCCL correctness
 or multi-GPU training throughput.
 
-## Architecture
+## Backends and performance
 
-- Compiled CPU kernels (`csrc/`), multithreaded with OpenMP, for every pass over the voxels that
-  dominates a metric: the exact Euclidean distance transform behind HD95, ASSD and NSD; surface
-  extraction (boundary voxels, neighbour codes, the marching-cubes mesh) and point-to-mesh
-  distances; the voxel counts of the overlap metrics, in one pass that also checks the values;
-  connected-component labelling and the label statistics behind `largest`, `remove_small` and
-  lesion matching; dilation; and the sort behind area-weighted percentiles. They sit behind a
-  plain C interface and receive arrays through DLPack, so the extension never links against
-  PyTorch and one wheel works across PyTorch versions. They are built without fused
-  multiply-adds, which would round reference expressions differently.
-- GPU kernels in Triton, compiled at run time without the CUDA toolkit.
-  `backend="auto"` (the default everywhere) picks them on GPU; `backend="torch"`
-  remains as a fallback.
-  - The distance transform runs the same algorithm as the CPU kernel and gives the same values,
-    bit for bit. Labelling gives the same labels as the CPU kernel and SciPy.
-  - The overlap metrics count voxels in per-block histograms, checking the values as they go.
-  - Dice, Dice-plus-CE, Tversky, generalized Dice and focal losses fuse voxel operations in forward and backward,
-    retaining the inputs and small reduction statistics instead of full-volume activations or
-    one-hot intermediates. They work under `torch.compile` without graph breaks. CPU losses
-    use PyTorch's compiled operators and autograd; `torch.compile` can fuse them further.
-- PyTorch for the glue between kernels, the CPU path of the losses, and the fallbacks.
+Exacta uses compiled C++ CPU kernels for metric operations and Triton for supported CUDA
+paths. Training losses use native PyTorch on CPU and fused Triton kernels on supported CUDA
+inputs. The CPU extension is independent of the PyTorch binary version. GPU kernels compile
+at runtime; their first invocation can include compilation overhead.
 
-## Benchmarks
-
-AMD Ryzen 9 5900XT (16 cores), NVIDIA RTX 5070, PyTorch 2.14.1, CUDA 13.0. Times are in
-milliseconds. Metric timings use the median of 5 runs (one run for anything slower than 5 s).
-Reproduce them with `python benchmarks/bench_metrics.py --sizes 128 256` (add `--only exacta`
-to skip the slow references). Loss measurements and commands are described below.
-
-### Metrics
-
-One synthetic 3-D prediction/target pair with 4 classes, spacing 1.5 × 0.8 × 0.8 mm. The
-references run on CPU (MONAI's GPU path needs cuCIM, which is not installed here).
-
-| Metric | Volume | exacta CPU | exacta GPU | MONAI | Other reference |
-|---|---|---:|---:|---:|---|
-| Dice | 128³ | 0.5 | 0.3 | | NumPy 10.0 |
-| | 256³ | 7.0 | 0.7 | | NumPy 84 |
-| HD95 | 128³ | 46 | 12 | 711 | SciPy EDT 2,607 |
-| | 256³ | 529 | 86 | 9,600 | SciPy EDT 18,486 |
-| NSD, voxels | 128³ | 43 | 11 | 697 | |
-| | 256³ | 525 | 87 | 9,548 | |
-| NSD, surfels | 128³ | 63 | 13 | 1,547 | DeepMind 1,600 |
-| | 256³ | 653 | 96 | 29,869 | DeepMind 12,580 |
-| HD95, mesh | 128³ | 253 | | | MeshMetrics 17,484 |
-| | 256³ | 1,954 | | | MeshMetrics 190,634 |
-| Connected components, 26-conn. | 128³ | 0.5 | 0.5 | | SciPy 14.8 |
-| | 256³ | 6.0 | 3.4 | | SciPy 109 |
-| Largest component, 26-conn. | 128³ | 1.5 | 0.9 | 21.2 | |
-| | 256³ | 11.0 | 5.2 | 159 | |
-| BraTS 2023 lesion-wise, 3 regions | 240×240×155 | 24 | 31 | | BraTS-2023-Metrics 7,700 |
-
-"SciPy EDT" is exacta's test reference (`tests/reference.py`): the textbook implementation on
-`scipy.ndimage.distance_transform_edt`. exacta's plain-PyTorch GPU fallback (`backend="torch"`)
-takes 3,090 ms for HD95 at 256³. Mesh distances run on the CPU, also for CUDA inputs. The fastest
-CPU kernels spend much of their time writing fresh output memory, so their times depend on how
-quickly the operating system supplies it: labelling at 256³ takes 6-13 ms from run to run. The BraTS
-row scores the regions WT, TC and ET of one synthetic case from the lesion test fixtures' generator
-(`tests/fixtures/make_lesion_cases.py`); BraTS-2023-Metrics needs an environment of its own (see
-below) and was timed there, on the same case.
-
-### Losses
-
-The current benchmark uses identical seeded inputs for eager PyTorch, `torch.compile` over
-`backend="torch"`, and fused Triton. Compilation and 5 warm-up steps are excluded; results are
-medians of 20 forward-plus-backward steps with synchronization. Default loss arguments,
-softmax activation, integer targets, float32 logits of shape `2×4×128³`, RTX 5070:
-
-| Loss | PyTorch (ms) | Compiled PyTorch (ms) | Triton (ms) | Extra MiB: PyTorch / compiled / Triton |
-|---|---:|---:|---:|---:|
-| Dice + CE | 5.643 | 3.105 | 0.847 | 320 / 144 / <0.1 |
-| Tversky | 6.980 | 1.918 | 0.818 | 256 / 80 / <0.1 |
-| Focal | 8.628 | 2.056 | 0.614 | 560 / 128 / <0.1 |
-| Generalized Dice | 4.184 | 3.521 | 0.938 | 256 / 128 / <0.1 |
-
-Extra memory is the peak allocation during the step beyond its inputs and logits' gradient;
-small scratch buffers can fit below that baseline. These are local synthetic measurements,
-not end-to-end training speedups. CPU measurements on the same system, with 16 threads and
-`2×4×64³` float32 logits, use the same seed, warm-up and repeat count:
-
-| Loss | PyTorch (ms) | Compiled PyTorch (ms) |
-|---|---:|---:|
-| Dice + CE | 15.746 | 10.248 |
-| Tversky | 13.157 | 9.574 |
-| Focal | 30.743 | 6.378 |
-| Generalized Dice | 10.541 | 4.985 |
-
-Reproduce these tables with:
-
-```bash
-python benchmarks/bench_losses.py --classes 4 --sizes 128 --dtypes float32 --repeat 20 --warmup 5 --seed 0
-python benchmarks/bench_losses.py --device cpu --classes 4 --sizes 64 --dtypes float32 \
-    --backends torch compiled --threads 16 --repeat 20 --warmup 5 --seed 0
-```
-
-The earlier Dice-plus-CE scaling measurements below use the median of 10 warmed-up GPU steps,
-integer targets and the same peak-memory definition. The benchmark also supports bfloat16,
-float64, sigmoid activation and other batch, class and volume sizes.
-
-| Logits | dtype | PyTorch time | PyTorch extra memory | Fused time | Fused extra memory |
-|---|---|---:|---:|---:|---:|
-| 2×4×128³ | float32 | 5.6 | 320 MiB | 0.8 | 0 |
-| 2×4×160³ | float32 | 11.0 | 629 MiB | 1.2 | 1 MiB |
-| 2×14×128³ | float32 | 21.3 | 1,120 MiB | 1.6 | 0 |
-| 2×14×160³ | float32 | 41.9 | 2,191 MiB | 3.0 | 1 MiB |
-| 2×4×128³ | bfloat16 | 6.1 | 320 MiB | 0.7 | 0 |
-| 2×4×160³ | bfloat16 | 12.0 | 629 MiB | 0.9 | 0 |
-| 2×14×128³ | bfloat16 | 23.1 | 1,120 MiB | 1.2 | 0 |
-| 2×14×160³ | bfloat16 | 45.4 | 2,190 MiB | 2.1 | 0 |
-
-## Development
-
-Feature work uses short-lived branches merged into `main`. Releases are tagged snapshots;
-`main` can include newer work. The development version is `0.0.1a4.dev0`; the public release
-documented above is `0.0.1a3`. See the
-[segmentation roadmap](docs/segmentation-roadmap.md) for priorities.
-
-```bash
-python -m venv ~/.venvs/exacta && source ~/.venvs/exacta/bin/activate
-pip install torch scikit-build-core nanobind cmake ninja
-pip install --no-build-isolation -e ".[test]"   # re-run after editing csrc/
-pytest
-python benchmarks/bench_metrics.py
-python benchmarks/bench_losses.py
-```
-
-Reference tests against MONAI, MedPy, DeepMind's surface-distance, MeshMetrics, VTK and
-SimpleITK are skipped unless those packages are installed:
-
-```bash
-pip install monai medpy scikit-image vtk SimpleITK \
-    "git+https://github.com/google-deepmind/surface-distance.git" \
-    "git+https://github.com/gasperpodobnik/MeshMetrics.git"
-```
-
-Lesion-wise evaluation is tested against fixtures produced by Panoptica 2.1.7 and by the BraTS
-2023 evaluation code, which need environments of their own (old NumPy and pandas).
-`tests/fixtures/regenerate.sh` rebuilds those environments with `uv`, reruns both tools and
-reports whether their results changed (set `PANOPTICA_VERSION` or `BRATS_COMMIT` to try other
-releases).
-
-Array-library round-trip tests run for NumPy, and for CuPy and JAX when installed:
-`python -m pytest tests/test_inputs.py -k round_trip`. Distributed tests exercise ranks without
-updates using Gloo; their NCCL variants require two GPUs and are skipped otherwise.
-
-Loss checks include independent NumPy formulas, MONAI comparisons with explicit reduction
-adjustments, float64 finite-difference gradient checks, higher-order PyTorch gradients,
-CPU/GPU agreement, mixed precision, extreme logits and full-graph compilation:
-`python -m pytest tests/test_losses.py tests/test_weighted_losses.py tests/test_generalized_dice.py tests/test_masked_losses.py`.
+Mesh distances run on CPU, including for CUDA inputs. Measure device transfers and startup
+costs when choosing a backend for your workload. Performance depends on volume size, class
+count, dtype and hardware. The Wiki's
+[performance guide](https://github.com/rodolfo-viana/exacta/wiki/Performance) contains measured
+CPU/GPU results, memory usage and backend guidance.
 
 ## License
 
-Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0; see the [license](https://github.com/rodolfo-viana/exacta/blob/main/LICENSE),
+[notices](https://github.com/rodolfo-viana/exacta/blob/main/NOTICE) and
+[third-party licenses](https://github.com/rodolfo-viana/exacta/blob/main/THIRD_PARTY_LICENSES).

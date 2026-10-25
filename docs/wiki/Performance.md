@@ -10,10 +10,14 @@ including when input arrays reside on CUDA. Cross-device conversion costs matter
 
 ## Reproducing measurements
 
-Run benchmarks from a source checkout. Inputs are seeded, compilation is warmed up, and GPU
-steps synchronize around timing. These commands measure forward plus backward:
+The benchmark scripts used for these published measurements remain available in the
+`v0.0.1a3` source snapshot. Inputs are seeded, compilation is warmed up, and GPU steps
+synchronize around timing. Clone that snapshot before running the commands below:
 
 ```bash
+git clone --branch v0.0.1a3 https://github.com/rodolfo-viana/exacta.git exacta-benchmarks
+cd exacta-benchmarks
+python -m pip install -e ".[test]"
 python benchmarks/bench_losses.py --classes 4 --sizes 128 --dtypes float32 \
   --repeat 20 --warmup 5 --seed 0 --threads 16
 python benchmarks/bench_losses.py --device cpu --classes 4 --sizes 64 --dtypes float32 \

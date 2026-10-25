@@ -23,6 +23,40 @@ the local batch before division. The explicit global option is documented below.
 `include_background=False` excludes channel zero from overlap only. CE/BCE and focal include
 all channels.
 
+## Overlap equations
+
+For one case and selected class, let $p_i$ be the activated prediction and $g_i$ the target
+at included voxel $i$. With smoothing $s$, the soft overlap statistics are:
+
+$$
+\mathrm{TP}=\sum_i p_i g_i,\qquad
+\mathrm{FP}=\sum_i p_i(1-g_i),\qquad
+\mathrm{FN}=\sum_i (1-p_i)g_i.
+$$
+
+Dice and Tversky use these ratios before averaging over cases and selected classes:
+
+$$
+\mathcal{L}_{\mathrm{Dice}}
+=1-\frac{2\sum_i p_i g_i+s}{\sum_i p_i+\sum_i g_i+s},\qquad
+\mathcal{L}_{\mathrm{Tversky}}
+=1-\frac{\mathrm{TP}+s}{\mathrm{TP}+\alpha\mathrm{FP}+\beta\mathrm{FN}+s}.
+$$
+
+Generalized Dice instead takes a single class-weighted ratio per case, where $c$ ranges
+over selected classes:
+
+$$
+\mathcal{L}_{\mathrm{GDice}}
+=1-\frac{2\sum_c w_c\sum_i p_{ic}g_{ic}+s}
+{\sum_c w_c\sum_i(p_{ic}+g_{ic})+s}.
+$$
+
+For present target classes, `weight_type="square"` sets $w_c=(\sum_i g_{ic})^{-2}$;
+`"simple"` uses the inverse volume and `"uniform"` uses one. The absent-class rules below
+handle zero volumes. `batch_dice=True` includes the batch axis in the sums before taking
+the ratio. Smoothing is added once per ratio, after weighting for generalized Dice.
+
 ## Important parameters
 
 Definitions differ across libraries, so select parameters intentionally:
@@ -164,5 +198,6 @@ must agree across ranks; as with ordinary distributed training, a rank-local err
 
 Development on `feature/advanced-segmentation` adds Focal Tversky, top-k CE, Dice/top-k CE,
 Lovasz-Softmax, boundary, Hausdorff-DT and soft-clDice objectives. These are not in PyPI
-0.0.1a3; see the [versioned development guide](https://github.com/rodolfo-viana/exacta/blob/feature/advanced-segmentation/docs/advanced-segmentation.md)
-for APIs, masking restrictions, empty-mask definitions and measured backend choices.
+0.0.1a3. The loss docstrings in the
+[feature source](https://github.com/rodolfo-viana/exacta/tree/feature/advanced-segmentation/src/exacta/losses)
+describe their APIs, masking restrictions and empty-mask definitions.

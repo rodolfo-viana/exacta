@@ -7,3 +7,16 @@ dist/
 .pytest_cache/
 .hypothesis/
 .venv/
+.mypy_cache/
+
+# Local notes and measurements; keep the public Wiki sources.
+/docs/*
+!/docs/wiki/
+/local/
+/wheelhouse/
+*.json
+*.md
+!README.md
+!CHANGELOG.md
+!/docs/wiki/*.md
+!tests/fixtures/*.json
