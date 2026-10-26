@@ -6,6 +6,7 @@ from datetime import timedelta
 import pytest
 import torch
 import torch.distributed as dist
+from _process import destroy_process_group
 import torch.multiprocessing as mp
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -98,7 +99,7 @@ def _worker(rank, rendezvous, device, transport):
         torch.testing.assert_close(ax / 2, gx[selected], rtol=1e-10, atol=1e-12)
         torch.testing.assert_close(ay / 2, gy[selected], rtol=1e-10, atol=1e-12)
     finally:
-        dist.destroy_process_group()
+        destroy_process_group()
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

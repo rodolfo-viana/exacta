@@ -5,7 +5,7 @@ Release notes for Exacta's alpha versions.
 ## Unreleased
 
 Segmentation evaluation now supports selected voxels, independent probability channels,
-physical volumes and voxel rankings, alongside two additional training objectives.
+physical areas/volumes and voxel rankings, alongside two additional training objectives.
 
 - Add boolean voxel masks and index-target `ignore_index` to Dice, IoU, sensitivity,
   precision, specificity, volume similarity and relative volume difference, including
@@ -21,6 +21,13 @@ physical volumes and voxel rankings, alongside two additional training objective
   absolute gaps; existing binary/multiclass defaults retain their definitions.
 - Add predicted/target 3D physical volume and signed/absolute error in mm³ or mL, including
   per-case spacing, stateful wrappers and shared collections. Unobserved domains give NaN.
+- Add predicted/target 2D physical area and signed/absolute error in mm² or cm², reusing
+  accelerated counts with masks, per-case spacing, stateful wrappers and shared collections.
+- Preserve float64 results and int64 labels when converting to JAX under its default 32-bit
+  configuration, without changing the caller's configuration. Validate shared spacing even
+  for empty batches.
+- Document binary, categorical and overlapping-label 2D medical segmentation, physical pixel
+  spacing, partial annotation and patient-versus-slice aggregation.
 - Add voxel PR/ROC curves, AP and AUROC with grouped ties and exact or approximate binned
   evaluation. Separate case-averaged metrics from dataset-pooled `VoxelRanking`; binned
   streaming retains fixed-size int64 histograms, including distributed accumulation.
@@ -28,6 +35,9 @@ physical volumes and voxel rankings, alongside two additional training objective
   soft targets, masked observations and global distributed Dice/CE statistics.
 - Add binary/multilabel `LovaszHingeLoss` with stable native PyTorch sorting, explicit
   per-image/local-batch reductions, ignored labels and per-label observation masks.
+- Prevent the older PyTorch Gloo teardown deadlock in distributed tests by preserving the
+  backend through outer group destruction; add a repeated-collective regression. Document
+  PyTorch 2.8+ for distributed Gloo use; metric execution gains no synchronization overhead.
 - Report test skip reasons and generate only applicable test parameter combinations;
   retain hardware and optional-reference skips as explicit coverage limitations.
 

@@ -3,6 +3,7 @@
 - [Home](https://github.com/rodolfo-viana/exacta/wiki)
 - [Installation](https://github.com/rodolfo-viana/exacta/wiki/Installation)
 - [Quickstart](https://github.com/rodolfo-viana/exacta/wiki/Quickstart)
+- [2D medical segmentation](https://github.com/rodolfo-viana/exacta/wiki/Medical-segmentation-2D)
 - [Metrics](https://github.com/rodolfo-viana/exacta/wiki/Metrics)
 - [Losses](https://github.com/rodolfo-viana/exacta/wiki/Losses)
 - [Advanced segmentation](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation)

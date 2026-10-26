@@ -11,6 +11,7 @@ from exacta import functional
 from exacta._inputs import InputFormat, to_torch
 from exacta.functional.surface import Backend, Combine, Surface
 from exacta.functional.overlap import _check_ignore_index
+from exacta.functional.area import AreaUnit
 from exacta.functional.volume import VolumeUnit
 from exacta.metrics.base import PerCaseMetric
 
@@ -174,24 +175,65 @@ class RelativeVolumeDifference(_RatioMetric):
         )
 
 
-class _VolumeMetric(PerCaseMetric):
+class _PhysicalMetric(PerCaseMetric):
     _fn: Any
 
-    def __init__(self, *, spacing: Any = None, unit: VolumeUnit = "mm3",
-                 input_format: InputFormat = "index", num_classes: int | None = None,
-                 include_background: bool = True, ignore_index: int | None = None) -> None:
-        super().__init__()
-        if unit not in ("mm3", "ml"):
-            raise ValueError("unit must be 'mm3' or 'ml'")
+    def _configure(self, spacing: Any, unit: str, input_format: InputFormat,
+                   num_classes: int | None, include_background: bool, ignore_index: int | None) -> None:
         self._spacing = spacing
         self._kwargs = dict(unit=unit, input_format=input_format, num_classes=num_classes,
                             include_background=include_background,
                             ignore_index=_check_ignore_index(ignore_index, input_format))
 
     def update(self, pred: Any, target: Any, *, spacing: Any = None, mask: Any = None) -> Tensor:
-        """Record physical volumes; spacing overrides the constructor for this batch."""
+        """Record physical measures; spacing overrides the constructor for this batch."""
         return self._record(self._fn(to_torch(pred), to_torch(target), mask=mask,
                                     spacing=self._spacing if spacing is None else spacing, **self._kwargs))
+
+
+class _VolumeMetric(_PhysicalMetric):
+    def __init__(self, *, spacing: Any = None, unit: VolumeUnit = "mm3",
+                 input_format: InputFormat = "index", num_classes: int | None = None,
+                 include_background: bool = True, ignore_index: int | None = None) -> None:
+        super().__init__()
+        if unit not in ("mm3", "ml"):
+            raise ValueError("unit must be 'mm3' or 'ml'")
+        self._configure(spacing, unit, input_format, num_classes, include_background, ignore_index)
+
+
+class _AreaMetric(_PhysicalMetric):
+    def __init__(self, *, spacing: Any = None, unit: AreaUnit = "mm2",
+                 input_format: InputFormat = "index", num_classes: int | None = None,
+                 include_background: bool = True, ignore_index: int | None = None) -> None:
+        super().__init__()
+        if unit not in ("mm2", "cm2"):
+            raise ValueError("unit must be 'mm2' or 'cm2'")
+        self._configure(spacing, unit, input_format, num_classes, include_background, ignore_index)
+
+
+class PredictedArea(_AreaMetric):
+    """Predicted 2D area in mm² or cm², averaged equally across observed cases."""
+
+    _fn = staticmethod(functional.predicted_area)
+
+
+class TargetArea(_AreaMetric):
+    """Target 2D area; see :func:`exacta.functional.target_area`."""
+
+    _fn = staticmethod(functional.target_area)
+
+
+class AreaError(_AreaMetric):
+    """Signed or absolute physical area error; see :func:`exacta.functional.area_error`."""
+
+    _fn = staticmethod(functional.area_error)
+
+    def __init__(self, *, absolute: bool = False, spacing: Any = None, unit: AreaUnit = "mm2",
+                 input_format: InputFormat = "index", num_classes: int | None = None,
+                 include_background: bool = True, ignore_index: int | None = None) -> None:
+        super().__init__(spacing=spacing, unit=unit, input_format=input_format, num_classes=num_classes,
+                         include_background=include_background, ignore_index=ignore_index)
+        self._kwargs["absolute"] = absolute
 
 
 class PredictedVolume(_VolumeMetric):

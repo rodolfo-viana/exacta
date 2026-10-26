@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from exacta._inputs import InputFormat, like_input, to_torch, validate
 from exacta.functional import overlap, surface as sf
 from exacta.functional.topology import cldice
-from exacta.functional.volume import _score_volume, _voxel_volume
+from exacta.functional._physical import _physical_scale, _score_size
 
 MetricSelection = Sequence[str] | Mapping[str, Mapping[str, Any]]
 
@@ -22,6 +22,9 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
     "specificity": {"zero_division": math.nan},
     "volume_similarity": {"zero_division": math.nan, "convention": "taha"},
     "relative_volume_difference": {"zero_division": math.nan, "absolute": False},
+    "predicted_area": {"unit": "mm2"},
+    "target_area": {"unit": "mm2"},
+    "area_error": {"unit": "mm2", "absolute": False},
     "predicted_volume": {"unit": "mm3"},
     "target_volume": {"unit": "mm3"},
     "volume_error": {"unit": "mm3", "absolute": False},
@@ -67,15 +70,16 @@ def evaluate(
     Options and defaults match the individual functions. Input layout, class selection and
     spacing are common; surface representations may differ. ``backend`` selects the distance
     transform, as for individual surface metrics. Spacing is required when requesting any
-    surface metric or physical volume (3D, spacing in mm). Results use the prediction's array library. No input or volume cache is
+    surface metric or physical area/volume (2D/3D respectively, spacing in mm). Results use
+    the prediction's array library. No input or volume cache is
     retained after this call, so subsequent input mutation cannot return stale scores.
     ``mask`` and ``ignore_index`` follow :func:`dice` and require a selection containing only
-    overlap/volume metrics. Surface and clDice masking is undefined and is rejected.
+    overlap/area/volume metrics. Surface and clDice masking is undefined and is rejected.
     """
     requests = _selection(metrics)
     counts_names = [n for n, options in requests.items() if "surface" not in options and n != "cldice"]
     if (mask is not None or ignore_index is not None) and len(counts_names) != len(requests):
-        raise ValueError("mask and ignore_index support only overlap/volume metrics; "
+        raise ValueError("mask and ignore_index support only overlap/area/volume metrics; "
                          "surface and cldice metrics require complete segmentations")
     if counts_names:
         counts, seg = overlap._confusion_counts_and_seg(
@@ -88,9 +92,11 @@ def evaluate(
             options = requests[name]
             if "unit" in options:
                 unit = options["unit"]
-                if unit not in scales:
-                    scales[unit] = _voxel_volume(seg, spacing, unit)
-                results[name] = _score_volume(name, counts, scales[unit], options.get("absolute", False))
+                ndim: Literal[2, 3] = 2 if name in ("predicted_area", "target_area", "area_error") else 3
+                key = (ndim, unit)
+                if key not in scales:
+                    scales[key] = _physical_scale(seg, spacing, unit, ndim)
+                results[name] = _score_size(name, counts, scales[key], options.get("absolute", False))
             else:
                 results[name] = overlap._score_counts(name, counts, **options)
     else:

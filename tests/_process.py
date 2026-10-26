@@ -6,7 +6,26 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import torch
+import torch.distributed as dist
 import torch.multiprocessing as mp
+
+
+def destroy_process_group() -> None:
+    """Destroy the default group without the older PyTorch Gloo/GIL deadlock.
+
+    In Torch 2.4 the outer ProcessGroup destructor holds the GIL while joining
+    Gloo workers, which may need it to release collective tensor wrappers. Keep
+    the backend alive until the outer group is gone: its own Python binding
+    releases the GIL during destruction. A barrier alone does not fix the race.
+    Upstream fix: https://github.com/pytorch/pytorch/pull/154976 (Torch 2.8).
+    This compatibility workaround stays in tests, outside metric execution.
+    """
+    backend = dist.group.WORLD._get_backend(torch.device("cpu")) if dist.get_backend() == "gloo" else None
+    try:
+        dist.destroy_process_group()
+    finally:
+        del backend
 
 
 def _entry(rank: int, function: Callable[..., Any], args: tuple, directory: str, timeout: float) -> None:

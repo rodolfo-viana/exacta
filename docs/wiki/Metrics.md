@@ -111,7 +111,7 @@ metric needs its own definition; overlap masking does not define partial surface
 
 ## Shared metric evaluation
 
-`functional.evaluate` shares confusion counts across overlap/volume metrics and
+`functional.evaluate` shares confusion counts across overlap/area/volume metrics and
 surface distances across compatible boundary metrics. It returns a dictionary of `(B, K)`
 arrays. Choose names as a sequence, or map names to their individual options:
 
@@ -212,6 +212,25 @@ calibration = Calibration(multilabel=True, from_logits=True, bins=15)
 calibration.update(logits, labels)
 diagram = calibration.compute()
 ```
+
+## Physical area and error (unreleased)
+
+The 2D APIs `predicted_area`, `target_area` and `area_error` measure occupied pixel-cell areas.
+Their stateful counterparts are `PredictedArea`, `TargetArea` and `AreaError`. With pixel
+spacing $(s_H,s_W)$ in millimetres, $a=s_Hs_W$ and
+
+$$
+A_P=a|P|,\qquad A_T=a|T|,\qquad E=A_P-A_T.
+$$
+
+The default `unit="mm2"` returns mm²; `unit="cm2"` divides by 100. `absolute=True` on the
+error reports $|E|$. Supply scalar, shared two-axis or per-case `(B,2)` spacing. Areas require
+2D inputs. Mask/ignore policies match physical volume: absent observed classes return zero;
+unobserved domains return NaN. Overlapping channels are measured independently.
+
+`evaluate` and `MetricCollection` share counts across areas and overlap scores. See the
+[2D medical-segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Medical-segmentation-2D)
+for runnable examples and the distinction between slice and patient averages.
 
 ## Physical volume and error (unreleased)
 

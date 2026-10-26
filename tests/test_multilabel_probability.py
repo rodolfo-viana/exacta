@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
+from _process import destroy_process_group
 import torch.multiprocessing as mp
 
 from exacta import _native, _triton_probability, functional as F, metrics as M
@@ -238,7 +239,7 @@ def _distributed(rank, path, empty):
         torch.testing.assert_close(cal.compute().ece, expected_ece, equal_nan=True)
         assert metric.compute().mean.item() == pytest.approx(.16 if empty else .26)
     finally:
-        dist.destroy_process_group()
+        destroy_process_group()
 
 
 @pytest.mark.parametrize("empty", [False, True])

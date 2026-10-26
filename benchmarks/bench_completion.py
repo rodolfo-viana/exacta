@@ -1,4 +1,4 @@
-"""Reproducible timings for physical volumes, voxel ranking and the added losses.
+"""Reproducible timings for physical areas/volumes, voxel ranking and the added losses.
 
 Loss timings include backward; metrics include validation. Exact versus binned
 ranking has different semantics, so report both latency and score differences.
@@ -107,15 +107,15 @@ def main() -> None:
         measure("pooled_ranking_"+name, update_compute)
     differences = dict(ap_max_abs=float((scores[0].average_precision-scores[1].average_precision).abs().max()),
                        auroc_max_abs=float((scores[0].auroc-scores[1].auroc).abs().max()))
-    if args.dim == 3:
-        p = prob > .5
-        options = dict(input_format="one-hot", spacing=(.5, .8, 2), mask=mask)
-        names = ("predicted_volume", "target_volume", "volume_error")
-        shared = F.evaluate(p, y, metrics=names, **options)
-        for name in names:
-            torch.testing.assert_close(shared[name], getattr(F, name)(p, y, **options))
-        measure("volumes_shared", lambda: F.evaluate(p, y, metrics=names, **options))
-        measure("volumes_separate", lambda: [getattr(F, name)(p, y, **options) for name in names])
+    p = prob > .5
+    kind = "area" if args.dim == 2 else "volume"
+    options = dict(input_format="one-hot", spacing=(.5, .8, 2)[:args.dim], mask=mask)
+    names = (f"predicted_{kind}", f"target_{kind}", f"{kind}_error")
+    shared = F.evaluate(p, y, metrics=names, **options)
+    for name in names:
+        torch.testing.assert_close(shared[name], getattr(F, name)(p, y, **options))
+    measure(kind+"s_shared", lambda: F.evaluate(p, y, metrics=names, **options))
+    measure(kind+"s_separate", lambda: [getattr(F, name)(p, y, **options) for name in names])
     digest = hashlib.sha256()
     for path in sorted([*Path("src").rglob("*.py"), *Path("csrc").rglob("*.cpp"), *Path("csrc").rglob("*.h")]):
         digest.update(str(path).encode())

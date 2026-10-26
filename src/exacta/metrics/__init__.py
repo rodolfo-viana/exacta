@@ -18,10 +18,12 @@ from exacta.metrics.segmentation import (
     Specificity,
     VolumeSimilarity,
     PredictedVolume, TargetVolume, VolumeError,
+    PredictedArea, TargetArea, AreaError,
 )
 
 __all__ = [
     "AveragePrecision", "AUROC", "VoxelRanking",
+    "PredictedArea", "TargetArea", "AreaError",
     "PredictedVolume", "TargetVolume", "VolumeError",
     "ClDice", "BrierScore", "NegativeLogLikelihood", "ExpectedCalibrationError", "Calibration",
     "ASSD",

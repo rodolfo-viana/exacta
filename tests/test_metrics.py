@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from _process import spawn
+from _process import destroy_process_group, spawn
 
 import exacta.functional as EF
 from _data import pair
@@ -110,7 +110,7 @@ def _ddp_worker(rank, world, init_file, batches, out):
         if rank == 0:
             out.put(result.per_case.numpy())
     finally:
-        dist.destroy_process_group()
+        destroy_process_group()
 
 
 def test_ddp_gathers_all_ranks(tmp_path):
@@ -153,7 +153,7 @@ def _ddp_empty_worker(rank, init_file, owner, backend, out):
             metric.compute()
         out.put(rank)
     finally:
-        dist.destroy_process_group()
+        destroy_process_group()
 
 
 @pytest.mark.parametrize("owner", [0, 1, -1])

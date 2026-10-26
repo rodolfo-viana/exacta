@@ -23,6 +23,14 @@ metric kernels use Triton at runtime; their first invocation can include compila
 specific PyTorch binary. Local validation covers Linux x86-64 CPU and NVIDIA CUDA execution;
 other hardware/platform combinations should be verified before use.
 
+## Distributed CPU execution
+
+For Gloo distributed runs, use PyTorch 2.8 or newer. PyTorch 2.4.1 can deadlock during
+process-group destruction after collecting metric scores: a Gloo worker needs the Python
+GIL while the outer destructor holds it. PyTorch's [2.8 release notes](https://github.com/pytorch/pytorch/releases/tag/v2.8.0)
+include the destructor fix (#154976). Ordinary non-distributed CPU evaluation still supports
+PyTorch 2.4.
+
 ## Optional references
 
 SciPy is needed for Hungarian lesion matching. MONAI, MedPy, VTK, SimpleITK and other reference

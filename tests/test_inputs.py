@@ -207,3 +207,46 @@ def test_negative_strides_without_dlpack():
     x = np.arange(12).reshape(1, 3, 4).view(LegacyArray)[::-1]
     assert not hasattr(x, "__dlpack__") and x.flags.c_contiguous
     torch.testing.assert_close(to_torch(x), torch.arange(12).reshape(1, 3, 4))
+
+
+@pytest.mark.parametrize("dtype,value", [(torch.float64, 1 + 2**-40), (torch.int64, 2**40 + 1)])
+@pytest.mark.parametrize("x64", [False, True])
+def test_jax_round_trip_preserves_precision_and_configuration(dtype, value, x64):
+    jax = pytest.importorskip("jax")
+    from exacta._inputs import like_input, to_torch
+
+    enable_x64 = getattr(jax, "enable_x64", None)
+    if enable_x64 is None:
+        from jax.experimental import enable_x64
+    before = jax.config.x64_enabled
+    with enable_x64(x64):
+        original = jax.numpy.zeros((1,), dtype=jax.numpy.int32)
+        tensor = torch.tensor([value], dtype=dtype)
+        result = like_input(tensor, original)
+        torch.testing.assert_close(to_torch(result), tensor, rtol=0, atol=0)
+        assert jax.config.x64_enabled == x64
+    assert jax.config.x64_enabled == before
+
+
+@pytest.mark.parametrize("spacing", [0, -1, float("nan"), float("inf"), [1, 0]])
+def test_empty_batch_still_validates_shared_spacing(spacing):
+    with pytest.raises(ValueError, match="spacing"):
+        as_spacing(spacing, batch=0, ndim=2)
+
+
+@pytest.mark.parametrize("library", ["numpy", "cupy", "jax"])
+def test_physical_area_array_libraries_preserve_float64(library):
+    from exacta._inputs import to_torch
+
+    if library == "cupy" and not torch.cuda.is_available():
+        pytest.skip("CuPy round trip needs CUDA")
+    xp = np if library == "numpy" else pytest.importorskip("jax.numpy" if library == "jax" else library)
+    p = xp.asarray([[[0, 1], [1, 1]]], dtype=xp.int32)
+    scale = 1 + 2**-40
+    result = EF.evaluate(p, p, num_classes=2, spacing=(scale, 1),
+                         metrics=["dice", "predicted_area", "target_area", "area_error"])
+    expected = torch.tensor([[scale, 3*scale]], dtype=torch.float64)
+    for name in ("predicted_area", "target_area"):
+        assert isinstance(result[name], type(p))
+        torch.testing.assert_close(to_torch(result[name]).cpu(), expected, rtol=0, atol=0)
+    assert to_torch(result["area_error"]).eq(0).all()
