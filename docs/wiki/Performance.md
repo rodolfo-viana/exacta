@@ -93,3 +93,44 @@ NCCL benchmarks require additional hardware.
 
 Avoid running performance measurements alongside other workloads. Measure sparse and dense
 targets, different class counts and representative MRI sizes before choosing an implementation.
+
+## Planned-addition measurements (unreleased)
+
+The development branch adds `bench_probability.py` and `bench_completion.py`. Measurements
+on 2026-10-26 used Python 3.14.4, PyTorch 2.14.1, Ryzen 9 5900XT (two threads) and RTX 5070,
+float32 inputs of shape `2×3×64³`, three warmups and ten synchronized repetitions.
+The tables report medians on synthetic inputs; compilation time is excluded. Probability
+calculations use float64 arithmetic and an 80% observation mask. Loss timings include backward.
+
+| Operation | CPU fused C++ | CPU eager PyTorch | CPU compiled PyTorch |
+|---|---:|---:|---:|
+| Multilabel Brier, probabilities | 1.892 ms | 18.446 ms | 7.219 ms |
+| Multilabel NLL, probabilities | 6.810 ms | 38.126 ms | 11.034 ms |
+
+For squared Dice on this GPU workload, compiling native PyTorch was fastest. Choose the
+backend and compilation mode using representative shapes, not the implementation language:
+
+| GPU forward/backward | Eager PyTorch | Compiled PyTorch | Eager fused Triton |
+|---|---:|---:|---:|
+| Squared Dice, sigmoid | 0.657 ms | 0.267 ms | 0.575 ms |
+| Lovasz-hinge, independent labels | 1.666 ms | 0.865 ms | Uses PyTorch sorting |
+
+Exact per-case voxel AP took 131.745 ms on CPU and 4.293 ms on GPU; 256-bin approximation
+took 19.352 ms and 3.620 ms. This compares different ranking definitions, not interchangeable
+implementations. Pooling updates can change both values and timing. Binned streaming retains
+only histogram state; its current-batch working memory still scales with voxel count.
+
+Three physical volume quantities evaluated together took 1.589 ms CPU / 0.423 ms GPU,
+versus 4.644 ms / 0.853 ms for three separate calls. Their shared counts avoid repeated scans.
+Reproduce these development measurements from the matching source checkout:
+
+```bash
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 TORCHINDUCTOR_COMPILE_THREADS=1 \
+  python benchmarks/bench_probability.py --device cpu --size 64 --compiled --output local/probability-cpu.json
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 TORCHINDUCTOR_COMPILE_THREADS=1 \
+  python benchmarks/bench_completion.py --device cuda --size 64 --compiled --output local/completion-gpu.json
+```
+
+Both scripts support `--device cpu/cuda`, `--dim 2/3` and configurable sizes. Output records
+raw samples, allocation measurements, configuration, environment and source hashes. Different
+mask density, class counts, hardware and compiler versions can change the best path.

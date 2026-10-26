@@ -3,6 +3,7 @@
 from exacta.metrics.base import MetricResult, PerCaseMetric
 from exacta.metrics.collection import MetricCollection
 from exacta.metrics.calibration import BrierScore, NegativeLogLikelihood, ExpectedCalibrationError, Calibration
+from exacta.metrics.ranking import AveragePrecision, AUROC, VoxelRanking
 from exacta.metrics.segmentation import (
     ASSD,
     HD95,
@@ -16,9 +17,12 @@ from exacta.metrics.segmentation import (
     Sensitivity,
     Specificity,
     VolumeSimilarity,
+    PredictedVolume, TargetVolume, VolumeError,
 )
 
 __all__ = [
+    "AveragePrecision", "AUROC", "VoxelRanking",
+    "PredictedVolume", "TargetVolume", "VolumeError",
     "ClDice", "BrierScore", "NegativeLogLikelihood", "ExpectedCalibrationError", "Calibration",
     "ASSD",
     "HD95",

@@ -292,3 +292,25 @@ def masked_channel_counts(pred: Tensor, target: Tensor, mask: Tensor,
     out = tuple(torch.empty(count, dtype=torch.int64) for _ in range(4))
     ok = _C.masked_channel_counts(*flat, m, channels, *out)
     return out if ok else None  # type: ignore[return-value]
+
+
+def probability_stats(pred: Tensor, target: Tensor, mask: Tensor | None, from_logits: bool,
+                      kind: int, bins: int) -> Tensor | None:
+    """Fused CPU validation and float64 Bernoulli sufficient statistics."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    batch, channels = pred.shape[:2]
+    rows, n = batch * channels, math.prod(pred.shape[2:])
+    if pred.dtype not in (torch.float32, torch.float64):
+        pred = pred.float()
+    if target.dtype == torch.bool:
+        target = target.view(torch.uint8)
+    elif target.dtype not in (torch.uint8, torch.int64, torch.float32, torch.float64):
+        target = target.float() if target.is_floating_point() else target.long()
+    p, t = (x.contiguous().reshape(rows, n) for x in (pred, target))
+    m = (torch.empty((0, 0), dtype=torch.uint8) if mask is None
+         else _as_bytes(mask).reshape(batch * mask.shape[1], n))
+    out = torch.empty((rows, 3 * bins if kind == 2 else 2), dtype=torch.float64)
+    if not _C.probability_stats(p, t, m, channels, from_logits, kind, bins, out):
+        return None
+    return out.reshape(batch, channels, 3, bins) if kind == 2 else out.reshape(batch, channels, 2)

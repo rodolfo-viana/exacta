@@ -96,6 +96,37 @@ int exacta_mask_extents_u8(const uint8_t *masks, int64_t count, const int64_t *s
 int exacta_dilate_u8(const uint8_t *mask, uint8_t *out, const int64_t *shape, int ndim,
                      int connectivity, int steps, int num_threads);
 
+/* Independent Bernoulli statistics over rows = batch * channels, each with n voxels.
+ * mask_channels: 0 = no mask, 1 = shared per case, channels = separate per label.
+ * kind: 0 = Brier, 1 = NLL, 2 = reliability. Scores write (rows,2) [count,sum];
+ * reliability writes (rows,3*bins) [counts,confidence sums,positive counts].
+ * Inputs are validated before use, only at included voxels. Accumulation is float64.
+ */
+int exacta_probability_f32_u8(const float *pred, const uint8_t *target,
+    const uint8_t *mask, int64_t rows, int64_t n, int64_t channels, int mask_channels,
+    int from_logits, int kind, int bins, double *out, int num_threads);
+int exacta_probability_f32_i64(const float *pred, const int64_t *target,
+    const uint8_t *mask, int64_t rows, int64_t n, int64_t channels, int mask_channels,
+    int from_logits, int kind, int bins, double *out, int num_threads);
+int exacta_probability_f32_f32(const float *pred, const float *target,
+    const uint8_t *mask, int64_t rows, int64_t n, int64_t channels, int mask_channels,
+    int from_logits, int kind, int bins, double *out, int num_threads);
+int exacta_probability_f32_f64(const float *pred, const double *target,
+    const uint8_t *mask, int64_t rows, int64_t n, int64_t channels, int mask_channels,
+    int from_logits, int kind, int bins, double *out, int num_threads);
+int exacta_probability_f64_u8(const double *pred, const uint8_t *target,
+    const uint8_t *mask, int64_t rows, int64_t n, int64_t channels, int mask_channels,
+    int from_logits, int kind, int bins, double *out, int num_threads);
+int exacta_probability_f64_i64(const double *pred, const int64_t *target,
+    const uint8_t *mask, int64_t rows, int64_t n, int64_t channels, int mask_channels,
+    int from_logits, int kind, int bins, double *out, int num_threads);
+int exacta_probability_f64_f32(const double *pred, const float *target,
+    const uint8_t *mask, int64_t rows, int64_t n, int64_t channels, int mask_channels,
+    int from_logits, int kind, int bins, double *out, int num_threads);
+int exacta_probability_f64_f64(const double *pred, const double *target,
+    const uint8_t *mask, int64_t rows, int64_t n, int64_t channels, int mask_channels,
+    int from_logits, int kind, int bins, double *out, int num_threads);
+
 /* Confusion matrix of two label maps of `n` elements: out[i * classes + j] (classes x classes) is
  * the number of elements labelled i in `pred` and j in `target`. Returns EXACTA_INVALID_ARGUMENT
  * if a label lies outside [0, classes).

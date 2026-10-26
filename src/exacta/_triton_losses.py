@@ -72,11 +72,12 @@ def seg_loss(
     focal: tuple[float, float | None] | None = None,
     distributed: bool = False,
     overlap_power: float = 1.0,
+    squared_pred: bool = False,
 ) -> Tensor:
     """Overlap losses share volume passes; only their small final reductions differ."""
     config = (
         activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce,
-        cross_entropy, tversky, generalized, overlap_power, ignore_index, focal, distributed,
+        cross_entropy, tversky, generalized, overlap_power, squared_pred, ignore_index, focal, distributed,
     )
     return _SegLoss.apply(logits, target, mask, class_weight, config)
 
@@ -96,7 +97,7 @@ class _SegLoss(torch.autograd.Function):
     def forward(ctx, logits: Tensor, target: Tensor, mask: Tensor | None, class_weight: Tensor | None,
                 config: tuple) -> Tensor:  # type: ignore[override]
         (activation, one_hot, include_background, batch_dice, smooth, lambda_dice, lambda_ce,
-         ce, tversky, generalized, power, ignore_index, focal, distributed) = config
+         ce, tversky, generalized, power, squared_pred, ignore_index, focal, distributed) = config
         logits, target = logits.contiguous(), target.contiguous()
         mask = None if mask is None else mask.contiguous()
         masked = mask is not None or ignore_index is not None or distributed
@@ -114,7 +115,7 @@ class _SegLoss(torch.autograd.Function):
                     TVERSKY=tversky is not None, CE=ce, HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
                     WEIGHTED=class_weight is not None, FOCAL=focal is not None,
                     GAMMA=focal[0] if focal else 0.0, ALPHA=focal[1] if focal else None,
-                    COUNTS=masked,
+                    COUNTS=masked, SQUARED=squared_pred,
                     COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
                 )  # fmt: skip
         sums = partial.sum(1, dtype=torch.float64)
@@ -214,6 +215,7 @@ class _SegLoss(torch.autograd.Function):
                 class_weight if class_weight is not None else target, coef, ce_scale, grad, voxels, classes,
                 ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, CE=ce, C_PAD=c_pad, BLOCK=block,
                 HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
+                SQUARED=ctx.config[11],
                 WEIGHTED=class_weight is not None, FOCAL=focal is not None,
                 GAMMA=focal[0] if focal else 0.0, ALPHA=focal[1] if focal else None,
                 COMPUTE=tl.float64 if compute == torch.float64 else tl.float32,
@@ -360,7 +362,7 @@ if triton is not None:
         ACT: tl.constexpr, ONE_HOT: tl.constexpr, C_PAD: tl.constexpr, BLOCK: tl.constexpr,
         TVERSKY: tl.constexpr, CE: tl.constexpr,
         WEIGHTED: tl.constexpr, FOCAL: tl.constexpr, GAMMA: tl.constexpr, ALPHA: tl.constexpr,
-        COUNTS: tl.constexpr,
+        COUNTS: tl.constexpr, SQUARED: tl.constexpr,
         HAS_MASK: tl.constexpr, IGNORE_INDEX: tl.constexpr,
         COMPUTE: tl.constexpr,
     ):  # fmt: skip
@@ -389,6 +391,9 @@ if triton is not None:
         if TVERSKY:
             tl.store(out + C_PAD, tl.sum(p * (1.0 - g) * w, axis=1))
             tl.store(out + 2 * C_PAD, tl.sum((1.0 - p) * g * w, axis=1))
+        elif SQUARED:
+            tl.store(out + C_PAD, tl.sum(p * p * w, axis=1))
+            tl.store(out + 2 * C_PAD, tl.sum(g * g * w, axis=1))
         else:
             tl.store(out + C_PAD, tl.sum(p * w, axis=1))
             tl.store(out + 2 * C_PAD, tl.sum(g * w, axis=1))
@@ -406,7 +411,7 @@ if triton is not None:
         ACT: tl.constexpr, ONE_HOT: tl.constexpr, CE: tl.constexpr, C_PAD: tl.constexpr, BLOCK: tl.constexpr,
         HAS_MASK: tl.constexpr, IGNORE_INDEX: tl.constexpr,
         WEIGHTED: tl.constexpr, FOCAL: tl.constexpr, GAMMA: tl.constexpr, ALPHA: tl.constexpr,
-        COMPUTE: tl.constexpr,
+        COMPUTE: tl.constexpr, SQUARED: tl.constexpr,
     ):  # fmt: skip
         blk = tl.program_id(0)
         b = tl.program_id(1).to(tl.int64)
@@ -416,7 +421,7 @@ if triton is not None:
         )
         a = tl.load(coef + (b * 2) * C_PAD + ch)
         c = tl.load(coef + (b * 2 + 1) * C_PAD + ch)
-        d_p = c[:, None] - a[:, None] * g  # dLdice/dp
+        d_p = c[:, None] * (2.0 * p if SQUARED else 1.0) - a[:, None] * g
         weight = tl.full((C_PAD, 1), 1.0, COMPUTE)
         if WEIGHTED:
             weight = tl.load(class_weight + ch, mask=ch < classes, other=0).to(COMPUTE)[:, None]

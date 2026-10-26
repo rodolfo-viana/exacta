@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
+from _process import spawn
 
 import exacta.functional as EF
 from exacta.functional import overlap, surface
@@ -117,7 +117,7 @@ def _distributed_collection(rank, init_file):
 def test_distributed_collection_with_empty_rank(tmp_path):
     if not dist.is_available() or not dist.is_gloo_available():
         pytest.skip('Gloo unavailable')
-    mp.spawn(_distributed_collection, args=(tmp_path / 'init',), nprocs=2)
+    spawn(_distributed_collection, args=(tmp_path / 'init',), directory=tmp_path / 'workers')
 
 
 def test_empty_batch(device):

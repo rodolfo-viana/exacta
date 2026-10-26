@@ -11,6 +11,7 @@ from exacta import functional
 from exacta._inputs import InputFormat, to_torch
 from exacta.functional.surface import Backend, Combine, Surface
 from exacta.functional.overlap import _check_ignore_index
+from exacta.functional.volume import VolumeUnit
 from exacta.metrics.base import PerCaseMetric
 
 
@@ -171,6 +172,51 @@ class RelativeVolumeDifference(_RatioMetric):
             ignore_index=_check_ignore_index(ignore_index, input_format),
             absolute=absolute,
         )
+
+
+class _VolumeMetric(PerCaseMetric):
+    _fn: Any
+
+    def __init__(self, *, spacing: Any = None, unit: VolumeUnit = "mm3",
+                 input_format: InputFormat = "index", num_classes: int | None = None,
+                 include_background: bool = True, ignore_index: int | None = None) -> None:
+        super().__init__()
+        if unit not in ("mm3", "ml"):
+            raise ValueError("unit must be 'mm3' or 'ml'")
+        self._spacing = spacing
+        self._kwargs = dict(unit=unit, input_format=input_format, num_classes=num_classes,
+                            include_background=include_background,
+                            ignore_index=_check_ignore_index(ignore_index, input_format))
+
+    def update(self, pred: Any, target: Any, *, spacing: Any = None, mask: Any = None) -> Tensor:
+        """Record physical volumes; spacing overrides the constructor for this batch."""
+        return self._record(self._fn(to_torch(pred), to_torch(target), mask=mask,
+                                    spacing=self._spacing if spacing is None else spacing, **self._kwargs))
+
+
+class PredictedVolume(_VolumeMetric):
+    """Predicted 3D volume in mm³ or mL, averaged equally across observed cases."""
+
+    _fn = staticmethod(functional.predicted_volume)
+
+
+class TargetVolume(_VolumeMetric):
+    """Target 3D volume; see :func:`exacta.functional.target_volume`."""
+
+    _fn = staticmethod(functional.target_volume)
+
+
+class VolumeError(_VolumeMetric):
+    """Signed or absolute physical volume error; see :func:`exacta.functional.volume_error`."""
+
+    _fn = staticmethod(functional.volume_error)
+
+    def __init__(self, *, absolute: bool = False, spacing: Any = None, unit: VolumeUnit = "mm3",
+                 input_format: InputFormat = "index", num_classes: int | None = None,
+                 include_background: bool = True, ignore_index: int | None = None) -> None:
+        super().__init__(spacing=spacing, unit=unit, input_format=input_format, num_classes=num_classes,
+                         include_background=include_background, ignore_index=ignore_index)
+        self._kwargs["absolute"] = absolute
 
 
 class _SurfaceMetric(PerCaseMetric):

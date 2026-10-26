@@ -7,8 +7,9 @@ import torch
 from torch import Tensor
 
 from exacta._inputs import to_torch
+from exacta._multilabel import Average, check_options
 from exacta.functional.calibration import (
-    CalibrationMode, ReliabilityDiagram, _bin_sums, _diagram, brier_score,
+    CalibrationMode, ReliabilityDiagram, _bin_sums, _calibration_mode, _diagram, brier_score,
     expected_calibration_error, negative_log_likelihood,
 )
 from exacta.metrics.base import PerCaseMetric, _all_gather_cat
@@ -17,9 +18,12 @@ from exacta.metrics.base import PerCaseMetric, _all_gather_cat
 class _ProbabilityMetric(PerCaseMetric):
     _fn: Any
 
-    def __init__(self, *, from_logits: bool = False, ignore_index: int | None = None) -> None:
+    def __init__(self, *, from_logits: bool = False, ignore_index: int | None = None,
+                 multilabel: bool = False, average: Average = "none") -> None:
         super().__init__()
-        self._kwargs: dict[str, Any] = dict(from_logits=from_logits, ignore_index=ignore_index)
+        check_options(multilabel, average, ignore_index)
+        self._kwargs: dict[str, Any] = dict(from_logits=from_logits, ignore_index=ignore_index,
+                                            multilabel=multilabel, average=average)
 
     def update(self, pred: Any, target: Any, *, mask: Any = None) -> Tensor:
         return self._record(self._fn(to_torch(pred), to_torch(target), mask=mask, **self._kwargs))
@@ -39,10 +43,12 @@ class ExpectedCalibrationError(_ProbabilityMetric):
     """Mean of per-case ECE values; use Calibration for pooled voxel bins."""
     _fn = staticmethod(expected_calibration_error)
 
-    def __init__(self, *, bins: int = 15, mode: CalibrationMode = "top-label",
-                 from_logits: bool = False, ignore_index: int | None = None) -> None:
-        super().__init__(from_logits=from_logits, ignore_index=ignore_index)
-        self._kwargs.update(bins=bins, mode=mode)
+    def __init__(self, *, bins: int = 15, mode: CalibrationMode | None = None,
+                 from_logits: bool = False, ignore_index: int | None = None,
+                 multilabel: bool = False, average: Average = "none") -> None:
+        super().__init__(from_logits=from_logits, ignore_index=ignore_index,
+                         multilabel=multilabel, average=average)
+        self._kwargs.update(bins=bins, mode=_calibration_mode(mode, multilabel))
 
 
 class Calibration:
@@ -53,12 +59,19 @@ class Calibration:
     (1,K) ECE. Pooling weights voxels equally, unlike ExpectedCalibrationError's
     case average. Background can dominate top-label calibration: inspect classwise
     diagrams as well. Repeated/padded distributed samples count more than once.
+    ``multilabel=True`` retains separate positive-probability bins for each label; masks
+    may be shared across labels or have (B,C,*spatial) shape. Pooling is across cases,
+    never across labels. Per-case macro/micro scores use ExpectedCalibrationError instead.
     """
 
-    def __init__(self, *, bins: int = 15, mode: CalibrationMode = "top-label",
-                 from_logits: bool = False, ignore_index: int | None = None) -> None:
+    def __init__(self, *, bins: int = 15, mode: CalibrationMode | None = None,
+                 from_logits: bool = False, ignore_index: int | None = None,
+                 multilabel: bool = False) -> None:
+        check_options(multilabel, "none", ignore_index)
+        mode = _calibration_mode(mode, multilabel)
         self.bins = bins
-        self._kwargs = dict(bins=bins, mode=mode, from_logits=from_logits, ignore_index=ignore_index)
+        self._kwargs = dict(bins=bins, mode=mode, from_logits=from_logits,
+                            ignore_index=ignore_index, multilabel=multilabel)
         self._sums: Tensor | None = None
 
     @torch.no_grad()

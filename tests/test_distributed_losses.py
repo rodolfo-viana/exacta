@@ -38,7 +38,8 @@ def _worker(rank, rendezvous, device, transport):
         model = DDP(Affine(device))
         # The CUDA/Gloo test intentionally uses one GPU for both workers. It tests
         # distributed fused math without claiming multi-GPU/NCCL throughput.
-        for cls in CLASSES:
+        configurations = [(cls, False) for cls in CLASSES] + [(DiceLoss, True), (DiceCELoss, True)]
+        for cls, squared in configurations:
             for activation in ("softmax", "sigmoid"):
                 for soft in (False, True):
                     for scenario in ("uneven", "empty_rank", "ignored_rank", "all_ignored", "all_empty", "unmasked"):
@@ -60,6 +61,8 @@ def _worker(rank, rendezvous, device, transport):
                             y = labels if not soft else y
                         selected = slice(0, cut) if rank == 0 else slice(cut, n)
                         options = dict(activation=activation, target_format="one-hot" if soft else "index")
+                        if squared:
+                            options["squared_pred"] = True
                         if not soft and scenario != "unmasked":
                             options["ignore_index"] = -100
                         if cls is not FocalLoss:

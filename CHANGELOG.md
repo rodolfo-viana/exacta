@@ -4,8 +4,8 @@ Release notes for Exacta's alpha versions.
 
 ## Unreleased
 
-Overlap and volume metrics now support evaluation on selected voxels, including partially
-annotated segmentations.
+Segmentation evaluation now supports selected voxels, independent probability channels,
+physical volumes and voxel rankings, alongside two additional training objectives.
 
 - Add boolean voxel masks and index-target `ignore_index` to Dice, IoU, sensitivity,
   precision, specificity, volume similarity and relative volume difference, including
@@ -16,6 +16,20 @@ annotated segmentations.
   boundary/topology evaluation needs a separate definition.
 - Fuse exclusion and counting in C++/OpenMP and Triton without expanding index targets or
   broadcasting masks into channel-sized buffers; retain a checked PyTorch fallback.
+- Add explicit multilabel Brier, Bernoulli NLL, ECE and reliability bins, with per-label
+  masks, macro/micro reductions and fused C++/CUDA statistics. Micro ECE pools bins before
+  absolute gaps; existing binary/multiclass defaults retain their definitions.
+- Add predicted/target 3D physical volume and signed/absolute error in mm³ or mL, including
+  per-case spacing, stateful wrappers and shared collections. Unobserved domains give NaN.
+- Add voxel PR/ROC curves, AP and AUROC with grouped ties and exact or approximate binned
+  evaluation. Separate case-averaged metrics from dataset-pooled `VoxelRanking`; binned
+  streaming retains fixed-size int64 histograms, including distributed accumulation.
+- Add `squared_pred=True` to Dice and Dice-CE/focal/top-k CE, including fused CUDA derivatives,
+  soft targets, masked observations and global distributed Dice/CE statistics.
+- Add binary/multilabel `LovaszHingeLoss` with stable native PyTorch sorting, explicit
+  per-image/local-batch reductions, ignored labels and per-label observation masks.
+- Report test skip reasons and generate only applicable test parameter combinations;
+  retain hardware and optional-reference skips as explicit coverage limitations.
 
 ## 0.0.1a4 — 2026-10-24
 

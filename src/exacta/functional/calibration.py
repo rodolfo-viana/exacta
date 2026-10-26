@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from exacta._inputs import like_input, to_torch
+from exacta import _multilabel
+from exacta._multilabel import Average
 from exacta.losses.segmentation import _check_ignore_index, _check_index_target, _check_mask, _prepare_masked_input
 
 CalibrationMode = Literal["top-label", "classwise"]
@@ -83,15 +85,26 @@ def _case_mean(terms: Tensor, valid: Tensor) -> Tensor:
 
 @torch.no_grad()
 def brier_score(pred: Any, target: Any, *, from_logits: bool = False,
-                ignore_index: int | None = None, mask: Any = None) -> Any:
+                ignore_index: int | None = None, mask: Any = None,
+                multilabel: bool = False, average: Average = "none") -> Any:
     """Per-case (B,1) Brier score; lower is better.
 
     C>=2: mean over valid voxels of sum_c (p_c - one_hot(y)_c)^2 (range [0,2]).
     C=1: binary mean squared error (range [0,1]), targets 0/1. These conventions
     differ by a factor of two for equivalent one-/two-channel binary models.
     Empty cases return NaN. ``from_logits=True`` uses softmax, or sigmoid for C=1.
+    With ``multilabel=True``, target is binary (B,C,*spatial), logits use independent
+    sigmoids, and scores are mean squared errors per label in [0,1]. ``average="none"``
+    returns (B,C); ``"macro"`` averages observed label means and ``"micro"`` weights
+    observed label-voxel pairs equally, both (B,1). Masks may also be (B,C,*spatial),
+    allowing different observations per label; ignore_index is unsupported. Empty labels
+    return NaN and are skipped by macro averaging. Float64 arithmetic/reductions are used.
     This is a proper probability score, not a pure measure of calibration.
     """
+    _multilabel.check_options(multilabel, average, ignore_index)
+    if multilabel:
+        sums = _multilabel.statistics(pred, target, mask, from_logits, "brier")
+        return like_input(_multilabel.score(sums, average), pred)
     p, t, valid, _ = _probabilities(pred, target, from_logits, ignore_index, mask)
     if p.shape[1] == 1:
         terms = (p[:, 0] - t).square()
@@ -104,21 +117,43 @@ def brier_score(pred: Any, target: Any, *, from_logits: bool = False,
 
 @torch.no_grad()
 def negative_log_likelihood(pred: Any, target: Any, *, from_logits: bool = False,
-                            ignore_index: int | None = None, mask: Any = None) -> Any:
+                            ignore_index: int | None = None, mask: Any = None,
+                            multilabel: bool = False, average: Average = "none") -> Any:
     """Per-case (B,1) mean NLL, in nats. C=1 means binary; C>=2 means multiclass.
 
     Logits use stable log-softmax/BCE. With probabilities, zero probability assigned
     to the true class correctly yields +inf; probabilities are not silently clipped.
+    With ``multilabel=True``, each channel is Bernoulli: both positive and negative outcomes
+    contribute. The same layouts, masks and averaging as :func:`brier_score` apply. This is
+    mean per-label NLL, not a sum over labels of a joint event's NLL.
     Empty cases give NaN. A proper probability score, not a pure calibration measure.
     """
+    _multilabel.check_options(multilabel, average, ignore_index)
+    if multilabel:
+        sums = _multilabel.statistics(pred, target, mask, from_logits, "nll")
+        return like_input(_multilabel.score(sums, average), pred)
     _, _, valid, nll = _probabilities(pred, target, from_logits, ignore_index, mask, need_nll=True)
     return like_input(_case_mean(nll, valid), pred)
 
 
+def _calibration_mode(mode: CalibrationMode | None, multilabel: bool) -> CalibrationMode:
+    if mode is None:
+        return "classwise" if multilabel else "top-label"
+    if mode not in ("top-label", "classwise"):
+        raise ValueError("mode must be 'top-label' or 'classwise'")
+    if multilabel and mode == "top-label":
+        raise ValueError("multilabel calibration requires mode='classwise'; top-label is undefined")
+    return mode
+
+
 def _bin_sums(pred: Any, target: Any, from_logits: bool, ignore_index: int | None,
-              mask: Any, bins: int, mode: CalibrationMode) -> Tensor:
+              mask: Any, bins: int, mode: CalibrationMode | None, *, multilabel: bool = False) -> Tensor:
     if isinstance(bins, bool) or not isinstance(bins, Integral) or bins < 1:
         raise ValueError("bins must be a positive integer")
+    _multilabel.check_options(multilabel, "none", ignore_index)
+    mode = _calibration_mode(mode, multilabel)
+    if multilabel:
+        return _multilabel.statistics(pred, target, mask, from_logits, "bins", int(bins))
     if mode not in ("top-label", "classwise"):
         raise ValueError("mode must be 'top-label' or 'classwise'")
     p, t, valid, _ = _probabilities(pred, target, from_logits, ignore_index, mask)
@@ -161,9 +196,9 @@ def _diagram(sums: Tensor) -> ReliabilityDiagram:
 
 
 @torch.no_grad()
-def reliability_diagram(pred: Any, target: Any, *, bins: int = 15, mode: CalibrationMode = "top-label",
+def reliability_diagram(pred: Any, target: Any, *, bins: int = 15, mode: CalibrationMode | None = None,
                         from_logits: bool = False, ignore_index: int | None = None,
-                        mask: Any = None) -> ReliabilityDiagram:
+                        mask: Any = None, multilabel: bool = False) -> ReliabilityDiagram:
     """Per-case equal-width bins: [k/bins,(k+1)/bins), last bin includes 1.
 
     Top-label calibration bins maximum confidence against prediction correctness;
@@ -171,16 +206,29 @@ def reliability_diagram(pred: Any, target: Any, *, bins: int = 15, mode: Calibra
     ECE is sum_bin count/N * |accuracy-confidence| and depends on the bin choice.
     The same mask/ignore conventions as Brier/NLL apply. This is a numeric summary
     suitable for plotting, without a plotting dependency.
+    With ``multilabel=True``, target is binary (B,C,*spatial); default mode is classwise
+    and top-label mode is rejected. Each label's positive probability is binned against
+    its observed positive frequency. A mask may select voxels separately per channel.
+    Without multilabel, the default remains top-label. Diagrams always retain label bins;
+    use :func:`expected_calibration_error` for macro/micro reductions.
     """
-    result = _diagram(_bin_sums(pred, target, from_logits, ignore_index, mask, bins, mode))
+    result = _diagram(_bin_sums(pred, target, from_logits, ignore_index, mask, bins, mode, multilabel=multilabel))
     return ReliabilityDiagram(*(like_input(x, pred) for x in
                                 (result.counts, result.confidence, result.accuracy, result.edges, result.ece)))
 
 
 @torch.no_grad()
-def expected_calibration_error(pred: Any, target: Any, *, bins: int = 15, mode: CalibrationMode = "top-label",
+def expected_calibration_error(pred: Any, target: Any, *, bins: int = 15, mode: CalibrationMode | None = None,
                                from_logits: bool = False, ignore_index: int | None = None,
-                               mask: Any = None) -> Any:
-    """(B,K) ECE from :func:`reliability_diagram`; K=1 or C for classwise mode."""
-    return reliability_diagram(pred, target, bins=bins, mode=mode, from_logits=from_logits,
-                               ignore_index=ignore_index, mask=mask).ece
+                               mask: Any = None, multilabel: bool = False,
+                               average: Average = "none") -> Any:
+    """(B,K) ECE from :func:`reliability_diagram`; K=1 or C for classwise mode.
+
+    For multilabel predictions, ``average="none"`` retains (B,C), ``"macro"`` averages
+    nonempty labels' ECEs, and ``"micro"`` pools label-voxel pairs into common bins before
+    taking absolute calibration gaps. Macro/micro return (B,1). Micro errors can cancel
+    across labels; it is not a weighted mean of per-label ECEs.
+    """
+    _multilabel.check_options(multilabel, average, ignore_index)
+    sums = _bin_sums(pred, target, from_logits, ignore_index, mask, bins, mode, multilabel=multilabel)
+    return like_input(_multilabel.ece(sums, average), pred)
