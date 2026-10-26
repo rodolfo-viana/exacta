@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from collections.abc import Sequence
 
 import numpy as np
@@ -135,7 +137,8 @@ def dilate(mask: Tensor, connectivity: int, steps: int) -> Tensor:
     return out.view(torch.bool)
 
 
-def confusion(pred: Tensor, target: Tensor, classes: int) -> Tensor | None:
+def confusion(pred: Tensor, target: Tensor, classes: int, *, mask: Tensor | None = None,
+              ignore_index: int | None = None) -> Tensor | None:
     """(classes, classes) int64 confusion matrix of two CPU label maps (any shape), counted in one
     pass; None if a label lies outside [0, classes)."""
     if _C is None:
@@ -146,7 +149,12 @@ def confusion(pred: Tensor, target: Tensor, classes: int) -> Tensor | None:
         # Both operands must select the same binding overload, without narrowing either label.
         pred, target = pred.long(), target.long()
     out = torch.empty((classes, classes), dtype=torch.int64)
-    ok = _C.confusion(pred.contiguous().reshape(-1), target.contiguous().reshape(-1), out)
+    p, t = pred.contiguous().reshape(-1), target.contiguous().reshape(-1)
+    if mask is None and ignore_index is None:
+        ok = _C.confusion(p, t, out)
+    else:
+        m = torch.empty(0, dtype=torch.uint8) if mask is None else _as_bytes(mask).reshape(-1)
+        ok = _C.masked_confusion(p, t, m, ignore_index is not None, ignore_index or 0, out)
     return out if ok else None
 
 
@@ -245,6 +253,15 @@ def channel_counts(pred: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor
     target (int64, (C,)), counted in one pass; None if a value is not 0 or 1."""
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
+    count = pred.shape[0]
+    flat = _channel_inputs(pred, target)
+    both, in_pred, in_target = (torch.empty(count, dtype=torch.int64) for _ in range(3))
+    ok = _C.channel_counts(*flat, both, in_pred, in_target)
+    return (both, in_pred, in_target) if ok else None
+
+
+def _channel_inputs(pred: Tensor, target: Tensor) -> list[Tensor]:
+    """Select a common kernel dtype without converting invalid values to binary ones."""
     if pred.dtype == target.dtype == torch.bool:
         pred, target = pred.view(torch.uint8), target.view(torch.uint8)
     elif pred.dtype != target.dtype or pred.dtype not in (
@@ -260,7 +277,18 @@ def channel_counts(pred: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor
             dtype = torch.int64
         pred, target = pred.to(dtype), target.to(dtype)
     count = pred.shape[0]
-    flat = [x.contiguous().reshape(count, -1) for x in (pred, target)]
-    both, in_pred, in_target = (torch.empty(count, dtype=torch.int64) for _ in range(3))
-    ok = _C.channel_counts(*flat, both, in_pred, in_target)
-    return (both, in_pred, in_target) if ok else None
+    flat = [x.contiguous().reshape(count, math.prod(x.shape[1:])) for x in (pred, target)]
+    return flat
+
+
+def masked_channel_counts(pred: Tensor, target: Tensor, mask: Tensor,
+                          channels: int) -> tuple[Tensor, Tensor, Tensor, Tensor] | None:
+    """Binary counts and included elements, sharing each case's mask across its channels."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    count = pred.shape[0]
+    flat = _channel_inputs(pred, target)
+    m = _as_bytes(mask).reshape(mask.shape[0], math.prod(mask.shape[1:]))
+    out = tuple(torch.empty(count, dtype=torch.int64) for _ in range(4))
+    ok = _C.masked_channel_counts(*flat, m, channels, *out)
+    return out if ok else None  # type: ignore[return-value]

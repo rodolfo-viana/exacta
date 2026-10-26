@@ -15,6 +15,7 @@ averaging.
 from __future__ import annotations
 
 import math
+from numbers import Integral
 from typing import Any, Literal
 
 import torch
@@ -34,6 +35,8 @@ def dice(
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
+    ignore_index: int | None = None,
+    mask: Any = None,
     both_empty: float = math.nan,
 ) -> Any:
     """Dice coefficient ``2|P ∩ T| / (|P| + |T|)`` for every case and class.
@@ -44,12 +47,21 @@ def dice(
             Any array library that supports DLPack works (PyTorch, NumPy, CuPy, JAX).
         num_classes: Number of classes; required with ``input_format="index"``.
         include_background: If False, drop class/channel 0.
+        ignore_index: Target label to exclude before validating or counting either input;
+            index inputs only. This does not remove the corresponding class from the output.
+        mask: Boolean array on the input device, shape (B, *spatial) or (B, 1, *spatial).
+            True includes a voxel in every channel; False excludes it from TP, FP, FN and TN.
+            Combined with ``ignore_index`` by intersection. Excluded values are not validated.
         both_empty: Value when the class is absent from both prediction and target.
 
     Returns:
-        A float64 array of shape (B, C), in the array library of ``pred``.
+        A float64 array of shape (B, C), in the array library of ``pred``. Fully excluded
+        cases follow ``both_empty`` (NaN by default); other overlap metrics use their
+        corresponding zero-denominator policy.
     """
-    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    counts = _confusion_counts(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )
     return like_input(_score_counts("dice", counts, both_empty=both_empty), pred)
 
 
@@ -60,13 +72,17 @@ def iou(
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
+    ignore_index: int | None = None,
+    mask: Any = None,
     both_empty: float = math.nan,
 ) -> Any:
     """Intersection over union (Jaccard index) ``|P ∩ T| / |P ∪ T|`` for every case and class.
 
     Arguments and return value as in :func:`dice`.
     """
-    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    counts = _confusion_counts(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )
     return like_input(_score_counts("iou", counts, both_empty=both_empty), pred)
 
 
@@ -77,6 +93,8 @@ def sensitivity(
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
+    ignore_index: int | None = None,
+    mask: Any = None,
     zero_division: float = math.nan,
 ) -> Any:
     """Sensitivity (recall, true positive rate) ``TP / (TP + FN) = |P ∩ T| / |T|``.
@@ -85,7 +103,9 @@ def sensitivity(
         zero_division: Value when the class is absent from the target.
         Others: As in :func:`dice`.
     """
-    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    counts = _confusion_counts(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )
     return like_input(_score_counts("sensitivity", counts, zero_division=zero_division), pred)
 
 
@@ -96,6 +116,8 @@ def precision(
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
+    ignore_index: int | None = None,
+    mask: Any = None,
     zero_division: float = math.nan,
 ) -> Any:
     """Precision (positive predictive value) ``TP / (TP + FP) = |P ∩ T| / |P|``.
@@ -104,7 +126,9 @@ def precision(
         zero_division: Value when the class is absent from the prediction.
         Others: As in :func:`dice`.
     """
-    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    counts = _confusion_counts(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )
     return like_input(_score_counts("precision", counts, zero_division=zero_division), pred)
 
 
@@ -115,6 +139,8 @@ def specificity(
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
+    ignore_index: int | None = None,
+    mask: Any = None,
     zero_division: float = math.nan,
 ) -> Any:
     """Specificity (true negative rate) ``TN / (TN + FP)``.
@@ -123,7 +149,9 @@ def specificity(
         zero_division: Value when the target covers the whole image (no negatives).
         Others: As in :func:`dice`.
     """
-    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    counts = _confusion_counts(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )
     return like_input(_score_counts("specificity", counts, zero_division=zero_division), pred)
 
 
@@ -135,6 +163,8 @@ def volume_similarity(
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
+    ignore_index: int | None = None,
+    mask: Any = None,
     zero_division: float = math.nan,
 ) -> Any:
     """Volume similarity: how close the predicted and target volumes are, whatever the overlap.
@@ -150,7 +180,9 @@ def volume_similarity(
         zero_division: Value when the class is absent from both prediction and target.
         Others: As in :func:`dice`.
     """
-    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    counts = _confusion_counts(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )
     return like_input(_score_counts("volume_similarity", counts, zero_division=zero_division, convention=convention), pred)
 
 
@@ -162,6 +194,8 @@ def relative_volume_difference(
     input_format: InputFormat = "index",
     num_classes: int | None = None,
     include_background: bool = True,
+    ignore_index: int | None = None,
+    mask: Any = None,
     zero_division: float = math.nan,
 ) -> Any:
     """Relative volume difference ``(|P| - |T|) / |T|``, as MedPy's ``ravd``.
@@ -173,7 +207,9 @@ def relative_volume_difference(
         zero_division: Value when the class is absent from the target (MedPy raises).
         Others: As in :func:`dice`.
     """
-    counts = _confusion_counts(pred, target, input_format, num_classes, include_background)
+    counts = _confusion_counts(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )
     return like_input(_score_counts("relative_volume_difference", counts, zero_division=zero_division, absolute=absolute), pred)
 
 
@@ -210,13 +246,17 @@ def _score_counts(
 
 
 def _confusion_counts(
-    pred: Any, target: Any, input_format: InputFormat, num_classes: int | None, include_background: bool
+    pred: Any, target: Any, input_format: InputFormat, num_classes: int | None, include_background: bool,
+    *, ignore_index: int | None = None, mask: Any = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    return _confusion_counts_and_seg(pred, target, input_format, num_classes, include_background)[0]
+    return _confusion_counts_and_seg(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )[0]
 
 
 def _confusion_counts_and_seg(
     pred: Any, target: Any, input_format: InputFormat, num_classes: int | None, include_background: bool,
+    *, ignore_index: int | None = None, mask: Any = None,
 ) -> tuple[tuple[Tensor, Tensor, Tensor, Tensor], Segmentations]:
     """TP, FP, FN and TN, each (B, C).
 
@@ -231,6 +271,11 @@ def _confusion_counts_and_seg(
         and _triton_counts.available()
         and (input_format == "one-hot" or (num_classes is not None and _triton_counts.fits(num_classes)))
     )
+    if mask is not None or ignore_index is not None:
+        seg = validate(p, t, check_values=False, **kw)  # type: ignore[arg-type]
+        ignore_index = _check_ignore_index(ignore_index, input_format)
+        m = _voxel_mask(mask, seg)
+        return _masked_counts(seg, m, ignore_index, native=native, gpu=gpu), seg
     seg = validate(p, t, check_values=not (native or gpu), **kw)  # type: ignore[arg-type]
     if native:
         counts = _native_counts(seg)
@@ -304,7 +349,7 @@ def _confusion(pred: Tensor, target: Tensor, num_classes: int) -> Tensor:
     One bincount pass per case: O(voxels) memory however many classes there are.
     """
     batch = pred.shape[0]
-    p, t = pred.reshape(batch, -1), target.reshape(batch, -1)
+    p, t = pred.flatten(1), target.flatten(1)
     cm = torch.zeros(batch, num_classes * num_classes, dtype=torch.int64, device=pred.device)
     for b in range(batch):
         for start in range(0, p.shape[1], _CHUNK):
@@ -323,3 +368,109 @@ def _count(mask: Tensor) -> Tensor:
 def _ratio(num: Tensor, den: Tensor, both_empty: float) -> Tensor:
     num, den = num.double(), den.double()
     return torch.where(den > 0, num / den.clamp_min(1), torch.full_like(den, both_empty))
+
+
+def _check_ignore_index(ignore_index: int | None, input_format: InputFormat) -> int | None:
+    if ignore_index is None:
+        return None
+    if isinstance(ignore_index, bool) or not isinstance(ignore_index, Integral):
+        raise TypeError("ignore_index must be an integer or None")
+    if not -(2**63) <= ignore_index < 2**63:
+        raise ValueError("ignore_index must fit in a signed 64-bit integer")
+    if input_format != "index":
+        raise ValueError("ignore_index requires input_format='index'; use mask for one-hot inputs")
+    return int(ignore_index)
+
+
+def _voxel_mask(mask: Any, seg: Segmentations) -> Tensor | None:
+    if mask is None:
+        return None
+    m = to_torch(mask)
+    if m.dtype != torch.bool:
+        raise TypeError("mask must be a boolean array")
+    if m.device != seg.pred.device:
+        raise ValueError("mask and inputs must be on the same device")
+    shape = (seg.batch, *seg.pred.shape[-seg.ndim:])
+    if m.shape == (seg.batch, 1, *shape[1:]):
+        m = m[:, 0]
+    if m.shape != shape:
+        raise ValueError(f"mask must have shape {shape} or {(seg.batch, 1, *shape[1:])}")
+    return m
+
+
+def _masked_counts(
+    seg: Segmentations, mask: Tensor | None, ignore_index: int | None, *, native: bool, gpu: bool,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Count valid voxels inside the native scan; allocate a combined mask only on fallback."""
+    if seg.batch == 0 or seg.num_classes == 0:
+        empty = torch.empty((seg.batch, len(seg.classes)), dtype=torch.int64, device=seg.pred.device)
+        return empty, empty.clone(), empty.clone(), empty.clone()
+    # uint64 values above INT64_MAX become negative when widened by a counting backend.
+    # They must be rejected, not mistaken for a negative ignored target label.
+    kernel_ignore = None if seg.target.dtype == torch.uint64 and ignore_index is not None and ignore_index < 0 else ignore_index
+    engine = _native if native else _triton_counts
+    # The kernels support real arrays; complex one-hot values are checked by the fallback.
+    if (native or gpu) and not (seg.pred.is_complex() or seg.target.is_complex()):
+        if seg.one_hot:
+            assert mask is not None
+            found = engine.masked_channel_counts(
+                seg.pred.flatten(0, 1), seg.target.flatten(0, 1), mask, seg.num_classes,
+            )
+            if found is not None:
+                both, p, t, valid = (v.view(seg.batch, seg.num_classes)[:, seg.first_class:] for v in found)
+                return both, p - both, t - both, valid - p - t + both
+        else:
+            if native:
+                matrices = [_native.confusion(seg.pred[b], seg.target[b], seg.num_classes,
+                            mask=None if mask is None else mask[b], ignore_index=kernel_ignore)
+                            for b in range(seg.batch)]
+                cm = None if any(x is None for x in matrices) else torch.stack(matrices)  # type: ignore[arg-type]
+            else:
+                cm = _triton_counts.confusion(seg.pred, seg.target, seg.num_classes,
+                                              mask=mask, ignore_index=kernel_ignore)
+            if cm is not None:
+                tp, fp, fn = _from_confusion(seg, cm)
+                return tp, fp, fn, cm.sum((1, 2))[:, None] - tp - fp - fn
+    # Also provides the precise validation error when a kernel rejects an included value.
+    return _masked_torch_counts(seg, mask, ignore_index)
+
+
+def _masked_torch_counts(seg: Segmentations, mask: Tensor | None,
+                         ignore_index: int | None) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    keep = mask
+    if ignore_index is not None:
+        # Widen before comparison so e.g. ignore_index=256 cannot wrap to uint8 label 0.
+        labels = seg.target.long()
+        observed = labels != ignore_index
+        if seg.target.dtype == torch.uint64 and ignore_index < 0:
+            observed |= labels < 0
+        keep = observed if keep is None else keep & observed
+    assert keep is not None
+    valid = keep.flatten(1).sum(1, dtype=torch.int64)[:, None]
+    if seg.one_hot:
+        for name, x in (("pred", seg.pred), ("target", seg.target)):
+            if bool((((x != 0) & (x != 1)) & keep[:, None]).any()):
+                raise ValueError(f"{name} must be binary (0/1) per channel with input_format='one-hot'; "
+                                 "threshold probabilities first")
+        p = seg.pred[:, seg.first_class:].bool() & keep[:, None]
+        t = seg.target[:, seg.first_class:].bool() & keep[:, None]
+        tp = _count(p & t)
+        fp, fn = _count(p) - tp, _count(t) - tp
+    else:
+        # Validation here costs additional passes only without a supported counting kernel.
+        p = torch.where(keep, seg.pred.long(), 0)
+        t = torch.where(keep, seg.target.long(), 0)
+        validate(p, t, input_format="index", num_classes=seg.num_classes,
+                 include_background=seg.first_class == 0)
+        # Reserve a discarded bin for excluded voxels. This avoids boolean indexing's dynamic
+        # allocation and GPU synchronization, and keeps the working buffer bounded by _CHUNK.
+        cm = torch.zeros((seg.batch, seg.num_classes**2 + 1), dtype=torch.int64, device=p.device)
+        p, t, keep_flat = p.flatten(1), t.flatten(1), keep.flatten(1)
+        for b in range(seg.batch):
+            for start in range(0, p.shape[1], _CHUNK):
+                sl = slice(start, start + _CHUNK)
+                indices = torch.where(keep_flat[b, sl], p[b, sl].long() * seg.num_classes + t[b, sl],
+                                      seg.num_classes**2)
+                cm[b] += torch.bincount(indices, minlength=seg.num_classes**2 + 1)
+        tp, fp, fn = _from_confusion(seg, cm[:, :-1].reshape(seg.batch, seg.num_classes, seg.num_classes))
+    return tp, fp, fn, valid - tp - fp - fn

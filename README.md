@@ -105,6 +105,23 @@ connectivity, component confidence rule and IoU matching threshold alongside the
 See the [advanced segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation)
 for definitions, empty-input conventions and examples.
 
+### Partially annotated overlap evaluation (unreleased)
+
+In the next development version, overlap and volume metrics accept `ignore_index` for index
+targets and a boolean `mask` of shape `(B, *spatial)` or `(B, 1, *spatial)`. The mask is shared
+across channels. Both options exclude voxels from validation and from TP, FP, FN **and TN**:
+
+```python
+scores = EF.dice(pred, target, num_classes=4, ignore_index=-1, mask=annotated_voxels)
+metric = Dice(num_classes=4, ignore_index=-1)
+metric.update(pred, target, mask=annotated_voxels)
+```
+
+Fully excluded cases use the metric's existing zero-denominator policy: NaN by default,
+which stateful averages skip. `functional.evaluate` and `MetricCollection` support the same
+options when selecting only overlap/volume metrics. Surface and clDice metrics require
+complete segmentations. These overlap options are not part of the published 0.0.1a4 API.
+
 ## Conventions
 
 For hard segmentation metrics, each convention is an explicit argument, because this is

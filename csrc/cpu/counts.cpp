@@ -47,9 +47,10 @@ int team_size() {
 #endif
 }
 
-template <typename T>
+template <typename T, bool Masked = false, bool Ignore = false>
 int confusion(const T *pred, const T *target, std::int64_t n, std::int64_t classes,
-              std::int64_t *out, int num_threads) {
+              std::int64_t *out, int num_threads, const std::uint8_t *mask = nullptr,
+              std::int64_t ignore_index = 0) {
   const std::int64_t cells = classes * classes;
   // One table per thread, as long as they fit in 64 MiB; with very many classes, fewer threads.
   const std::int64_t fit = std::max<std::int64_t>(1, (std::int64_t(64) << 20) / (cells * 8));
@@ -61,7 +62,9 @@ int confusion(const T *pred, const T *target, std::int64_t n, std::int64_t class
     std::int64_t *table = tables.data() + thread_id() * cells;
 #pragma omp for schedule(static)
     for (std::int64_t i = 0; i < n; ++i) {
+      if constexpr (Masked) { if (!mask[i]) continue; }
       const auto p = static_cast<std::int64_t>(pred[i]), t = static_cast<std::int64_t>(target[i]);
+      if constexpr (Ignore) { if (t == ignore_index) continue; }
       if (p < 0 || p >= classes || t < 0 || t >= classes) {
         out_of_range = true;
         continue;
@@ -80,18 +83,23 @@ int confusion(const T *pred, const T *target, std::int64_t n, std::int64_t class
 
 // `count` masks of `n` elements each, for prediction and target (C order, mask-major). Values
 // must be 0 or 1.
-template <typename T>
+template <typename T, bool Masked = false>
 int channel_counts(const T *pred, const T *target, std::int64_t count, std::int64_t n,
                    std::int64_t *both, std::int64_t *in_pred, std::int64_t *in_target,
-                   int num_threads) {
+                   int num_threads, const std::uint8_t *mask = nullptr,
+                   std::int64_t channels = 1, std::int64_t *valid = nullptr) {
   const int threads = threads_for(num_threads);
   bool not_binary = false;
   for (std::int64_t c = 0; c < count; ++c) {
     const T *p = pred + c * n, *t = target + c * n;
-    std::int64_t sum_both = 0, sum_p = 0, sum_t = 0;
+    std::int64_t sum_both = 0, sum_p = 0, sum_t = 0, sum_valid = 0;
 #pragma omp parallel for num_threads(threads) schedule(static) \
-    reduction(+ : sum_both, sum_p, sum_t) reduction(|| : not_binary)
+    reduction(+ : sum_both, sum_p, sum_t, sum_valid) reduction(|| : not_binary)
     for (std::int64_t i = 0; i < n; ++i) {
+      if constexpr (Masked) {
+        if (!mask[(c / channels) * n + i]) continue;
+        ++sum_valid;
+      }
       const bool a = p[i] != T(0), b = t[i] != T(0);
       if ((a && p[i] != T(1)) || (b && t[i] != T(1))) not_binary = true;
       sum_both += a && b;
@@ -101,6 +109,7 @@ int channel_counts(const T *pred, const T *target, std::int64_t count, std::int6
     both[c] = sum_both;
     in_pred[c] = sum_p;
     in_target[c] = sum_t;
+    if constexpr (Masked) valid[c] = sum_valid;
   }
   return not_binary ? EXACTA_INVALID_ARGUMENT : EXACTA_OK;
 }
@@ -310,3 +319,44 @@ EXACTA_CHANNEL_COUNTS(u8, uint8_t)
 EXACTA_CHANNEL_COUNTS(i64, int64_t)
 EXACTA_CHANNEL_COUNTS(f32, float)
 EXACTA_CHANNEL_COUNTS(f64, double)
+
+// Keep the original C entry points intact; masked variants share their counting loops.
+#define EXACTA_MASKED_CONFUSION(SUFFIX, TYPE)                                                  \
+  extern "C" int exacta_masked_confusion_##SUFFIX(                                            \
+      const TYPE *pred, const TYPE *target, int64_t n, int64_t classes, const uint8_t *mask,    \
+      int has_ignore, int64_t ignore_index, int64_t *out, int num_threads) {                   \
+    if (n < 0 || classes < 1 || out == nullptr ||                                             \
+        (n > 0 && (pred == nullptr || target == nullptr))) return EXACTA_INVALID_ARGUMENT;    \
+    try {                                                                                    \
+      if (mask && has_ignore)                                                               \
+        return confusion<TYPE, true, true>(pred, target, n, classes, out, num_threads,         \
+                                            mask, ignore_index);                             \
+      if (mask)                                                                             \
+        return confusion<TYPE, true>(pred, target, n, classes, out, num_threads, mask);        \
+      if (has_ignore)                                                                       \
+        return confusion<TYPE, false, true>(pred, target, n, classes, out, num_threads,        \
+                                             nullptr, ignore_index);                         \
+      return confusion(pred, target, n, classes, out, num_threads);                           \
+    } catch (const std::bad_alloc &) { return EXACTA_OUT_OF_MEMORY; }                         \
+  }
+
+EXACTA_MASKED_CONFUSION(u8, uint8_t)
+EXACTA_MASKED_CONFUSION(i32, int32_t)
+EXACTA_MASKED_CONFUSION(i64, int64_t)
+
+#define EXACTA_MASKED_CHANNEL_COUNTS(SUFFIX, TYPE)                                           \
+  extern "C" int exacta_masked_channel_counts_##SUFFIX(                                     \
+      const TYPE *pred, const TYPE *target, int64_t count, int64_t n, const uint8_t *mask,    \
+      int64_t channels, int64_t *both, int64_t *in_pred, int64_t *in_target, int64_t *valid,  \
+      int num_threads) {                                                                   \
+    if (count < 0 || n < 0 || channels < 1 || count % channels != 0 ||                       \
+        (count > 0 && (!both || !in_pred || !in_target || !valid)) ||                        \
+        (count > 0 && n > 0 && (!pred || !target || !mask))) return EXACTA_INVALID_ARGUMENT; \
+    return channel_counts<TYPE, true>(pred, target, count, n, both, in_pred, in_target,      \
+                                       num_threads, mask, channels, valid);                 \
+  }
+
+EXACTA_MASKED_CHANNEL_COUNTS(u8, uint8_t)
+EXACTA_MASKED_CHANNEL_COUNTS(i64, int64_t)
+EXACTA_MASKED_CHANNEL_COUNTS(f32, float)
+EXACTA_MASKED_CHANNEL_COUNTS(f64, double)

@@ -54,6 +54,7 @@ def evaluate(
     pred: Any, target: Any, *, metrics: MetricSelection,
     spacing: Any = None, input_format: InputFormat = "index", num_classes: int | None = None,
     include_background: bool = True, backend: sf.Backend = "auto",
+    ignore_index: int | None = None, mask: Any = None,
 ) -> dict[str, Any]:
     """Return named (B, K) arrays, sharing confusion counts and compatible surface distances.
 
@@ -64,12 +65,18 @@ def evaluate(
     transform, as for individual surface metrics. Spacing is required when requesting any
     surface metric. Results use the prediction's array library. No input or volume cache is
     retained after this call, so subsequent input mutation cannot return stale scores.
+    ``mask`` and ``ignore_index`` follow :func:`dice` and require a selection containing only
+    overlap/volume metrics. Surface and clDice masking is undefined and is rejected.
     """
     requests = _selection(metrics)
     counts_names = [n for n, options in requests.items() if "surface" not in options and n != "cldice"]
+    if (mask is not None or ignore_index is not None) and len(counts_names) != len(requests):
+        raise ValueError("mask and ignore_index support only overlap/volume metrics; "
+                         "surface and cldice metrics require complete segmentations")
     if counts_names:
         counts, seg = overlap._confusion_counts_and_seg(
             pred, target, input_format, num_classes, include_background,
+            ignore_index=ignore_index, mask=mask,
         )
         results = {n: overlap._score_counts(n, counts, **requests[n]) for n in counts_names}
     else:
