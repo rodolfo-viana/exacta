@@ -107,6 +107,34 @@ int exacta_confusion_i32(const int32_t *pred, const int32_t *target, int64_t n, 
 int exacta_confusion_i64(const int64_t *pred, const int64_t *target, int64_t n, int64_t classes,
                          int64_t *out, int num_threads);
 
+/* Masked confusion: skip mask == 0 (mask may be NULL) and, when has_ignore != 0,
+ * target == ignore_index before validating either label. The mask has n bytes. */
+int exacta_masked_confusion_u8(const uint8_t *pred, const uint8_t *target,
+    int64_t n, int64_t classes, const uint8_t *mask, int has_ignore, int64_t ignore_index,
+    int64_t *out, int num_threads);
+int exacta_masked_confusion_i32(const int32_t *pred, const int32_t *target,
+    int64_t n, int64_t classes, const uint8_t *mask, int has_ignore, int64_t ignore_index,
+    int64_t *out, int num_threads);
+int exacta_masked_confusion_i64(const int64_t *pred, const int64_t *target,
+    int64_t n, int64_t classes, const uint8_t *mask, int has_ignore, int64_t ignore_index,
+    int64_t *out, int num_threads);
+
+/* Masked channel counts: mask is (count / channels, n), shared across each case's channels.
+ * Excluded values are not validated or counted. valid receives included elements per channel.
+ * count must be divisible by channels (> 0); all four outputs have count elements. */
+int exacta_masked_channel_counts_u8(const uint8_t *pred, const uint8_t *target,
+    int64_t count, int64_t n, const uint8_t *mask, int64_t channels,
+    int64_t *both, int64_t *in_pred, int64_t *in_target, int64_t *valid, int num_threads);
+int exacta_masked_channel_counts_i64(const int64_t *pred, const int64_t *target,
+    int64_t count, int64_t n, const uint8_t *mask, int64_t channels,
+    int64_t *both, int64_t *in_pred, int64_t *in_target, int64_t *valid, int num_threads);
+int exacta_masked_channel_counts_f32(const float *pred, const float *target,
+    int64_t count, int64_t n, const uint8_t *mask, int64_t channels,
+    int64_t *both, int64_t *in_pred, int64_t *in_target, int64_t *valid, int num_threads);
+int exacta_masked_channel_counts_f64(const double *pred, const double *target,
+    int64_t count, int64_t n, const uint8_t *mask, int64_t channels,
+    int64_t *both, int64_t *in_pred, int64_t *in_target, int64_t *valid, int num_threads);
+
 /* Number of elements of each value of a label map of `n` elements: out[v] for v in [0, bins).
  * Returns EXACTA_INVALID_ARGUMENT if a value lies outside [0, bins).
  */

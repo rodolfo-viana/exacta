@@ -33,18 +33,21 @@ def fits(classes: int) -> bool:
     return classes * classes + 1 <= _MAX_BINS
 
 
-def confusion(pred: Tensor, target: Tensor, classes: int) -> Tensor | None:
+def confusion(pred: Tensor, target: Tensor, classes: int, *, mask: Tensor | None = None,
+              ignore_index: int | None = None) -> Tensor | None:
     """(B, classes, classes) int64 confusion matrices of two CUDA label maps (B, ...),
     ``[b, i, j]`` = voxels predicted i with target j; None if a label lies outside [0, classes)."""
     batch = pred.shape[0]
     p, t = (_flat(x, batch) for x in (pred, target))
+    m = _flat(mask, batch) if mask is not None else p
     n = p.shape[1]
     bins = triton.next_power_of_2(classes * classes)
     out = torch.zeros((batch, bins), dtype=torch.int64, device=pred.device)
     bad = torch.zeros(1, dtype=torch.int32, device=pred.device)
     if n and batch:
         with torch.cuda.device(pred.device):
-            _confusion[(triton.cdiv(n, _BLOCK), batch)](p, t, out, bad, n, classes, BINS=bins, BLOCK=_BLOCK)
+            _confusion[(triton.cdiv(n, _BLOCK), batch)](p, t, m, out, bad, n, classes,
+                HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index, BINS=bins, BLOCK=_BLOCK)
     if bad.item():
         return None
     return out[:, : classes * classes].view(batch, classes, classes)
@@ -53,17 +56,33 @@ def confusion(pred: Tensor, target: Tensor, classes: int) -> Tensor | None:
 def channel_counts(pred: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor] | None:
     """Per mask of two CUDA stacks of binary masks (C, ...): elements in both, in pred and in
     target (int64, (C,)); None if a value is not 0 or 1."""
+    found = _channel_counts_impl(pred, target, None, 1)
+    return None if found is None else (found[:, 0], found[:, 1], found[:, 2])
+
+
+def masked_channel_counts(pred: Tensor, target: Tensor, mask: Tensor,
+                          channels: int) -> tuple[Tensor, Tensor, Tensor, Tensor] | None:
+    """Binary counts and valid elements with a shared (B, ...) voxel mask."""
+    found = _channel_counts_impl(pred, target, mask, channels)
+    return None if found is None else (found[:, 0], found[:, 1], found[:, 2], found[:, 3])
+
+
+def _channel_counts_impl(pred: Tensor, target: Tensor, mask: Tensor | None,
+                         channels: int) -> Tensor | None:
     count = pred.shape[0]
     p, t = (_flat(x, count) for x in (pred, target))
     n = p.shape[1]
-    out = torch.zeros((count, 3), dtype=torch.int64, device=pred.device)
+    m = _flat(mask, mask.shape[0]) if mask is not None else p
+    width = 4 if mask is not None else 3
+    out = torch.zeros((count, width), dtype=torch.int64, device=pred.device)
     bad = torch.zeros(1, dtype=torch.int32, device=pred.device)
     if n and count:
         with torch.cuda.device(pred.device):
-            _channel_counts[(triton.cdiv(n, _BLOCK), count)](p, t, out, bad, n, BLOCK=_BLOCK)
+            _channel_counts[(triton.cdiv(n, _BLOCK), count)](p, t, m, out, bad, n, CHANNELS=channels,
+                HAS_MASK=mask is not None, WIDTH=width, BLOCK=_BLOCK)
     if bad.item():
         return None
-    return out[:, 0], out[:, 1], out[:, 2]
+    return out
 
 
 def _flat(x: Tensor, rows: int) -> Tensor:
@@ -75,12 +94,17 @@ def _flat(x: Tensor, rows: int) -> Tensor:
 if triton is not None:
 
     @triton.jit(do_not_specialize=["n", "classes"])
-    def _confusion(pred, target, out, bad, n, classes, BINS: tl.constexpr, BLOCK: tl.constexpr):
+    def _confusion(pred, target, mask, out, bad, n, classes, HAS_MASK: tl.constexpr,
+                   IGNORE_INDEX: tl.constexpr, BINS: tl.constexpr, BLOCK: tl.constexpr):
         case = tl.program_id(1).to(tl.int64)
         offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
         valid = offs < n
         p = tl.load(pred + case * n + offs, mask=valid, other=0).to(tl.int64)
         t = tl.load(target + case * n + offs, mask=valid, other=0).to(tl.int64)
+        if HAS_MASK:
+            valid &= tl.load(mask + case * n + offs, mask=offs < n, other=0) != 0
+        if IGNORE_INDEX is not None:
+            valid &= t != tl.full((), IGNORE_INDEX, tl.int64)
         inside = (p >= 0) & (p < classes) & (t >= 0) & (t < classes)
         tl.atomic_max(bad, tl.max((valid & ~inside).to(tl.int32), axis=0))
         keep = valid & inside
@@ -89,15 +113,19 @@ if triton is not None:
         tl.atomic_add(out + case * BINS + bins, counts.to(tl.int64), mask=counts > 0)
 
     @triton.jit(do_not_specialize=["n"])
-    def _channel_counts(pred, target, out, bad, n, BLOCK: tl.constexpr):
+    def _channel_counts(pred, target, mask, out, bad, n, CHANNELS: tl.constexpr,
+                        HAS_MASK: tl.constexpr, WIDTH: tl.constexpr, BLOCK: tl.constexpr):
         row = tl.program_id(1).to(tl.int64)
         offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
         valid = offs < n
         p = tl.load(pred + row * n + offs, mask=valid, other=0)
         t = tl.load(target + row * n + offs, mask=valid, other=0)
+        if HAS_MASK:
+            valid &= tl.load(mask + (row // CHANNELS) * n + offs, mask=offs < n, other=0) != 0
+            tl.atomic_add(out + row * WIDTH + 3, tl.sum(valid.to(tl.int32), axis=0).to(tl.int64))
         not_binary = ((p != 0) & (p != 1)) | ((t != 0) & (t != 1))  # NaN included
         tl.atomic_max(bad, tl.max((valid & not_binary).to(tl.int32), axis=0))
         a, b = valid & (p != 0), valid & (t != 0)
-        tl.atomic_add(out + row * 3, tl.sum((a & b).to(tl.int32), axis=0).to(tl.int64))
-        tl.atomic_add(out + row * 3 + 1, tl.sum(a.to(tl.int32), axis=0).to(tl.int64))
-        tl.atomic_add(out + row * 3 + 2, tl.sum(b.to(tl.int32), axis=0).to(tl.int64))
+        tl.atomic_add(out + row * WIDTH, tl.sum((a & b).to(tl.int32), axis=0).to(tl.int64))
+        tl.atomic_add(out + row * WIDTH + 1, tl.sum(a.to(tl.int32), axis=0).to(tl.int64))
+        tl.atomic_add(out + row * WIDTH + 2, tl.sum(b.to(tl.int32), axis=0).to(tl.int64))

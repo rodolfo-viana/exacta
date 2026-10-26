@@ -10,6 +10,7 @@ from torch import Tensor
 from exacta._inputs import InputFormat, to_torch
 from exacta.functional.collection import MetricSelection, _selection, evaluate
 from exacta.functional.surface import Backend
+from exacta.functional.overlap import _check_ignore_index
 from exacta.metrics.base import MetricResult, _all_gather_cat
 
 
@@ -26,15 +27,17 @@ class MetricCollection:
         self, *, metrics: MetricSelection, spacing: Any = None,
         input_format: InputFormat = "index", num_classes: int | None = None,
         include_background: bool = True, backend: Backend = "auto",
+        ignore_index: int | None = None,
     ) -> None:
         self._metrics = _selection(metrics)
         self._spacing = spacing
         self._kwargs = dict(input_format=input_format, num_classes=num_classes,
-                            include_background=include_background, backend=backend)
+                            include_background=include_background, backend=backend,
+                            ignore_index=_check_ignore_index(ignore_index, input_format))
         self._values: list[Tensor] = []
 
-    def update(self, pred: Any, target: Any, *, spacing: Any = None) -> dict[str, Tensor]:
-        values = evaluate(to_torch(pred), to_torch(target), metrics=self._metrics,
+    def update(self, pred: Any, target: Any, *, spacing: Any = None, mask: Any = None) -> dict[str, Tensor]:
+        values = evaluate(to_torch(pred), to_torch(target), metrics=self._metrics, mask=mask,
                           spacing=self._spacing if spacing is None else spacing, **self._kwargs)  # type: ignore[arg-type]
         self._values.append(torch.stack(list(values.values()), -1).flatten(1).detach())
         return values

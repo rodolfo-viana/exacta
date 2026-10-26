@@ -10,6 +10,7 @@ from torch import Tensor
 from exacta import functional
 from exacta._inputs import InputFormat, to_torch
 from exacta.functional.surface import Backend, Combine, Surface
+from exacta.functional.overlap import _check_ignore_index
 from exacta.metrics.base import PerCaseMetric
 
 
@@ -36,13 +37,26 @@ class _OverlapMetric(PerCaseMetric):
         return self._fn(pred, target, **self._kwargs)
 
 
-class Dice(_OverlapMetric):
+class _MaskedOverlapMetric(_OverlapMetric):
+    def __init__(self, *, input_format: InputFormat = "index", num_classes: int | None = None,
+                 include_background: bool = True, both_empty: float = math.nan,
+                 ignore_index: int | None = None) -> None:
+        super().__init__(input_format=input_format, num_classes=num_classes,
+                         include_background=include_background, both_empty=both_empty)
+        self._kwargs["ignore_index"] = _check_ignore_index(ignore_index, input_format)
+
+    def update(self, pred: Any, target: Any, *, mask: Any = None) -> Tensor:
+        """Record scores on included voxels; the mask is not retained."""
+        return self._record(self._fn(to_torch(pred), to_torch(target), mask=mask, **self._kwargs))
+
+
+class Dice(_MaskedOverlapMetric):
     """Dice coefficient per case and class; see :func:`exacta.functional.dice`."""
 
     _fn = staticmethod(functional.dice)
 
 
-class IoU(_OverlapMetric):
+class IoU(_MaskedOverlapMetric):
     """Intersection over union per case and class; see :func:`exacta.functional.iou`."""
 
     _fn = staticmethod(functional.iou)
@@ -69,6 +83,7 @@ class _RatioMetric(PerCaseMetric):
         num_classes: int | None = None,
         include_background: bool = True,
         zero_division: float = math.nan,
+        ignore_index: int | None = None,
         **definition: Any,
     ) -> None:
         super().__init__()
@@ -77,8 +92,13 @@ class _RatioMetric(PerCaseMetric):
             num_classes=num_classes,
             include_background=include_background,
             zero_division=zero_division,
+            ignore_index=_check_ignore_index(ignore_index, input_format),
             **definition,
         )
+
+    def update(self, pred: Any, target: Any, *, mask: Any = None) -> Tensor:
+        """Record scores on included voxels; the mask is not retained."""
+        return self._record(self._fn(to_torch(pred), to_torch(target), mask=mask, **self._kwargs))
 
     def _batch(self, pred: Tensor, target: Tensor) -> Tensor:
         return self._fn(pred, target, **self._kwargs)
@@ -115,12 +135,14 @@ class VolumeSimilarity(_RatioMetric):
         num_classes: int | None = None,
         include_background: bool = True,
         zero_division: float = math.nan,
+        ignore_index: int | None = None,
     ) -> None:
         super().__init__(
             input_format=input_format,
             num_classes=num_classes,
             include_background=include_background,
             zero_division=zero_division,
+            ignore_index=_check_ignore_index(ignore_index, input_format),
             convention=convention,
         )
 
@@ -139,12 +161,14 @@ class RelativeVolumeDifference(_RatioMetric):
         num_classes: int | None = None,
         include_background: bool = True,
         zero_division: float = math.nan,
+        ignore_index: int | None = None,
     ) -> None:
         super().__init__(
             input_format=input_format,
             num_classes=num_classes,
             include_background=include_background,
             zero_division=zero_division,
+            ignore_index=_check_ignore_index(ignore_index, input_format),
             absolute=absolute,
         )
 

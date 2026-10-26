@@ -2,6 +2,21 @@
 
 Release notes for Exacta's alpha versions.
 
+## Unreleased
+
+Overlap and volume metrics now support evaluation on selected voxels, including partially
+annotated segmentations.
+
+- Add boolean voxel masks and index-target `ignore_index` to Dice, IoU, sensitivity,
+  precision, specificity, volume similarity and relative volume difference, including
+  stateful metrics and shared collections.
+- Exclude masked/ignored voxels from both label validation and all confusion counts,
+  including true negatives. Fully excluded cases use each metric's zero-denominator policy
+  (NaN by default). Surface and clDice collections reject these options because partial
+  boundary/topology evaluation needs a separate definition.
+- Fuse exclusion and counting in C++/OpenMP and Triton without expanding index targets or
+  broadcasting masks into channel-sized buffers; retain a checked PyTorch fallback.
+
 ## 0.0.1a4 — 2026-10-24
 
 This release adds boundary and topology objectives, probability metrics and confidence-ranked

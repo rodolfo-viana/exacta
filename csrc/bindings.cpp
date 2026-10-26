@@ -148,6 +148,54 @@ bool channel_counts(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_con
   return status == EXACTA_OK;
 }
 
+// Masked bindings accept an empty mask only for index inputs (ignore_index alone).
+template <typename T, auto Kernel>
+bool masked_confusion(Flat<T> pred, Flat<T> target, Flat<std::uint8_t> mask,
+    bool has_ignore, std::int64_t ignore_index,
+    nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu, nb::c_contig> out, int num_threads) {
+  const auto n = pred.shape(0);
+  if (target.shape(0) != n || (mask.shape(0) != 0 && mask.shape(0) != n) ||
+      out.shape(0) == 0 || out.shape(0) != out.shape(1)) {
+    throw std::invalid_argument("pred, target and mask (N,) and out (C, C) do not agree");
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = Kernel(pred.data(), target.data(), static_cast<std::int64_t>(n),
+        static_cast<std::int64_t>(out.shape(0)), mask.shape(0) ? mask.data() : nullptr,
+        has_ignore, ignore_index, out.data(), num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT)
+    throw std::runtime_error(exacta_status_string(status));
+  return status == EXACTA_OK;
+}
+
+template <typename T, auto Kernel>
+bool masked_channel_counts(
+    nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_contig> pred,
+    nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_contig> target,
+    nb::ndarray<const std::uint8_t, nb::ndim<2>, nb::device::cpu, nb::c_contig> mask,
+    std::int64_t channels, Counts both, Counts in_pred, Counts in_target, Counts valid,
+    int num_threads) {
+  const auto count = pred.shape(0), n = pred.shape(1);
+  if (channels < 1 || count % channels != 0 || target.shape(0) != count ||
+      target.shape(1) != n || mask.shape(0) != count / channels || mask.shape(1) != n ||
+      both.shape(0) != count || in_pred.shape(0) != count || in_target.shape(0) != count ||
+      valid.shape(0) != count) {
+    throw std::invalid_argument("pred, target (B*C, N), mask (B, N) and counts (B*C,) disagree");
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = Kernel(pred.data(), target.data(), static_cast<std::int64_t>(count),
+        static_cast<std::int64_t>(n), mask.data(), channels, both.data(), in_pred.data(),
+        in_target.data(), valid.data(), num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT)
+    throw std::runtime_error(exacta_status_string(status));
+  return status == EXACTA_OK;
+}
+
 using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
 
 template <typename T, int (*Kernel)(const T*, T*, int64_t*, const int64_t*, int, int, int)>
@@ -513,6 +561,41 @@ NB_MODULE(_C, m) {
         nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("both").noconvert(),
         nb::arg("in_pred").noconvert(), nb::arg("in_target").noconvert(),
         nb::arg("num_threads") = 0, counts_doc);
+  m.def("masked_confusion", &masked_confusion<std::uint8_t, exacta_masked_confusion_u8>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("has_ignore"), nb::arg("ignore_index"), nb::arg("out").noconvert(),
+        nb::arg("num_threads") = 0,
+        "Confusion counts after excluding masked/ignored voxels; False for invalid kept labels.");
+  m.def("masked_confusion", &masked_confusion<std::int32_t, exacta_masked_confusion_i32>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("has_ignore"), nb::arg("ignore_index"), nb::arg("out").noconvert(),
+        nb::arg("num_threads") = 0,
+        "Confusion counts after excluding masked/ignored voxels; False for invalid kept labels.");
+  m.def("masked_confusion", &masked_confusion<std::int64_t, exacta_masked_confusion_i64>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("has_ignore"), nb::arg("ignore_index"), nb::arg("out").noconvert(),
+        nb::arg("num_threads") = 0,
+        "Confusion counts after excluding masked/ignored voxels; False for invalid kept labels.");
+  m.def("masked_channel_counts", &masked_channel_counts<std::uint8_t, exacta_masked_channel_counts_u8>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("both").noconvert(), nb::arg("in_pred").noconvert(),
+        nb::arg("in_target").noconvert(), nb::arg("valid").noconvert(), nb::arg("num_threads") = 0,
+        "Binary counts and included voxels with a shared per-case mask; False for invalid kept values.");
+  m.def("masked_channel_counts", &masked_channel_counts<std::int64_t, exacta_masked_channel_counts_i64>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("both").noconvert(), nb::arg("in_pred").noconvert(),
+        nb::arg("in_target").noconvert(), nb::arg("valid").noconvert(), nb::arg("num_threads") = 0,
+        "Binary counts and included voxels with a shared per-case mask; False for invalid kept values.");
+  m.def("masked_channel_counts", &masked_channel_counts<float, exacta_masked_channel_counts_f32>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("both").noconvert(), nb::arg("in_pred").noconvert(),
+        nb::arg("in_target").noconvert(), nb::arg("valid").noconvert(), nb::arg("num_threads") = 0,
+        "Binary counts and included voxels with a shared per-case mask; False for invalid kept values.");
+  m.def("masked_channel_counts", &masked_channel_counts<double, exacta_masked_channel_counts_f64>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("both").noconvert(), nb::arg("in_pred").noconvert(),
+        nb::arg("in_target").noconvert(), nb::arg("valid").noconvert(), nb::arg("num_threads") = 0,
+        "Binary counts and included voxels with a shared per-case mask; False for invalid kept values.");
   const char *binary_doc =
       "Write into `out` (uint8, (N,)) whether each of `values` (N,) is nonzero; returns False if "
       "one is neither 0 nor 1.";
