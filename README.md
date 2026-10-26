@@ -148,6 +148,13 @@ Dice-focal and Dice-top-k CE, plus `LovaszHingeLoss` for binary logits or indepe
 Probability/ranking APIs and both loss additions support 2D and 3D inputs. Physical volume
 APIs require 3D. These additions are not included in the published 0.0.1a4 package.
 
+`GeneralizedWassersteinDiceLoss` adds class-distance costs for exclusive labels in 2D/3D.
+Supply a symmetric, nonnegative matrix with zero diagonal; it is normalized by its maximum.
+The default foreground weighting requires maximal background/foreground costs. `"GDL"`
+uses inverse observed class counts and also weights the error term. Masks, ignored labels,
+higher derivatives and native PyTorch CPU/CUDA compilation are supported. This loss is
+not included in the published 0.0.1a4 package.
+
 ## Conventions
 
 For hard segmentation metrics, each convention is an explicit argument, because this is
