@@ -73,6 +73,9 @@ class _OverlapLoss(nn.Module):
     def _overlap_power(self) -> float:
         return 1.0
 
+    def _squared_denominator(self) -> bool:
+        return False
+
     def forward(self, input: Tensor, target: Tensor, *, mask: Tensor | None = None) -> Tensor:
         mask = _check_mask(mask, input)
         if _use_triton(self.backend, input, target, allow_empty=self.distributed):
@@ -111,7 +114,10 @@ class _OverlapLoss(nn.Module):
             return _overlap_mean(intersection + self.smooth,
                                  intersection + alpha * fp + beta * fn + self.smooth, valid_counts,
                                  power=self._overlap_power()).to(input.dtype)
-        prediction, truth = probs.sum(dims), onehot.sum(dims)
+        if self._squared_denominator():
+            prediction, truth = probs.square().sum(dims), onehot.square().sum(dims)
+        else:
+            prediction, truth = probs.sum(dims), onehot.sum(dims)
         if self.distributed:
             intersection, prediction, truth, valid_counts = _global_overlap(
                 intersection, prediction, truth, valid_counts, input,
@@ -154,6 +160,7 @@ class _OverlapLoss(nn.Module):
             class_weight=class_weight, focal=focal,
             distributed=self.distributed,
             overlap_power=self._overlap_power(),
+            squared_pred=self._squared_denominator(),
         )
 
 
@@ -167,6 +174,9 @@ class DiceLoss(_OverlapLoss):
     ``"one-hot"`` (also accepts soft labels). ``smooth=1e-5`` adds the same nonnegative value
     to numerator and denominator, matching MONAI's equal ``smooth_nr`` and ``smooth_dr``.
     ``backend`` selects ``"auto"``, ``"torch"`` or ``"triton"``.
+    ``squared_pred=True`` changes the denominator to ``Σ p² + Σ g² + smooth``;
+    the product numerator is unchanged, including for soft targets. This option
+    is supported by the fused forward/backward and distributed reductions.
 
     ``ignore_index`` excludes that integer label. All losses also accept a keyword-only
     boolean ``mask`` of shape ``(B, *spatial)`` or ``(B, 1, *spatial)`` in forward; True
@@ -182,6 +192,20 @@ class DiceLoss(_OverlapLoss):
     parameter gradients with ordinary DDP gradient averaging. Logit gradients before
     DDP averaging are multiplied by world size. Local behavior remains the default.
     """
+
+    def __init__(self, *, squared_pred: bool = False, activation: Activation = "softmax",
+                 target_format: TargetFormat = "index", include_background: bool = True,
+                 batch_dice: bool = False, distributed: bool = False, smooth: float = 1e-5,
+                 ignore_index: int | None = None, backend: Backend = "auto") -> None:
+        super().__init__(activation=activation, target_format=target_format,
+                         include_background=include_background, batch_dice=batch_dice,
+                         distributed=distributed, smooth=smooth, ignore_index=ignore_index, backend=backend)
+        if not isinstance(squared_pred, bool):
+            raise TypeError("squared_pred must be a bool")
+        self.squared_pred = squared_pred
+
+    def _squared_denominator(self) -> bool:
+        return self.squared_pred
 
 
 class TverskyLoss(_OverlapLoss):
@@ -408,6 +432,7 @@ class DiceCELoss(nn.Module):
         lambda_dice: float = 1.0,
         lambda_ce: float = 1.0,
         class_weight: Tensor | Sequence[float] | None = None,
+        squared_pred: bool = False,
         ignore_index: int | None = None,
         backend: Backend = "auto",
     ) -> None:
@@ -415,6 +440,7 @@ class DiceCELoss(nn.Module):
         if activation not in ("softmax", "sigmoid"):
             raise ValueError(f"activation must be 'softmax' or 'sigmoid', got {activation!r}")
         self.dice = DiceLoss(
+            squared_pred=squared_pred,
             activation=activation,
             target_format=target_format,
             include_background=include_background,
@@ -518,11 +544,11 @@ class DiceFocalLoss(DiceCELoss):
         self, *, activation: Literal["softmax", "sigmoid"] = "softmax", target_format: TargetFormat = "index",
         include_background: bool = True, batch_dice: bool = False, distributed: bool = False, smooth: float = 1e-5,
         lambda_dice: float = 1.0, lambda_focal: float = 1.0, gamma: float = 2.0, alpha: float | None = None,
-        ignore_index: int | None = None, backend: Backend = "auto",
+        ignore_index: int | None = None, backend: Backend = "auto", squared_pred: bool = False,
     ) -> None:
         super().__init__(activation=activation, target_format=target_format, include_background=include_background,
                          batch_dice=batch_dice, distributed=distributed, smooth=smooth, lambda_dice=lambda_dice, lambda_ce=lambda_focal,
-                         ignore_index=ignore_index, backend=backend)
+                         ignore_index=ignore_index, backend=backend, squared_pred=squared_pred)
         self.focal = FocalLoss(activation=activation, target_format=target_format, gamma=gamma, alpha=alpha,
                                ignore_index=ignore_index, distributed=distributed, backend="torch")
         self.lambda_focal = lambda_focal
