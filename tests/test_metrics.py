@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from _process import spawn
 
 import exacta.functional as EF
 from _data import pair
@@ -99,14 +100,17 @@ def test_compute_before_update_and_reset():
 
 
 def _ddp_worker(rank, world, init_file, batches, out):
-    dist.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world)
-    metric = Dice(num_classes=3)
-    for pred, target in batches[rank::world]:  # uneven split: rank 0 gets 2 batches, rank 1 gets 1
-        metric.update(pred, target)
-    result = metric.compute()
-    if rank == 0:
-        out.put(result.per_case.numpy())
-    dist.destroy_process_group()
+    dist.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world,
+                            timeout=timedelta(seconds=30))
+    try:
+        metric = Dice(num_classes=3)
+        for pred, target in batches[rank::world]:  # uneven split: rank 0 gets 2 batches, rank 1 gets 1
+            metric.update(pred, target)
+        result = metric.compute()
+        if rank == 0:
+            out.put(result.per_case.numpy())
+    finally:
+        dist.destroy_process_group()
 
 
 def test_ddp_gathers_all_ranks(tmp_path):
@@ -115,9 +119,7 @@ def test_ddp_gathers_all_ranks(tmp_path):
     batches = _batches("cpu", n=3)
     ctx = mp.get_context("spawn")
     out = ctx.Queue()
-    mp.start_processes(
-        _ddp_worker, args=(2, tmp_path / "init", batches, out), nprocs=2, start_method="spawn"
-    )
+    spawn(_ddp_worker, args=(2, tmp_path / "init", batches, out), directory=tmp_path / 'workers')
     gathered = out.get(timeout=60)
     order = [0, 2, 1]  # rank 0 holds batches 0 and 2, rank 1 holds batch 1
     expected = torch.cat([EF.dice(*batches[i], num_classes=3) for i in order]).numpy()
