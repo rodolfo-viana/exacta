@@ -119,7 +119,7 @@ metric.update(pred, target, mask=annotated_voxels)
 
 Fully excluded cases use the metric's existing zero-denominator policy: NaN by default,
 which stateful averages skip. `functional.evaluate` and `MetricCollection` support the same
-options when selecting only overlap/volume metrics. Surface and clDice metrics require
+options when selecting only overlap/area/volume metrics. Surface and clDice metrics require
 complete segmentations. These overlap options are not part of the published 0.0.1a4 API.
 
 ### Additional segmentation APIs (unreleased)
@@ -131,6 +131,11 @@ macro and micro reductions are explicit, and masks can select different voxels p
 For 3D hard labels, `predicted_volume`, `target_volume` and `volume_error` report mm³ or mL
 from spacing in millimetres. They share counts through `evaluate` and `MetricCollection`.
 Signed volume error is prediction minus target; `absolute=True` gives absolute physical error.
+For 2D images, `predicted_area`, `target_area` and `area_error` provide the corresponding
+measurements in mm² or cm², with two-axis pixel spacing. Stateful `PredictedArea`,
+`TargetArea` and `AreaError` use the same per-case aggregation. See the
+[2D medical-segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Medical-segmentation-2D)
+for target layouts, partial annotation and slice-versus-patient evaluation.
 
 `average_precision`, `auroc` and `voxel_ranking` evaluate voxel-level rankings for binary,
 multiclass and multilabel segmentations. Exact mode groups tied scores; `bins=256` selects

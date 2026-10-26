@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
-from _process import spawn
+from _process import destroy_process_group, spawn
 
 import exacta.functional as EF
 from exacta.functional import overlap, surface
@@ -111,7 +111,7 @@ def _distributed_collection(rank, init_file):
         with pytest.raises(RuntimeError, match='before update'):
             collection.compute()
     finally:
-        dist.destroy_process_group()
+        destroy_process_group()
 
 
 def test_distributed_collection_with_empty_rank(tmp_path):

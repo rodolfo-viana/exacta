@@ -4,6 +4,7 @@ from datetime import timedelta
 import pytest
 import torch
 import torch.distributed as dist
+from _process import destroy_process_group
 import torch.multiprocessing as mp
 
 from exacta import metrics
@@ -34,7 +35,7 @@ def worker(rank,path,owner):
         assert curves.curves[0].num_targets==2
         assert curves.average_precision.item()==1
     finally:
-        dist.destroy_process_group()
+        destroy_process_group()
 
 
 @pytest.mark.parametrize('owner',[-1,0,1])

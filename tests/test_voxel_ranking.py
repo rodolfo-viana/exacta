@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
+from _process import destroy_process_group
 import torch.multiprocessing as mp
 
 from exacta import functional as f, metrics
@@ -175,7 +176,7 @@ def _distributed_worker(rank, path):
                 torch.testing.assert_close(result.average_precision, reference.average_precision)
                 torch.testing.assert_close(result.auroc, reference.auroc)
     finally:
-        dist.destroy_process_group()
+        destroy_process_group()
 
 
 def test_ranking_distributed_empty_rank(tmp_path):

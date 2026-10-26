@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any, Literal
 
 import numpy as np
@@ -55,6 +56,15 @@ def like_input(result: Tensor, original: Any) -> Any:
     cupy = sys.modules.get("cupy")
     if cupy is not None and isinstance(original, cupy.ndarray):
         return cupy.from_dlpack(result)
+    jax = sys.modules.get("jax")
+    if jax is not None and isinstance(original, jax.Array):
+        # DLPack imports otherwise silently narrow float64/int64 under JAX's default
+        # configuration. Scope the override to this conversion, preserving caller state.
+        enable_x64 = getattr(jax, "enable_x64", None)
+        if enable_x64 is None:  # older JAX exposes the context in experimental
+            enable_x64 = getattr(import_module("jax.experimental"), "enable_x64")
+        with enable_x64():
+            return jax.dlpack.from_dlpack(result.detach())
     namespace = getattr(original, "__array_namespace__", None)
     if namespace is None:
         return result
@@ -244,7 +254,6 @@ def as_spacing(
     if s.ndim == 1:
         if s.numel() != ndim:
             raise ValueError(f"spacing has {s.numel()} values but inputs have {ndim} spatial dimensions")
-        s = s.expand(batch, ndim)
     elif s.shape != (batch, ndim):
         raise ValueError(
             f"spacing must be a scalar, shape ({ndim},) or ({batch}, {ndim}); got {tuple(s.shape)}"
@@ -256,4 +265,5 @@ def as_spacing(
             f"spacing values must lie in [{low:g}, {high:g}]; outside, {quantities} "
             "overflow or lose precision and exact distances cannot be guaranteed"
         )
-    return [tuple(row) for row in s.tolist()]
+    # Validate shared values before expanding: an empty batch must not hide invalid spacing.
+    return [tuple(row) for row in s.expand(batch, ndim).tolist()]

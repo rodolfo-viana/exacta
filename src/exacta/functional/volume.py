@@ -1,13 +1,10 @@
 """Physical 3D volumes from the shared hard-segmentation counts."""
 from __future__ import annotations
 
-import math
 from typing import Any, Literal
 
-import torch
-from torch import Tensor
-
-from exacta._inputs import InputFormat, Segmentations, as_spacing, like_input
+from exacta._inputs import InputFormat, like_input
+from exacta.functional._physical import _physical_scale, _score_size
 from exacta.functional.overlap import _confusion_counts_and_seg
 
 VolumeUnit = Literal["mm3", "ml"]
@@ -29,7 +26,7 @@ def predicted_volume(
     counts, seg = _confusion_counts_and_seg(
         pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
     )
-    return like_input(_score_volume("predicted_volume", counts, _voxel_volume(seg, spacing, unit)), pred)
+    return like_input(_score_size("predicted_volume", counts, _physical_scale(seg, spacing, unit, 3)), pred)
 
 
 def target_volume(
@@ -41,7 +38,7 @@ def target_volume(
     counts, seg = _confusion_counts_and_seg(
         pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
     )
-    return like_input(_score_volume("target_volume", counts, _voxel_volume(seg, spacing, unit)), pred)
+    return like_input(_score_size("target_volume", counts, _physical_scale(seg, spacing, unit, 3)), pred)
 
 
 def volume_error(
@@ -57,27 +54,4 @@ def volume_error(
     counts, seg = _confusion_counts_and_seg(
         pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
     )
-    return like_input(_score_volume("volume_error", counts, _voxel_volume(seg, spacing, unit), absolute), pred)
-
-
-def _voxel_volume(seg: Segmentations, spacing: Any, unit: str) -> Tensor:
-    if seg.ndim != 3:
-        raise ValueError("physical volume requires 3D inputs; 2D pixels measure area")
-    if unit not in ("mm3", "ml"):
-        raise ValueError("unit must be 'mm3' or 'ml'; spacing is in millimetres")
-    if spacing is None:
-        raise ValueError("spacing in millimetres is required for physical volumes")
-    volumes = [math.prod(s) / (1000 if unit == "ml" else 1)
-               for s in as_spacing(spacing, batch=seg.batch, ndim=3)]
-    if any(not math.isfinite(v) or v <= 0 for v in volumes):
-        raise ValueError("spacing product must be finite and positive in the requested volume unit")
-    return torch.tensor(volumes, device=seg.pred.device, dtype=torch.float64).reshape(-1, 1)
-
-
-def _score_volume(name: str, counts: tuple[Tensor, Tensor, Tensor, Tensor],
-                  scale: Tensor, absolute: bool = False) -> Tensor:
-    tp, fp, fn, tn = counts
-    value = tp + fp if name == "predicted_volume" else tp + fn if name == "target_volume" else fp - fn
-    if absolute:
-        value = value.abs()
-    return torch.where(tp + fp + fn + tn > 0, value.double() * scale, torch.nan)
+    return like_input(_score_size("volume_error", counts, _physical_scale(seg, spacing, unit, 3), absolute), pred)

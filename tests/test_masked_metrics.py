@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
+from _process import destroy_process_group
 import torch.multiprocessing as mp
 
 from exacta import _native, _triton_counts, functional as F, metrics as M
@@ -239,7 +240,7 @@ def _distributed_masked(rank, init_file):
         torch.testing.assert_close(actual["dice"].per_class, torch.tensor([0., 2/3], dtype=torch.float64))
         torch.testing.assert_close(actual["specificity"].per_class, torch.tensor([2/3, 0.], dtype=torch.float64))
     finally:
-        dist.destroy_process_group()
+        destroy_process_group()
 
 
 def test_distributed_masked_metrics(tmp_path):

@@ -1,7 +1,7 @@
 # Exacta documentation
 
 Exacta provides reference-validated segmentation metrics and differentiable losses for CPU
-and GPU. Its current focus is 3D medical image segmentation, including MRI anatomy and lesions.
+and GPU. Its current focus is 2D and 3D medical image segmentation, including MRI anatomy and lesions.
 Definitions, empty-mask behavior and aggregation are explicit so results can be reproduced.
 
 These pages document **PyPI 0.0.1a4**. Feature branches merge into **`main`**, which may
@@ -13,6 +13,7 @@ Start with the pages that match your task:
 |---|---|
 | Install Exacta | [Installation](https://github.com/rodolfo-viana/exacta/wiki/Installation) |
 | Run a complete example | [Quickstart](https://github.com/rodolfo-viana/exacta/wiki/Quickstart) |
+| Segment 2D medical images | [2D medical segmentation](https://github.com/rodolfo-viana/exacta/wiki/Medical-segmentation-2D) |
 | Evaluate hard segmentations | [Metrics](https://github.com/rodolfo-viana/exacta/wiki/Metrics) |
 | Train with segmentation losses | [Losses](https://github.com/rodolfo-viana/exacta/wiki/Losses) |
 | Train/evaluate boundary, topology and probability objectives | [Advanced segmentation](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation) |
