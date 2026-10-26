@@ -41,12 +41,9 @@ def _oracle(pred, target, keep, classes, one_hot=False):
     return counts, dict(zip(NAMES, scores))
 
 
-@pytest.mark.parametrize("one_hot", [False, True])
+@pytest.mark.parametrize("one_hot,mode", [(False, "mask"), (False, "ignore"), (False, "both"), (True, "mask")])
 @pytest.mark.parametrize("shape", [(3, 7, 11), (3, 5, 7, 9)])
-@pytest.mark.parametrize("mode", ["mask", "ignore", "both"])
 def test_counts_and_scores_match_selected_voxels(device, count_backend, one_hot, shape, mode, monkeypatch):
-    if one_hot and mode != "mask":
-        pytest.skip("ignore_index is defined only for index inputs")
     rng = np.random.default_rng(103)
     p, t = [rng.integers(0, 3, size=shape) for _ in range(2)]
     mask = rng.random(shape) > .3

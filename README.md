@@ -122,6 +122,27 @@ which stateful averages skip. `functional.evaluate` and `MetricCollection` suppo
 options when selecting only overlap/volume metrics. Surface and clDice metrics require
 complete segmentations. These overlap options are not part of the published 0.0.1a4 API.
 
+### Additional segmentation APIs (unreleased)
+
+The development version adds independent-label Brier, Bernoulli NLL and calibration with
+`multilabel=True`. Targets match `(B,C,*spatial)`; logits use independent sigmoids. Per-label,
+macro and micro reductions are explicit, and masks can select different voxels per label.
+
+For 3D hard labels, `predicted_volume`, `target_volume` and `volume_error` report mm³ or mL
+from spacing in millimetres. They share counts through `evaluate` and `MetricCollection`.
+Signed volume error is prediction minus target; `absolute=True` gives absolute physical error.
+
+`average_precision`, `auroc` and `voxel_ranking` evaluate voxel-level rankings for binary,
+multiclass and multilabel segmentations. Exact mode groups tied scores; `bins=256` selects
+an approximate probability histogram. `AveragePrecision` and `AUROC` average case scores;
+`VoxelRanking` pools voxels across batches/ranks, retaining fixed-size counts in binned mode.
+AP without positive targets and AUROC without both outcomes are NaN.
+
+Training additions are `DiceLoss(squared_pred=True)` and the same option in Dice-CE,
+Dice-focal and Dice-top-k CE, plus `LovaszHingeLoss` for binary logits or independent labels.
+Probability/ranking APIs and both loss additions support 2D and 3D inputs. Physical volume
+APIs require 3D. These additions are not included in the published 0.0.1a4 package.
+
 ## Conventions
 
 For hard segmentation metrics, each convention is an explicit argument, because this is

@@ -7,14 +7,12 @@ import torch.nn.functional as F
 from exacta.losses import DiceCELoss, DiceFocalLoss, DiceLoss, FocalLoss, GeneralizedDiceCELoss, GeneralizedDiceLoss
 
 
-@pytest.mark.parametrize("kind", ["dice_ce", "gdl_ce", "dice_focal"])
+@pytest.mark.parametrize("kind,weighted", [(kind, weighted) for kind in ("dice_ce", "gdl_ce", "dice_focal")
+                                          for weighted in (False, True) if kind != "dice_focal" or not weighted])
 @pytest.mark.parametrize("activation", ["softmax", "sigmoid"])
 @pytest.mark.parametrize("soft", [False, True])
 @pytest.mark.parametrize("batch", [False, True])
-@pytest.mark.parametrize("weighted", [False, True])
 def test_composed_value_and_gradient(device, kind, activation, soft, batch, weighted):
-    if kind == "dice_focal" and weighted:
-        pytest.skip("focal uses alpha, not CE class weights")
     torch.manual_seed(340)
     x = torch.randn(2, 3, 4, 5, 3, device=device, dtype=torch.float64).transpose(-1, -2).requires_grad_()
     labels = torch.randint(3, (2, 4, 3, 5), device=device)

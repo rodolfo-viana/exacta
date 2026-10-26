@@ -41,6 +41,7 @@ metadata.version.provider = "scikit_build_core.metadata.regex"
 metadata.version.input = "src/exacta/__init__.py"
 
 [tool.pytest.ini_options]
+addopts = "-ra"
 testpaths = ["tests"]
 filterwarnings = [
     # raised inside Triton's code generator on Python 3.14, not by exacta

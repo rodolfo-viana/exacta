@@ -129,14 +129,13 @@ GPU_COUNTS = pytest.mark.skipif(
 
 
 @GPU_COUNTS
-@pytest.mark.parametrize("dtype", [torch.bool, torch.uint8, torch.int16, torch.int32, torch.int64])
-@pytest.mark.parametrize("classes", [2, 5, 31])
+@pytest.mark.parametrize("dtype,classes", [(dtype, classes)
+    for dtype in (torch.bool, torch.uint8, torch.int16, torch.int32, torch.int64)
+    for classes in (2, 5, 31) if dtype != torch.bool or classes == 2])
 def test_triton_counts_match_torch_for_label_dtypes(dtype, classes):
     from exacta.functional.overlap import _counts, _triton_counts_of
     from exacta._inputs import validate
 
-    if dtype == torch.bool and classes > 2:
-        pytest.skip("a boolean label map has two classes")
     pred, target = (torch.from_numpy(a).to(dtype).cuda() for a in pair((20, 22, 24), classes, seed=7))
     seg = validate(pred, target, input_format="index", num_classes=classes, include_background=False)
     for ours, theirs in zip(_triton_counts_of(seg), _counts(seg)):

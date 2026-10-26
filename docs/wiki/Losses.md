@@ -59,6 +59,9 @@ the ratio. Smoothing is added once per ratio, after weighting for generalized Di
 
 ## Important parameters
 
+The following options describe the released objectives. Development-only squared Dice and
+Lovasz-hinge additions are described at the end of this page.
+
 Definitions differ across libraries, so select parameters intentionally:
 
 - Dice/Tversky smoothing defaults to `1e-5`. Tversky's default `alpha=beta=0.5` equals Dice
@@ -209,3 +212,63 @@ geometry/topology losses operate on each rank's local batch. Geometry masks affe
 only; complete target geometry is required. Geometry/topology losses have no `ignore_index`,
 and soft-clDice has no mask argument. Distance-transform and skeleton objectives should be
 combined with regional supervision according to the task.
+
+## Squared Dice denominator (unreleased)
+
+The development version adds `squared_pred=True` to `DiceLoss`, `DiceCELoss`, `DiceFocalLoss`
+and `DiceTopKCELoss`. Both prediction and target terms in the denominator are squared:
+
+$$
+\mathcal{L}_{\mathrm{squared\ Dice}}
+=1-\frac{2\sum_i p_i g_i+s}{\sum_i p_i^2+\sum_i g_i^2+s}.
+$$
+
+The numerator retains the product overlap, including for soft targets. With binary targets,
+$g_i^2=g_i$. The ordinary denominator remains the default. Smoothing, background exclusion,
+masking and case/batch reduction follow ordinary Dice. The option is named consistently with
+[MONAI's squared-prediction option](https://monai.readthedocs.io/en/stable/losses.html#diceloss);
+the equation above defines Exacta's soft-target convention explicitly.
+
+```python
+from exacta.losses import DiceCELoss
+
+loss_fn = DiceCELoss(squared_pred=True, include_background=False)
+```
+
+PyTorch supports differentiation through predictions and soft targets. The fused CUDA path
+includes the squared denominator in both forward statistics and analytic backward, and
+supports global distributed Dice/CE reductions. Fused higher-order derivatives remain
+unsupported; use `backend="torch"` for those. Dice-top-k still selects hard examples locally.
+
+## Binary and multilabel Lovasz-hinge (unreleased)
+
+`LovaszHingeLoss` follows the binary real-valued-score formulation in the
+[authors' implementation](https://github.com/bermanmaxim/LovaszSoftmax/blob/master/pytorch/lovasz_losses.py).
+Given binary labels $y_i$ and raw logits $z_i$, margin errors are
+$e_i=1-z_i(2y_i-1)$. Sort the errors decreasingly, and let $\Delta J_j$ be successive
+increments of the Jaccard error for that ordering. The objective is:
+
+$$
+\mathcal{L}_{\mathrm{Lovasz\ hinge}}=\sum_j\max(e_{(j)},0)\,\Delta J_j.
+$$
+
+Binary input has shape `(B,1,*spatial)` with target `(B,*spatial)`. Independent overlapping
+labels use `multilabel=True` and a same-shaped binary target. No sigmoid is applied and
+soft targets are rejected. Masks can be shared or per-label; `ignore_index` applies only
+to integer binary targets. Excluded invalid logits/targets do not affect the result.
+
+`per_image=True` (default) averages observed case/label losses. False pools the local batch
+per label before averaging labels. An absent positive class still penalizes false positives;
+unobserved labels are omitted, and entirely excluded inputs give differentiable zero.
+Stable native PyTorch sorting uses flattened voxel order for ties. The subgradient at a
+zero hinge margin is zero. This is a local objective under DDP, without global sorting.
+
+```python
+from exacta.losses import LovaszHingeLoss
+
+binary_loss = LovaszHingeLoss(ignore_index=-1)
+region_loss = LovaszHingeLoss(multilabel=True, per_image=True)
+```
+
+These loss additions support both 2D and 3D medical segmentation. They are alternative
+objectives with different gradients, not a claim of improved accuracy for every task.

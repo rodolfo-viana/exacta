@@ -157,7 +157,141 @@ defines their empty-input behavior, probability conventions and matching protoco
 | `reliability_diagram` | `Calibration` | Per-case summaries versus pooled voxel bin accumulation |
 | `detection.lesion_detection` | `detection.LesionDetection` | Dataset lesion AP and FROC for fixed candidates ranked by confidence |
 
-Probability metrics accept index targets, optional masks and ignored labels. C=1 is binary
+In 0.0.1a4, probability metrics accept index targets, optional masks and ignored labels. C=1 is binary
 sigmoid; C>=2 is mutually exclusive multiclass. Independent multilabel probability channels
 are not supported. Stateful probability scores average cases; `Calibration` pools voxels.
 All ranks must participate in distributed computation.
+
+## Independent probability channels (unreleased)
+
+The development version adds `multilabel=True` to Brier, NLL, ECE, reliability diagrams and
+their stateful wrappers. Prediction and binary target both have shape `(B,C,H,W)` or
+`(B,C,D,H,W)`. Channels may overlap; `from_logits=True` applies independent sigmoids.
+Masks accept `(B,*spatial)`, `(B,1,*spatial)` or `(B,C,*spatial)`. Excluded entries are not
+validated. Use masks rather than `ignore_index` for independent channels.
+
+For observed voxels $V_c$ of label $c$, the per-label scores are:
+
+$$
+\mathrm{Brier}_c=\frac{1}{|V_c|}\sum_{i\in V_c}(p_{ic}-y_{ic})^2,\qquad
+\mathrm{NLL}_c=-\frac{1}{|V_c|}\sum_{i\in V_c}
+\left[y_{ic}\log p_{ic}+(1-y_{ic})\log(1-p_{ic})\right].
+$$
+
+Correct endpoint probabilities contribute zero; impossible outcomes have infinite NLL.
+Logit input uses stable softplus arithmetic. These are probability quality scores, not
+pure calibration measures. Classwise reliability compares positive probability with
+positive-label frequency; top-label calibration is rejected for multilabel inputs.
+
+The `average` option controls within-case reduction. The following definitions also apply
+when each label has a different observation mask:
+
+| Option | Output | Reduction |
+|---|---|---|
+| `"none"` (default) | `(B,C)` | One score per label; unobserved labels are NaN |
+| `"macro"` | `(B,1)` | Equal mean of observed label scores |
+| `"micro"` | `(B,1)` | Pool observed label-voxel pairs before calculating the score |
+
+For micro ECE, bin counts, probability sums and positive counts are pooled across labels
+**before** taking absolute calibration gaps. Opposing label errors can cancel; macro ECE
+does not permit this cancellation. Fully excluded cases are NaN. Stateful score classes
+then average cases; `Calibration` pools voxels across cases while retaining separate labels.
+C++/OpenMP and supported CUDA Triton paths fuse validation and statistics in float64;
+other paths use checked PyTorch.
+
+```python
+import torch
+from exacta import functional as EF
+from exacta.metrics import Calibration
+
+generator = torch.Generator().manual_seed(5)
+logits = torch.randn(2, 3, 8, 8, generator=generator)
+labels = torch.rand(2, 3, 8, 8, generator=generator) > 0.7
+per_label = EF.brier_score(logits, labels, from_logits=True, multilabel=True)
+calibration = Calibration(multilabel=True, from_logits=True, bins=15)
+calibration.update(logits, labels)
+diagram = calibration.compute()
+```
+
+## Physical volume and error (unreleased)
+
+The development APIs `predicted_volume`, `target_volume` and `volume_error` take hard 3D
+segmentations and spacing in millimetres. Their stateful counterparts are `PredictedVolume`,
+`TargetVolume` and `VolumeError`. For axis spacings $s_1,s_2,s_3$, the voxel volume is
+$v=s_1s_2s_3$ mm³. The reported quantities are:
+
+$$
+V_P=(\mathrm{TP}+\mathrm{FP})v,\qquad V_T=(\mathrm{TP}+\mathrm{FN})v,\qquad
+E=(\mathrm{FP}-\mathrm{FN})v.
+$$
+
+`absolute=True` reports $|E|$. `unit="ml"` divides by 1000; the default is `"mm3"`.
+Spacing accepts a scalar, three shared axis spacings or `(B,3)` per-case spacings.
+Two-dimensional areas are rejected. Masking and ignored labels restrict the measured
+domain: zero volume means an absent class in an observed domain, while an entirely
+unobserved domain returns NaN. These metrics do not infer the volume of unannotated tissue.
+
+`evaluate` and `MetricCollection` share one count pass with ordinary overlap metrics:
+
+```python
+pred = torch.zeros(2, 8, 8, 8, dtype=torch.int64)
+target = pred.clone()
+target[:, 2:5, 2:5, 2:5] = 1
+values = EF.evaluate(pred, target, num_classes=2, include_background=False,
+                     spacing=[[1, 1, 2], [0.8, 0.8, 3]],
+                     metrics={"dice": {}, "predicted_volume": {"unit": "ml"},
+                              "target_volume": {"unit": "ml"},
+                              "volume_error": {"unit": "ml", "absolute": True}})
+```
+
+## Voxel PR, AP and AUROC (unreleased)
+
+`voxel_ranking` returns per-case/class AP and AUROC arrays plus PR/ROC curves indexed by
+`result.curves[case][class]`. `average_precision` and `auroc` return only the respective
+score arrays. C=1 is binary foreground; C>=2 is categorical one-versus-rest unless
+`multilabel=True` selects independent channels with same-shaped binary targets. The input
+and exclusion conventions match the probability APIs above. Categorical targets are indices.
+
+Exact mode (`bins=None`) sorts scores on the input device and groups equal scores. With
+decreasing thresholds, let $r_j$ and $q_j$ be recall and precision after adding tie group $j$:
+
+$$
+\mathrm{AP}=\sum_j(r_j-r_{j-1})q_j.
+$$
+
+This is the [non-interpolated AP convention](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.average_precision_score.html),
+not trapezoidal area under the PR curve. AUROC integrates the ROC curve trapezoidally,
+equivalently giving half credit to tied positive-negative score pairs. AP is NaN without
+positives and 1 for an observed all-positive target. AUROC is NaN unless both outcomes occur.
+Entirely excluded inputs give NaN scores. These are voxel measures, distinct from lesion AP.
+
+Curves start with threshold `+inf`, precision 1 and recall 0 when positives exist. Thresholds
+decrease and inclusion means `score >= threshold`. Exact thresholds use the supplied
+probabilities; logit input uses raw binary/multilabel logits or categorical log-softmax
+scores. Keeping log scores avoids sigmoid/softmax saturation creating artificial ties.
+Floating-point normalization can still affect almost-equal categorical scores.
+
+`bins=256`, for example, quantizes probabilities into 256 equal-width bins; 1 belongs to
+the last bin. This is approximate ranking: scores in a bin become tied. Curves use bin
+lower boundaries as probability thresholds. More bins reduce quantization but do not
+guarantee a monotonic error decrease or a fixed error bound.
+
+`AveragePrecision` and `AUROC` average case scores. `VoxelRanking` instead pools observed
+voxels across batches and ranks, so larger images contribute more observations:
+
+```python
+from exacta.metrics import VoxelRanking
+
+ranking = VoxelRanking(from_logits=True, multilabel=True, bins=256)
+ranking.update(logits, labels)
+pooled = ranking.compute()  # AP/AUROC have shape (1,C), one pooled dataset
+precision = pooled.curves[0][0].precision
+recall = pooled.curves[0][0].recall
+ranking.reset()
+```
+
+Exact streaming retains selected scores and labels and gathers each class on every rank.
+Binned streaming retains `2*C*bins` int64 counts and sums those counts across ranks;
+temporary update buffers depend on the current batch. Every rank, including empty ranks,
+must call `compute` with identical configuration. Set the current CUDA device for NCCL.
+Repeated `compute` does not add observations or mutate local state.
