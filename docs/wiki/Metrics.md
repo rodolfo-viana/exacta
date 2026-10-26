@@ -31,10 +31,9 @@ with `input_format="one-hot"`. `include_background=False` omits channel/class ze
 Stateless functions accept PyTorch, NumPy, CuPy and JAX arrays and return the prediction's
 array type. Stateful metrics store PyTorch results.
 
-## Selected voxels and ignored labels (unreleased)
+## Selected voxels and ignored labels
 
-The next development version adds `mask` and `ignore_index` to the seven overlap/volume
-metrics listed above. These options are not available in the published 0.0.1a4 overlap APIs.
+The seven overlap/volume metrics listed above accept `mask` and `ignore_index`.
 For index inputs, `ignore_index` excludes voxels whose **target** equals that label. It does
 not remove a class from the output. A boolean `mask` includes True voxels and excludes False
 voxels; its shape is `(B, *spatial)` or `(B, 1, *spatial)` on the input device. For one-hot or
@@ -55,7 +54,7 @@ zero counts and follows `both_empty` or `zero_division`, depending on the metric
 NaN is skipped by case averaging; choosing a finite fill explicitly includes it in that average.
 Masks are consumed per call and are not retained by stateful metrics.
 
-For example, evaluate synthetic partially annotated labels in the development version:
+For example, evaluate synthetic partially annotated labels:
 
 ```python
 import torch
@@ -144,7 +143,7 @@ including ranks without updates. The usual sampler and aggregation rules above s
 
 ## Centreline, probability and detection metrics
 
-Version 0.0.1a4 adds the following evaluation APIs. The
+The following APIs evaluate centreline overlap, probabilities and lesion detection. The
 [advanced segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation)
 defines their empty-input behavior, probability conventions and matching protocol.
 
@@ -157,15 +156,15 @@ defines their empty-input behavior, probability conventions and matching protoco
 | `reliability_diagram` | `Calibration` | Per-case summaries versus pooled voxel bin accumulation |
 | `detection.lesion_detection` | `detection.LesionDetection` | Dataset lesion AP and FROC for fixed candidates ranked by confidence |
 
-In 0.0.1a4, probability metrics accept index targets, optional masks and ignored labels. C=1 is binary
-sigmoid; C>=2 is mutually exclusive multiclass. Independent multilabel probability channels
-are not supported. Stateful probability scores average cases; `Calibration` pools voxels.
-All ranks must participate in distributed computation.
+By default, probability metrics accept index targets, optional masks and ignored labels. C=1
+is binary sigmoid; C>=2 is mutually exclusive multiclass. Use `multilabel=True` for independent
+channels, as described below. Stateful probability scores average cases; `Calibration` pools
+voxels. All ranks must participate in distributed computation.
 
-## Independent probability channels (unreleased)
+## Independent probability channels
 
-The development version adds `multilabel=True` to Brier, NLL, ECE, reliability diagrams and
-their stateful wrappers. Prediction and binary target both have shape `(B,C,H,W)` or
+Brier, NLL, ECE, reliability diagrams and their stateful wrappers accept `multilabel=True`.
+Prediction and binary target both have shape `(B,C,H,W)` or
 `(B,C,D,H,W)`. Channels may overlap; `from_logits=True` applies independent sigmoids.
 Masks accept `(B,*spatial)`, `(B,1,*spatial)` or `(B,C,*spatial)`. Excluded entries are not
 validated. Use masks rather than `ignore_index` for independent channels.
@@ -213,7 +212,7 @@ calibration.update(logits, labels)
 diagram = calibration.compute()
 ```
 
-## Physical area and error (unreleased)
+## Physical area and error
 
 The 2D APIs `predicted_area`, `target_area` and `area_error` measure occupied pixel-cell areas.
 Their stateful counterparts are `PredictedArea`, `TargetArea` and `AreaError`. With pixel
@@ -232,9 +231,9 @@ unobserved domains return NaN. Overlapping channels are measured independently.
 [2D medical-segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Medical-segmentation-2D)
 for runnable examples and the distinction between slice and patient averages.
 
-## Physical volume and error (unreleased)
+## Physical volume and error
 
-The development APIs `predicted_volume`, `target_volume` and `volume_error` take hard 3D
+`predicted_volume`, `target_volume` and `volume_error` take hard 3D
 segmentations and spacing in millimetres. Their stateful counterparts are `PredictedVolume`,
 `TargetVolume` and `VolumeError`. For axis spacings $s_1,s_2,s_3$, the voxel volume is
 $v=s_1s_2s_3$ mm³. The reported quantities are:
@@ -263,7 +262,7 @@ values = EF.evaluate(pred, target, num_classes=2, include_background=False,
                               "volume_error": {"unit": "ml", "absolute": True}})
 ```
 
-## Voxel PR, AP and AUROC (unreleased)
+## Voxel PR, AP and AUROC
 
 `voxel_ranking` returns per-case/class AP and AUROC arrays plus PR/ROC curves indexed by
 `result.curves[case][class]`. `average_precision` and `auroc` return only the respective

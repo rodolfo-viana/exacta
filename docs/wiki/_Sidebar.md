@@ -12,4 +12,4 @@
 - [Performance](https://github.com/rodolfo-viana/exacta/wiki/Performance)
 - [Development](https://github.com/rodolfo-viana/exacta/wiki/Development)
 
-Released: **0.0.1a4**. Integration branch: **main**.
+Version: **0.0.1a5**.

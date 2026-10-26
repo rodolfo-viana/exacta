@@ -1,7 +1,7 @@
 # Development
 
 Use a source checkout to evaluate unreleased changes or contribute to Exacta. Start feature
-work on a short-lived branch off **`main`**. These pages document public release `0.0.1a4`;
+work on a short-lived branch off **`main`**. These pages document public release `0.0.1a5`;
 `main` may contain newer changes.
 
 Install a checkout and run the tests with:

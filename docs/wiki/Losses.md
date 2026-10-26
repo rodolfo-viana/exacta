@@ -1,11 +1,12 @@
 # Losses
 
-Losses are PyTorch modules accepting floating-point logits `(B, C, *spatial)` and integer
-targets `(B, *spatial)`. Use `target_format="one-hot"` for same-shaped hard masks or soft labels.
+Losses are PyTorch modules accepting floating-point logits `(B, C, *spatial)`. Most accept integer
+targets `(B, *spatial)` and `target_format="one-hot"` for same-shaped masks or soft labels;
+individual objectives document their supported target formats below.
 Softmax targets should sum to one over classes; sigmoid targets should lie in `[0, 1]`.
 Exacta does not silently normalize or clamp target probabilities.
 
-Let `p` be activated predictions, `g` the target and `s` smoothing. The released losses are:
+Let `p` be activated predictions, `g` the target and `s` smoothing. Core overlap and focal losses are:
 
 | Loss | Definition and reduction |
 |---|---|
@@ -59,8 +60,8 @@ the ratio. Smoothing is added once per ratio, after weighting for generalized Di
 
 ## Important parameters
 
-The following options describe the released objectives. Development-only squared Dice and
-Lovasz-hinge and Wasserstein Dice additions are described at the end of this page.
+The following options describe the core objectives. Squared Dice, Lovasz-hinge and
+Wasserstein Dice are described at the end of this page.
 
 Definitions differ across libraries, so select parameters intentionally:
 
@@ -195,14 +196,14 @@ their nonlinear Dice ratios into one larger-batch ratio.
 Only small statistics communicate. NCCL keeps these on the rank's CUDA device. Gloo uses CPU
 buffers, also allowing two CUDA workers on a single GPU for correctness tests. Local tests
 cover CPU and fused CUDA with two Gloo ranks, uneven batches, empty ranks, ignored ranks and
-all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in 0.0.1a4:**
+all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in 0.0.1a5:**
 the two-GPU tests have not been run on suitable hardware. Gloo checks do not establish NCCL
 correctness or multi-GPU training throughput. Loss configuration and valid input shapes
 must agree across ranks; as with ordinary distributed training, a rank-local error can interrupt its peers.
 
 ## Boundary, topology and hard-example objectives
 
-Version 0.0.1a4 adds `FocalTverskyLoss`, `TopKCELoss`, `DiceTopKCELoss`, `LovaszSoftmaxLoss`,
+Additional objectives include `FocalTverskyLoss`, `TopKCELoss`, `DiceTopKCELoss`, `LovaszSoftmaxLoss`,
 `BoundaryLoss`, `HausdorffDTLoss` and `SoftClDiceLoss`. Their formulas, reductions, defaults,
 reference conventions and CPU/GPU paths are documented in the
 [advanced segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation).
@@ -213,9 +214,9 @@ only; complete target geometry is required. Geometry/topology losses have no `ig
 and soft-clDice has no mask argument. Distance-transform and skeleton objectives should be
 combined with regional supervision according to the task.
 
-## Squared Dice denominator (unreleased)
+## Squared Dice denominator
 
-The development version adds `squared_pred=True` to `DiceLoss`, `DiceCELoss`, `DiceFocalLoss`
+`squared_pred=True` is available in `DiceLoss`, `DiceCELoss`, `DiceFocalLoss`
 and `DiceTopKCELoss`. Both prediction and target terms in the denominator are squared:
 
 $$
@@ -240,7 +241,7 @@ includes the squared denominator in both forward statistics and analytic backwar
 supports global distributed Dice/CE reductions. Fused higher-order derivatives remain
 unsupported; use `backend="torch"` for those. Dice-top-k still selects hard examples locally.
 
-## Binary and multilabel Lovasz-hinge (unreleased)
+## Binary and multilabel Lovasz-hinge
 
 `LovaszHingeLoss` follows the binary real-valued-score formulation in the
 [authors' implementation](https://github.com/bermanmaxim/LovaszSoftmax/blob/master/pytorch/lovasz_losses.py).
@@ -270,10 +271,10 @@ binary_loss = LovaszHingeLoss(ignore_index=-1)
 region_loss = LovaszHingeLoss(multilabel=True, per_image=True)
 ```
 
-These loss additions support both 2D and 3D medical segmentation. They are alternative
+These losses support both 2D and 3D medical segmentation. They are alternative
 objectives with different gradients, not a claim of improved accuracy for every task.
 
-## Generalized Wasserstein Dice (unreleased)
+## Generalized Wasserstein Dice
 
 `GeneralizedWassersteinDiceLoss` adds explicit costs for confusing mutually exclusive labels.
 It follows the crisp-target formulation of [Fidon et al. (2017)](https://arxiv.org/abs/1707.00478),
