@@ -60,7 +60,7 @@ the ratio. Smoothing is added once per ratio, after weighting for generalized Di
 ## Important parameters
 
 The following options describe the released objectives. Development-only squared Dice and
-Lovasz-hinge additions are described at the end of this page.
+Lovasz-hinge and Wasserstein Dice additions are described at the end of this page.
 
 Definitions differ across libraries, so select parameters intentionally:
 
@@ -272,3 +272,81 @@ region_loss = LovaszHingeLoss(multilabel=True, per_image=True)
 
 These loss additions support both 2D and 3D medical segmentation. They are alternative
 objectives with different gradients, not a claim of improved accuracy for every task.
+
+## Generalized Wasserstein Dice (unreleased)
+
+`GeneralizedWassersteinDiceLoss` adds explicit costs for confusing mutually exclusive labels.
+It follows the crisp-target formulation of [Fidon et al. (2017)](https://arxiv.org/abs/1707.00478),
+with the alternative `GDL` weighting described by
+[MONAI](https://monai.readthedocs.io/en/stable/losses.html#generalizedwassersteindiceloss).
+It supports 2D images and 3D volumes. Costs describe relationships between labels; voxel
+spacing and physical boundary distances do not enter this objective.
+
+Let $M$ be the supplied class-cost matrix divided by its positive maximum, $y_i$ the integer
+target at observed voxel $i$, and $p_{ic}$ the softmax probability for class $c$. The expected
+cost against that crisp target is
+
+$$
+w_i=\sum_c M_{y_i,c}\,p_{ic}.
+$$
+
+For each case, define $N_c=\sum_i\mathbf{1}[y_i=c]$ over the observed domain and
+$T=\sum_i\alpha_{y_i}(1-w_i)$. The two modes use different weights and error sums:
+
+| `weighting_mode` | Class weights $\alpha_c$ | Error $E$ |
+|---|---|---|
+| `"default"` | $\alpha_0=0$; $\alpha_c=1$ for $c>0$ | $\sum_i w_i$ |
+| `"GDL"` | $1/(N_c+1)$, including label zero | $\sum_i\alpha_{y_i}w_i$ |
+
+Both return the following loss, with the same smoothing constant $s$ in both terms:
+
+$$
+\mathcal{L}=1-\frac{2T+s}{2T+E+s}.
+$$
+
+The constructor requires a finite, nonnegative, symmetric square matrix with zero diagonal
+and a positive maximum. `default` additionally requires maximal costs between background
+(label zero) and every foreground class, matching the assumption behind the simplified
+foreground formula. `GDL` permits other background costs. Triangle inequalities are not
+checked; a zero off-diagonal cost makes that label confusion cost-free. Specify these costs
+from the task's label relationships, and assess any tuning using training/validation data.
+
+The following synthetic example gives confusion between foreground labels a smaller cost
+than confusion with background. The same loss accepts `(B,C,H,W)` or `(B,C,D,H,W)` logits.
+
+```python
+import torch
+from exacta.losses import GeneralizedWassersteinDiceLoss
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+rng = torch.Generator().manual_seed(879)
+logits = torch.randn((2, 3, 16, 20), generator=rng).to(device).requires_grad_()
+target = torch.randint(3, (2, 16, 20), generator=rng).to(device)
+target[0, :2] = -1
+
+loss_fn = GeneralizedWassersteinDiceLoss(
+    [[0, 1, 1], [1, 0, 0.25], [1, 0.25, 0]],
+    weighting_mode="default", ignore_index=-1,
+).to(device=device, dtype=logits.dtype)
+loss = loss_fn(logits, target)
+loss.backward()
+assert torch.isfinite(loss) and torch.isfinite(logits.grad).all()
+```
+
+The default `reduction="mean"` averages observed cases equally. `"sum"` sums case losses;
+`"none"` returns `(B,)`. Fully excluded cases and empty inputs return differentiable zero,
+and are omitted from the mean. A zero denominator with `smooth=0` also returns zero.
+With default weights and `smooth=0`, an observed background-only case with any nonzero error
+has loss one and no useful foreground Dice gradient; positive smoothing or the `GDL` mode
+changes that behavior. This differs from an entirely unobserved case.
+
+This API takes integer targets and logits; it has no sigmoid/multilabel, soft-target or
+cross-rank pooling option. It supports shared boolean masks, ignored indices, half/bfloat16
+computation in float32, float64, higher derivatives and full-graph `torch.compile` on CPU/CUDA.
+Eager calls reject out-of-range observed labels. Compiled calls return NaN for invalid labels
+without unsafe indexing. Excluded labels/nonfinite logits are sanitized before activation.
+
+The implementation uses native PyTorch gather/reduction kernels and an integer class histogram,
+without expanding targets to one-hot. Move the loss to the logits' device/dtype once and
+benchmark `torch.compile(loss_fn)` with forward **and backward** on your workload. The cost
+matrix is a detached normalized buffer, included in `state_dict`; it is not a learnable parameter.

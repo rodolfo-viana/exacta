@@ -5,7 +5,7 @@ Release notes for Exacta's alpha versions.
 ## Unreleased
 
 Segmentation evaluation now supports selected voxels, independent probability channels,
-physical areas/volumes and voxel rankings, alongside two additional training objectives.
+physical areas/volumes and voxel rankings, alongside additional training objectives.
 
 - Add boolean voxel masks and index-target `ignore_index` to Dice, IoU, sensitivity,
   precision, specificity, volume similarity and relative volume difference, including
@@ -31,6 +31,11 @@ physical areas/volumes and voxel rankings, alongside two additional training obj
 - Add voxel PR/ROC curves, AP and AUROC with grouped ties and exact or approximate binned
   evaluation. Separate case-averaged metrics from dataset-pooled `VoxelRanking`; binned
   streaming retains fixed-size int64 histograms, including distributed accumulation.
+- Add `GeneralizedWassersteinDiceLoss` for exclusive 2D/3D labels with validated, normalized
+  class-distance matrices, foreground or GDL weighting, shared masks/ignored labels and
+  per-case reductions. Native PyTorch supports mixed precision, higher derivatives and
+  compilation without one-hot target expansion. Default weighting requires maximal
+  background/foreground costs; unobserved cases contribute zero and are omitted from means.
 - Add `squared_pred=True` to Dice and Dice-CE/focal/top-k CE, including fused CUDA derivatives,
   soft targets, masked observations and global distributed Dice/CE statistics.
 - Add binary/multilabel `LovaszHingeLoss` with stable native PyTorch sorting, explicit
