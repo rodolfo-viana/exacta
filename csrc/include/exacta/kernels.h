@@ -22,6 +22,17 @@ enum exacta_status {
 
 const char *exacta_status_string(int status);
 
+/* Regression (N,D) -> (11,D) float64 statistics: weight, count, means p/t,
+ * centered sums pp/tt/pt, mean error, centered error sum, absolute/squared error.
+ * mask_columns is 0 (no mask), 1 (sample mask), or D. Weights may be null.
+ * moments=0 computes only weight/count/absolute/squared error. Inputs and output
+ * must not alias. All weights must be finite/nonnegative; observed p/t finite.
+ */
+int exacta_regression_f32(const float *p, const float *t, const uint8_t *mask, const double *weights,
+    int64_t n, int64_t d, int mask_columns, int moments, double *out, int num_threads);
+int exacta_regression_f64(const double *p, const double *t, const uint8_t *mask, const double *weights,
+    int64_t n, int64_t d, int mask_columns, int moments, double *out, int num_threads);
+
 /* Lee thinning of a 2-D or 3-D binary image, with zero exterior padding.
  * Writes a 0/1 skeleton into `out` (same shape); nonzero inputs are foreground.
  * Deletion order matches scikit-image's method="lee". Input and output may alias.

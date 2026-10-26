@@ -4,7 +4,21 @@ Release notes for Exacta's alpha versions.
 
 ## Unreleased
 
-Changes for the next release will be recorded here.
+- Add general classification and regression namespaces, separate from per-image
+  segmentation semantics. Classification includes hard-decision rates, confusion
+  matrices, top-k accuracy, MCC, Cohen kappa, probability scores and AP/AUROC.
+- Add MAE, MSE, RMSE, R², explained variance, Pearson and concordance correlation,
+  with multioutput reductions, boolean observation masks and sample weights.
+- Add dataset-level streaming counts, rankings and centered regression moments,
+  including distributed aggregation and ranks without updates. Scores are computed
+  after pooling, not averaged across batches.
+- Reuse C++/Triton classification counts, retain O(C) counts for large label spaces,
+  and fuse CPU regression validation/errors/moments in C++ with float64 statistics.
+  Native PyTorch supplies GPU regression and weighted classification reductions.
+- Add differentiable masked quantile and stable log-cosh losses. Expose standard
+  classification/regression losses directly from PyTorch without extra wrappers.
+- Document numerical, tie-breaking, averaging and undefined-score conventions,
+  with independent references, CPU/CUDA tests and a reproducible tabular benchmark.
 
 ## 0.0.1a5 — 2026-10-26
 

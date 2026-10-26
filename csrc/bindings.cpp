@@ -223,6 +223,31 @@ bool probability_stats(
   return status == EXACTA_OK;
 }
 
+template <typename T, auto Kernel>
+bool regression_stats(
+    nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_contig> pred,
+    nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_contig> target,
+    nb::ndarray<const std::uint8_t, nb::ndim<2>, nb::device::cpu, nb::c_contig> mask,
+    Flat<double> weights, bool moments,
+    nb::ndarray<double, nb::ndim<2>, nb::device::cpu, nb::c_contig> out, int num_threads) {
+  const auto n = pred.shape(0), d = pred.shape(1);
+  if (d == 0 || d > INT32_MAX || target.shape(0) != n || target.shape(1) != d ||
+      out.shape(0) != 11 || out.shape(1) != d || (weights.size() && weights.size() != n) ||
+      (mask.size() && (mask.shape(0) != n || (mask.shape(1) != 1 && mask.shape(1) != d))))
+    throw std::invalid_argument("regression input, mask, weight and statistic buffer shapes disagree");
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = Kernel(pred.data(), target.data(), mask.size() ? mask.data() : nullptr,
+        weights.size() ? weights.data() : nullptr, static_cast<std::int64_t>(n),
+        static_cast<std::int64_t>(d), mask.size() ? static_cast<int>(mask.shape(1)) : 0,
+        moments, out.data(), num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT)
+    throw std::runtime_error(exacta_status_string(status));
+  return status == EXACTA_OK;
+}
+
 using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
 
 template <typename T, int (*Kernel)(const T*, T*, int64_t*, const int64_t*, int, int, int)>
@@ -623,6 +648,16 @@ NB_MODULE(_C, m) {
         nb::arg("channels"), nb::arg("both").noconvert(), nb::arg("in_pred").noconvert(),
         nb::arg("in_target").noconvert(), nb::arg("valid").noconvert(), nb::arg("num_threads") = 0,
         "Binary counts and included voxels with a shared per-case mask; False for invalid kept values.");
+  m.def("regression_stats", &regression_stats<float, exacta_regression_f32>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("weights").noconvert(), nb::arg("moments"), nb::arg("out").noconvert(),
+        nb::arg("num_threads") = 0,
+        "Weighted regression statistics; False for invalid weights or observed values.");
+  m.def("regression_stats", &regression_stats<double, exacta_regression_f64>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("weights").noconvert(), nb::arg("moments"), nb::arg("out").noconvert(),
+        nb::arg("num_threads") = 0,
+        "Weighted regression statistics; False for invalid weights or observed values.");
   m.def("probability_stats", &probability_stats<float, std::uint8_t, exacta_probability_f32_u8>,
         nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
         nb::arg("channels"), nb::arg("from_logits"), nb::arg("kind"), nb::arg("bins"),

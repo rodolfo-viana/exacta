@@ -13,3 +13,7 @@ __all__ = ["GeneralizedWassersteinDiceLoss", "DeepSupervisionLoss", "DiceCELoss"
            "GeneralizedDiceCELoss", "GeneralizedDiceLoss", "TverskyLoss", "FocalTverskyLoss",
            "TopKCELoss", "DiceTopKCELoss", "LovaszSoftmaxLoss", "LovaszHingeLoss", "BoundaryLoss", "HausdorffDTLoss",
            "distance_maps", "SoftClDiceLoss", "soft_skeletonize"]
+
+from exacta.losses import classification, regression
+
+__all__ += ["classification", "regression"]

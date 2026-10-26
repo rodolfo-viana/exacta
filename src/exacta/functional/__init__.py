@@ -1,4 +1,4 @@
-"""Stateless metric functions. Each returns a (B, C) array of per-case, per-class values."""
+"""Segmentation metrics and separate dataset-level classification/regression namespaces."""
 
 from exacta.functional.overlap import (
     dice,
@@ -38,3 +38,7 @@ __all__ = [
     "specificity",
     "volume_similarity",
 ]
+
+from exacta.functional import classification, regression
+
+__all__ += ["classification", "regression"]

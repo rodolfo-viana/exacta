@@ -3,13 +3,14 @@
 Metrics and differentiable losses for **2D and 3D medical-image segmentation**, on CPU and GPU.
 Exacta provides reusable implementations of Dice, HD95, surface distances, lesion scores,
 probability metrics and training objectives, with explicit mathematical conventions.
+The development version also adds general **classification and regression** APIs.
 
 CPU operations use C++ kernels where implemented; CUDA paths use Triton or native PyTorch.
 Definitions are checked against independent references such as SciPy, MONAI, MedPy,
 DeepMind's surface-distance, MeshMetrics, SimpleITK, Panoptica and the BraTS 2023 evaluation
 code. Where conventions differ, parameters select the intended definition.
 
-**Version: 0.0.1a5 (alpha).**
+**Published version: 0.0.1a5 (alpha). Development: 0.0.1a6.dev0.**
 [Documentation](https://github.com/rodolfo-viana/exacta/wiki) ·
 [Source](https://github.com/rodolfo-viana/exacta) ·
 [Issues](https://github.com/rodolfo-viana/exacta/issues)
@@ -142,6 +143,52 @@ finite-iteration soft skeleton and differs from the hard clDice evaluation metri
 and topology objectives require complete target geometry; combine them with regional
 supervision where appropriate. See [Losses](https://github.com/rodolfo-viana/exacta/wiki/Losses)
 for equations, smoothing, reductions, target formats and derivative support.
+
+## Classification and regression (unreleased)
+
+The following APIs require **0.0.1a6.dev0** and are not included in the published
+`0.0.1a5` package. They evaluate samples across a dataset, with separate namespaces
+from the per-image segmentation metrics.
+
+| Namespace | Metrics or losses |
+|---|---|
+| `functional.classification` | Accuracy, top-k accuracy, confusion matrices, precision, recall, specificity, F1/F-beta, balanced accuracy, MCC, Cohen kappa, Brier, NLL, ECE, AP and AUROC |
+| `functional.regression` | MAE, MSE, RMSE, R², explained variance, Pearson and concordance correlation |
+| `metrics.classification` | `ClassificationMetrics` for pooled counts; `ClassificationRanking` for pooled AP/AUROC and PR/ROC curves |
+| `metrics.regression` | `RegressionMetrics` for pooled weighted errors and centered moments |
+| `losses.classification` | Native PyTorch `CrossEntropyLoss`, `BCEWithLogitsLoss`, `BCELoss`, `NLLLoss`, `KLDivLoss` |
+| `losses.regression` | `QuantileLoss`, `LogCoshLoss`; native PyTorch `L1Loss`, `MSELoss`, `HuberLoss`, `SmoothL1Loss`, `GaussianNLLLoss`, `PoissonNLLLoss` |
+
+Classification explicitly selects binary, multiclass or multilabel targets. Regression
+accepts `(N,)` or `(N,D)` arrays. Masks and sample weights are available for hard-decision
+classification and regression metrics; probability metrics currently accept masks but
+not sample weights. Stateful metrics pool sufficient statistics before computing scores.
+They do not average batch F1, R² or RMSE. CPU regression uses fused C++ statistics;
+CUDA regression uses native PyTorch. Standard losses are direct PyTorch exports.
+
+```python
+import torch
+from exacta.functional import classification as C, regression as R
+from exacta.metrics.regression import RegressionMetrics
+
+labels = torch.tensor([0, 1, 2, 1])
+class_target = torch.tensor([0, 2, 2, 1])
+print(C.evaluate(labels, class_target, task="multiclass", num_classes=3))
+
+regression_pred = torch.tensor([1., 2., 4., 5.])
+regression_target = torch.tensor([1., 3., 5., 4.])
+print(R.evaluate(regression_pred, regression_target))
+regression_metrics = RegressionMetrics(metrics=("mae", "rmse", "r2"))
+regression_metrics.update(regression_pred[:2], regression_target[:2])
+regression_metrics.update(regression_pred[2:], regression_target[2:])
+print(regression_metrics.compute())
+```
+
+Undefined classification rates default to NaN; `zero_division=0` or `1` is explicit.
+Regression R² preserves undefined constant-target cases unless `force_finite=True`.
+See [classification](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Classification.md)
+and [regression](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Regression.md)
+for formulas, averaging, empty-input behavior and examples.
 
 ## Partial annotations and probability channels
 

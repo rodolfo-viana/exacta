@@ -1,4 +1,4 @@
-"""Stateful metrics that accumulate per-case values across batches and processes."""
+"""Stateful segmentation, classification and regression metrics across batches/processes."""
 
 from exacta.metrics.base import MetricResult, PerCaseMetric
 from exacta.metrics.collection import MetricCollection
@@ -41,3 +41,7 @@ __all__ = [
     "Specificity",
     "VolumeSimilarity",
 ]
+
+from exacta.metrics import classification, regression
+
+__all__ += ["classification", "regression"]

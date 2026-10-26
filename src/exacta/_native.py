@@ -20,6 +20,21 @@ def available() -> bool:
     return _C is not None
 
 
+def regression_stats(pred: Tensor, target: Tensor, mask: Tensor | None, weight: Tensor | None,
+                     *, moments: bool) -> Tensor:
+    """CPU (N,D) errors/moments with fused numerical validation; shapes checked by caller."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    dtype = torch.float32 if pred.dtype == target.dtype == torch.float32 else torch.float64
+    p, t = (x.to(dtype).contiguous() for x in (pred, target))
+    m = torch.empty((0, 0), dtype=torch.uint8) if mask is None else _as_bytes(mask)
+    w = torch.empty(0, dtype=torch.float64) if weight is None else weight.double().contiguous()
+    out = torch.empty((11, p.shape[1]), dtype=torch.float64)
+    if not _C.regression_stats(p, t, m, w, moments, out, torch.get_num_threads()):
+        raise ValueError("weights must be finite/nonnegative and observed predictions/targets finite")
+    return out
+
+
 def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> Tensor:
     """Squared Euclidean distance from every voxel to the nearest nonzero voxel of ``features``.
 

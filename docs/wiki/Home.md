@@ -6,6 +6,8 @@ Definitions, empty-mask behavior and aggregation are explicit so results can be 
 
 These pages document **Exacta 0.0.1a5**, including partially annotated evaluation, physical
 area/volume measurements, independent probability channels and class-distance training losses.
+The source pages [Classification](Classification) and [Regression](Regression) describe
+unreleased `0.0.1a6.dev0` additions; they are not in the `0.0.1a5` package.
 
 Start with the pages that match your task:
 
