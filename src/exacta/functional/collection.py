@@ -9,6 +9,7 @@ from typing import Any
 from exacta._inputs import InputFormat, like_input, to_torch, validate
 from exacta.functional import overlap, surface as sf
 from exacta.functional.topology import cldice
+from exacta.functional.volume import _score_volume, _voxel_volume
 
 MetricSelection = Sequence[str] | Mapping[str, Mapping[str, Any]]
 
@@ -21,6 +22,9 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
     "specificity": {"zero_division": math.nan},
     "volume_similarity": {"zero_division": math.nan, "convention": "taha"},
     "relative_volume_difference": {"zero_division": math.nan, "absolute": False},
+    "predicted_volume": {"unit": "mm3"},
+    "target_volume": {"unit": "mm3"},
+    "volume_error": {"unit": "mm3", "absolute": False},
     "hausdorff_distance": {"percentile": 100.0, "combine": "max", "surface": "voxels",
                            "both_empty": math.nan, "one_empty": math.inf},
     "hd95": {"combine": "max", "surface": "voxels", "both_empty": math.nan, "one_empty": math.inf},
@@ -63,7 +67,7 @@ def evaluate(
     Options and defaults match the individual functions. Input layout, class selection and
     spacing are common; surface representations may differ. ``backend`` selects the distance
     transform, as for individual surface metrics. Spacing is required when requesting any
-    surface metric. Results use the prediction's array library. No input or volume cache is
+    surface metric or physical volume (3D, spacing in mm). Results use the prediction's array library. No input or volume cache is
     retained after this call, so subsequent input mutation cannot return stale scores.
     ``mask`` and ``ignore_index`` follow :func:`dice` and require a selection containing only
     overlap/volume metrics. Surface and clDice masking is undefined and is rejected.
@@ -78,7 +82,17 @@ def evaluate(
             pred, target, input_format, num_classes, include_background,
             ignore_index=ignore_index, mask=mask,
         )
-        results = {n: overlap._score_counts(n, counts, **requests[n]) for n in counts_names}
+        results = {}
+        scales = {}
+        for name in counts_names:
+            options = requests[name]
+            if "unit" in options:
+                unit = options["unit"]
+                if unit not in scales:
+                    scales[unit] = _voxel_volume(seg, spacing, unit)
+                results[name] = _score_volume(name, counts, scales[unit], options.get("absolute", False))
+            else:
+                results[name] = overlap._score_counts(name, counts, **options)
     else:
         seg = validate(to_torch(pred), to_torch(target), input_format=input_format,
                        num_classes=num_classes, include_background=include_background)
