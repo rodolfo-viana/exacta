@@ -3,7 +3,7 @@
 Exacta's segmentation losses and overlap, boundary, topology and probability metrics accept
 2D images as well as 3D volumes. This guide uses synthetic images to demonstrate the input
 contracts; it does not measure model quality. Physical area and independent-label probability
-APIs described here are **unreleased**, following PyPI 0.0.1a4.
+APIs are included in Exacta 0.0.1a5.
 
 ## Choose the target representation
 
@@ -75,9 +75,9 @@ brier = EF.brier_score(logits.detach(), target, from_logits=True, multilabel=Tru
 assert areas.shape == brier.shape == (2, channels)
 ```
 
-Existing focal/Tversky and generalized Dice variants, Lovasz losses, boundary/distance-transform
-surrogates, soft clDice and deep supervision also accept 2D inputs under their documented
-contracts. Choose them according to the error you need to penalize, and measure their forward
+Focal/Tversky and generalized Dice variants, Lovasz losses, class-distance Wasserstein Dice,
+boundary/distance-transform surrogates, soft clDice and deep supervision accept 2D inputs under
+their documented contracts. Choose them according to the error you need to penalize, and measure their forward
 and backward cost for your image size. See [Losses](https://github.com/rodolfo-viana/exacta/wiki/Losses)
 and [Advanced segmentation](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation).
 

@@ -1,7 +1,8 @@
 # Performance and backends
 
 Exacta uses compiled C++ CPU kernels for expensive metric passes and Triton for supported
-CUDA paths. Losses use native PyTorch/autograd on CPU and fused Triton forward/backward on GPU.
+CUDA paths. Losses use native PyTorch/autograd and, for supported CUDA objectives,
+fused Triton forward/backward.
 Backend choice should be supported by measurements for the shapes and dtypes used in training.
 
 Fused losses recompute activations in backward and retain inputs plus small statistics, avoiding
@@ -94,9 +95,9 @@ NCCL benchmarks require additional hardware.
 Avoid running performance measurements alongside other workloads. Measure sparse and dense
 targets, different class counts and representative MRI sizes before choosing an implementation.
 
-## Planned-addition measurements (unreleased)
+## Probability, ranking and loss measurements
 
-The development branch adds `bench_probability.py` and `bench_completion.py`. Measurements
+The source includes `bench_probability.py` and `bench_completion.py`. Measurements
 on 2026-10-26 used Python 3.14.4, PyTorch 2.14.1, Ryzen 9 5900XT (two threads) and RTX 5070,
 float32 inputs of shape `2×3×64³`, three warmups and ten synchronized repetitions.
 The tables report medians on synthetic inputs; compilation time is excluded. Probability
@@ -122,7 +123,8 @@ only histogram state; its current-batch working memory still scales with voxel c
 
 Three physical volume quantities evaluated together took 1.589 ms CPU / 0.423 ms GPU,
 versus 4.644 ms / 0.853 ms for three separate calls. Their shared counts avoid repeated scans.
-Reproduce these development measurements from the matching source checkout:
+The implementations are included in the `v0.0.1a5` snapshot. Reproduce these measurements
+from that source checkout:
 
 ```bash
 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 TORCHINDUCTOR_COMPILE_THREADS=1 \

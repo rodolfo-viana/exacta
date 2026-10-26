@@ -1,6 +1,6 @@
 # Advanced segmentation objectives and evaluation
 
-Version **0.0.1a4** includes boundary-sensitive training, hard-example selection, tubular
+Exacta includes boundary-sensitive training, hard-example selection, tubular
 structure objectives, probability quality and confidence-ranked lesion detection. Every function
 states its aggregation and empty-input convention. No loss is claimed to improve MRI
 segmentation quality without a task-specific experiment.

@@ -2,10 +2,11 @@
 
 Release notes for Exacta's alpha versions.
 
-## Unreleased
+## 0.0.1a5 — 2026-10-26
 
-Segmentation evaluation now supports selected voxels, independent probability channels,
-physical areas/volumes and voxel rankings, alongside additional training objectives.
+This release extends 2D and 3D segmentation evaluation with selected voxels, independent
+probability channels, physical areas/volumes and voxel rankings. Training gains squared
+Dice, Lovasz-hinge and class-distance Wasserstein Dice.
 
 - Add boolean voxel masks and index-target `ignore_index` to Dice, IoU, sensitivity,
   precision, specificity, volume similarity and relative volume difference, including
@@ -28,6 +29,8 @@ physical areas/volumes and voxel rankings, alongside additional training objecti
   for empty batches.
 - Document binary, categorical and overlapping-label 2D medical segmentation, physical pixel
   spacing, partial annotation and patient-versus-slice aggregation.
+- Refresh the README and Wiki for this release, including the complete API catalogue and
+  executable CPU/CUDA quickstart examples.
 - Add voxel PR/ROC curves, AP and AUROC with grouped ties and exact or approximate binned
   evaluation. Separate case-averaged metrics from dataset-pooled `VoxelRanking`; binned
   streaming retains fixed-size int64 histograms, including distributed accumulation.
