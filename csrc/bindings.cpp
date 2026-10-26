@@ -196,6 +196,33 @@ bool masked_channel_counts(
   return status == EXACTA_OK;
 }
 
+template <typename P, typename T, auto Kernel>
+bool probability_stats(
+    nb::ndarray<const P, nb::ndim<2>, nb::device::cpu, nb::c_contig> pred,
+    nb::ndarray<const T, nb::ndim<2>, nb::device::cpu, nb::c_contig> target,
+    nb::ndarray<const std::uint8_t, nb::ndim<2>, nb::device::cpu, nb::c_contig> mask,
+    std::int64_t channels, bool from_logits, int kind, int bins,
+    nb::ndarray<double, nb::ndim<2>, nb::device::cpu, nb::c_contig> out, int num_threads) {
+  const auto rows = pred.shape(0), n = pred.shape(1), masks = mask.shape(0);
+  if (channels < 1 || rows % channels || target.shape(0) != rows || target.shape(1) != n ||
+      kind < 0 || kind > 2 || (kind == 2 && (bins < 1 || bins > INT32_MAX / 3)) ||
+      out.shape(0) != rows || out.shape(1) != static_cast<std::size_t>(kind == 2 ? 3 * bins : 2) ||
+      (masks && (mask.shape(1) != n || (masks != rows && masks != rows / channels)))) {
+    throw std::invalid_argument("probability input, mask and statistic buffer shapes disagree");
+  }
+  const int mask_channels = masks == 0 ? 0 : masks == rows ? static_cast<int>(channels) : 1;
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = Kernel(pred.data(), target.data(), masks ? mask.data() : nullptr,
+        static_cast<std::int64_t>(rows), static_cast<std::int64_t>(n), channels, mask_channels,
+        from_logits, kind, bins, out.data(), num_threads);
+  }
+  if (status != EXACTA_OK && status != EXACTA_INVALID_ARGUMENT)
+    throw std::runtime_error(exacta_status_string(status));
+  return status == EXACTA_OK;
+}
+
 using Bytes = nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig>;
 
 template <typename T, int (*Kernel)(const T*, T*, int64_t*, const int64_t*, int, int, int)>
@@ -596,6 +623,46 @@ NB_MODULE(_C, m) {
         nb::arg("channels"), nb::arg("both").noconvert(), nb::arg("in_pred").noconvert(),
         nb::arg("in_target").noconvert(), nb::arg("valid").noconvert(), nb::arg("num_threads") = 0,
         "Binary counts and included voxels with a shared per-case mask; False for invalid kept values.");
+  m.def("probability_stats", &probability_stats<float, std::uint8_t, exacta_probability_f32_u8>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("from_logits"), nb::arg("kind"), nb::arg("bins"),
+        nb::arg("out").noconvert(), nb::arg("num_threads") = 0,
+        "Bernoulli score/bin statistics; returns False for invalid included values.");
+  m.def("probability_stats", &probability_stats<float, std::int64_t, exacta_probability_f32_i64>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("from_logits"), nb::arg("kind"), nb::arg("bins"),
+        nb::arg("out").noconvert(), nb::arg("num_threads") = 0,
+        "Bernoulli score/bin statistics; returns False for invalid included values.");
+  m.def("probability_stats", &probability_stats<float, float, exacta_probability_f32_f32>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("from_logits"), nb::arg("kind"), nb::arg("bins"),
+        nb::arg("out").noconvert(), nb::arg("num_threads") = 0,
+        "Bernoulli score/bin statistics; returns False for invalid included values.");
+  m.def("probability_stats", &probability_stats<float, double, exacta_probability_f32_f64>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("from_logits"), nb::arg("kind"), nb::arg("bins"),
+        nb::arg("out").noconvert(), nb::arg("num_threads") = 0,
+        "Bernoulli score/bin statistics; returns False for invalid included values.");
+  m.def("probability_stats", &probability_stats<double, std::uint8_t, exacta_probability_f64_u8>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("from_logits"), nb::arg("kind"), nb::arg("bins"),
+        nb::arg("out").noconvert(), nb::arg("num_threads") = 0,
+        "Bernoulli score/bin statistics; returns False for invalid included values.");
+  m.def("probability_stats", &probability_stats<double, std::int64_t, exacta_probability_f64_i64>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("from_logits"), nb::arg("kind"), nb::arg("bins"),
+        nb::arg("out").noconvert(), nb::arg("num_threads") = 0,
+        "Bernoulli score/bin statistics; returns False for invalid included values.");
+  m.def("probability_stats", &probability_stats<double, float, exacta_probability_f64_f32>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("from_logits"), nb::arg("kind"), nb::arg("bins"),
+        nb::arg("out").noconvert(), nb::arg("num_threads") = 0,
+        "Bernoulli score/bin statistics; returns False for invalid included values.");
+  m.def("probability_stats", &probability_stats<double, double, exacta_probability_f64_f64>,
+        nb::arg("pred").noconvert(), nb::arg("target").noconvert(), nb::arg("mask").noconvert(),
+        nb::arg("channels"), nb::arg("from_logits"), nb::arg("kind"), nb::arg("bins"),
+        nb::arg("out").noconvert(), nb::arg("num_threads") = 0,
+        "Bernoulli score/bin statistics; returns False for invalid included values.");
   const char *binary_doc =
       "Write into `out` (uint8, (N,)) whether each of `values` (N,) is nonzero; returns False if "
       "one is neither 0 nor 1.";
