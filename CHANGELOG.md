@@ -2,6 +2,10 @@
 
 Release notes for Exacta's alpha versions.
 
+## Unreleased
+
+Changes for the next release will be recorded here.
+
 ## 0.0.1a5 — 2026-10-26
 
 This release extends 2D and 3D segmentation evaluation with selected voxels, independent
