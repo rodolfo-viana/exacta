@@ -2,6 +2,10 @@
 
 Release notes for Exacta's alpha versions.
 
+## Unreleased
+
+Changes for the next release will be recorded here.
+
 ## 0.0.1a6 — 2026-11-24
 
 This release broadens Exacta beyond per-image segmentation scores: dataset-level classification
