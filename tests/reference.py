@@ -19,6 +19,14 @@ def iou(p: np.ndarray, t: np.ndarray) -> float:
     return np.nan if union == 0 else (p & t).sum() / union
 
 
+def fbeta(p: np.ndarray, t: np.ndarray, beta: float) -> float:
+    tp, fp, fn = (p & t).sum(), (p & ~t).sum(), (~p & t).sum()
+    if tp + fp + fn == 0:
+        return np.nan
+    b2 = beta * beta
+    return (1 + b2) * tp / ((1 + b2) * tp + b2 * fn + fp)
+
+
 def _divide(num: float, den: float, zero_division: float) -> float:
     return zero_division if den == 0 else num / den
 
@@ -109,3 +117,78 @@ def per_case(fn, pred: np.ndarray, target: np.ndarray, num_classes: int, spacing
                 args += (spacings[b],)
             out[b, c] = fn(*args, **kw)
     return out
+
+
+def _instance_tables(true: np.ndarray, pred: np.ndarray):
+    """Dense intersection/union tables between instance values (rows: target, columns: pred)."""
+    t_ids = [v for v in np.unique(true) if v != 0]
+    p_ids = [v for v in np.unique(pred) if v != 0]
+    inter = np.zeros((len(t_ids), len(p_ids)))
+    union = np.zeros((len(t_ids), len(p_ids)))
+    t_area = np.array([(true == v).sum() for v in t_ids], dtype=float)
+    p_area = np.array([(pred == v).sum() for v in p_ids], dtype=float)
+    for a, tv in enumerate(t_ids):
+        for b, pv in enumerate(p_ids):
+            inter[a, b] = ((true == tv) & (pred == pv)).sum()
+            union[a, b] = t_area[a] + p_area[b] - inter[a, b]
+    return inter, union, t_area, p_area
+
+
+def aji(true: np.ndarray, pred: np.ndarray) -> float:
+    """AJI as the algorithm of HoVer-Net's get_fast_aji: per target, argmax of a dense IoU table
+    with 1e-6 added to the union; unpaired target/prediction areas join the union."""
+    inter, union, t_area, p_area = _instance_tables(true, pred)
+    if not len(t_area) and not len(p_area):
+        return np.nan
+    if not len(t_area):
+        return 0.0
+    if not len(p_area):
+        return 0.0
+    iou = inter / (union + 1e-6)
+    best = iou.argmax(1)
+    paired = np.nonzero(iou.max(1) > 0)[0]
+    total_i = inter[paired, best[paired]].sum()
+    total_u = union[paired, best[paired]].sum()
+    total_u += t_area[np.setdiff1d(np.arange(len(t_area)), paired)].sum()
+    total_u += p_area[np.setdiff1d(np.arange(len(p_area)), best[paired])].sum()
+    return total_i / total_u
+
+
+def aji_plus(true: np.ndarray, pred: np.ndarray) -> float:
+    """AJI+ as the algorithm of HoVer-Net's get_fast_aji_plus: one assignment on the dense IoU
+    table, pairs of positive IoU kept."""
+    from scipy.optimize import linear_sum_assignment
+
+    inter, union, t_area, p_area = _instance_tables(true, pred)
+    if not len(t_area) and not len(p_area):
+        return np.nan
+    if not len(t_area) or not len(p_area):
+        return 0.0
+    iou = inter / (union + 1e-6)
+    rows, cols = linear_sum_assignment(-iou)
+    keep = iou[rows, cols] > 0
+    rows, cols = rows[keep], cols[keep]
+    total_u = union[rows, cols].sum() + t_area[np.setdiff1d(np.arange(len(t_area)), rows)].sum()
+    total_u += p_area[np.setdiff1d(np.arange(len(p_area)), cols)].sum()
+    return inter[rows, cols].sum() / total_u
+
+
+def panoptic(true: np.ndarray, pred: np.ndarray, threshold: float = 0.5):
+    """(tp, fp, fn, Σ IoU) of strict IoU > threshold matching for threshold >= 0.5 (unique)."""
+    inter, union, t_area, p_area = _instance_tables(true, pred)
+    iou = inter / np.where(union > 0, union, 1)
+    rows, cols = np.nonzero(iou > threshold)
+    tp = len(rows)
+    return tp, len(p_area) - tp, len(t_area) - tp, iou[rows, cols].sum()
+
+
+def ctc_seg(true: np.ndarray, pred: np.ndarray) -> float:
+    """SEG: mean over target instances of the IoU with the prediction covering > half of it."""
+    inter, union, t_area, _ = _instance_tables(true, pred)
+    if not len(t_area):
+        return np.nan
+    scores = []
+    for a in range(len(t_area)):
+        hit = np.nonzero(2 * inter[a] > t_area[a])[0]
+        scores.append(inter[a, hit[0]] / union[a, hit[0]] if len(hit) else 0.0)
+    return float(np.mean(scores))

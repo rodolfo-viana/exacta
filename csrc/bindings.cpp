@@ -287,6 +287,18 @@ void skeleton(Bytes mask, nb::ndarray<std::uint8_t, nb::device::cpu, nb::c_conti
   if (status == EXACTA_INVALID_ARGUMENT) throw std::invalid_argument("skeleton requires a 2-D or 3-D mask");
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }
+
+void skeleton_zhang(Bytes mask, nb::ndarray<std::uint8_t, nb::device::cpu, nb::c_contig> out) {
+  if (mask.ndim() != 2 || out.ndim() != 2 || mask.shape(0) != out.shape(0) || mask.shape(1) != out.shape(1))
+    throw std::invalid_argument("Zhang thinning needs 2-D mask and out of the same shape");
+  const std::int64_t shape[2] = {static_cast<std::int64_t>(mask.shape(0)), static_cast<std::int64_t>(mask.shape(1))};
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_skeleton_zhang_u8(mask.data(), out.data(), shape);
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
 using Indices = nb::ndarray<std::int64_t, nb::ndim<2>, nb::device::cpu, nb::c_contig>;
 
 void boundary(nb::ndarray<const std::uint8_t, nb::device::cpu> mask,
@@ -761,6 +773,8 @@ NB_MODULE(_C, m) {
         "Write into `out` (int32, same shape) the connected-component labels of `mask` (uint8), "
         "numbered as scipy.ndimage.label numbers them, and return the number of components.");
   m.def("skeleton", &skeleton, nb::arg("mask"), nb::arg("out"), "Lee thinning of a 2-D or 3-D CPU mask.");
+  m.def("skeleton_zhang", &skeleton_zhang, nb::arg("mask"), nb::arg("out"),
+        "Zhang-Suen thinning of a 2-D CPU mask (scikit-image's table and schedule).");
   m.def("soft_pool", &soft_pool<float, exacta_soft_pool_f32>, nb::arg("input"), nb::arg("out"),
         nb::arg("indices"), nb::arg("erosion"), nb::arg("num_threads") = 0);
   m.def("soft_pool", &soft_pool<double, exacta_soft_pool_f64>, nb::arg("input"), nb::arg("out"),

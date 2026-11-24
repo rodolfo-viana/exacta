@@ -3,7 +3,8 @@
 Metrics and differentiable losses for **2D and 3D medical-image segmentation**, on CPU and GPU.
 Exacta provides reusable implementations of Dice, HD95, surface distances, lesion scores,
 probability metrics and training objectives, with explicit mathematical conventions.
-The development version also adds general **classification and regression** APIs.
+The development version adds general **classification and regression** APIs, instance-map
+evaluation and further segmentation metrics and losses.
 
 CPU operations use C++ kernels where implemented; CUDA paths use Triton or native PyTorch.
 Definitions are checked against independent references such as SciPy, MONAI, MedPy,
@@ -144,6 +145,45 @@ and topology objectives require complete target geometry; combine them with regi
 supervision where appropriate. See [Losses](https://github.com/rodolfo-viana/exacta/wiki/Losses)
 for equations, smoothing, reductions, target formats and derivative support.
 
+## Segmentation additions (unreleased)
+
+The following APIs require **0.0.1a6.dev0** and are not included in the published `0.0.1a5`
+package.
+
+| API | Purpose |
+|---|---|
+| `aggregate="pooled"` in `Dice`, `IoU`, `FBeta`, `Sensitivity`, `Precision`, `Specificity` and `MetricCollection` | Dataset-pooled counts: global Dice, per-class IoU and mIoU (mmsegmentation convention) |
+| `functional.fbeta`, `metrics.FBeta` | F-beta per case and class; `beta=1` is Dice |
+| `functional.confusion_counts` | Per-case TP/FP/FN/TN for custom definitions and pooling |
+| `exacta.instances` | Instance label maps with touching instances: PQ/SQ/F1, AJI, AJI+, Cell Tracking Challenge SEG, Data Science Bowl 2018 score; per-case or pooled accumulation |
+| `functional.betti_numbers`, `betti_error`, `metrics.BettiError` | Betti numbers (components, holes/tunnels, cavities) and Betti errors in 2D/3D |
+| `skeletonize(method=...)`, `cldice(method=...)` | Zhang thinning in C++; 2D clDice now uses it by default, as the clDice authors do (`method="lee"` reproduces 0.0.1a5) |
+| `losses.SkeletonRecallLoss`, `skeleton_recall_target` | Skeleton Recall for thin tubular structures, with the authors' tubed skeleton targets |
+| `soft_label=True` in Dice, Tversky, generalized Dice and their CE/focal combinations | Dice semimetric statistics: minimal at the soft target, identical for hard labels |
+
+```python
+import torch
+from exacta import instances
+from exacta.metrics import IoU
+
+pred_instances = torch.tensor([[[1, 1, 0, 2, 2], [1, 1, 0, 2, 2]]])
+true_instances = torch.tensor([[[3, 3, 0, 4, 4], [3, 3, 0, 0, 4]]])
+scores = instances.evaluate(pred_instances, true_instances)  # IoU > 0.5 matching
+print(scores.pq, scores.aji, scores.seg)
+
+miou = IoU(num_classes=3, aggregate="pooled")
+miou.update(torch.tensor([[[0, 1], [2, 2]]]), torch.tensor([[[0, 1], [2, 1]]]))
+print(miou.compute().per_class, miou.compute().mean)
+```
+
+Pooled scores weight every voxel equally and differ from case means. Instance matching above
+0.5 IoU is unique; lower thresholds and AJI follow documented reference procedures. See the
+[Metrics](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Metrics.md),
+[Instance evaluation](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Instance-evaluation.md),
+[Losses](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Losses.md) and
+[Advanced segmentation](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Advanced-segmentation.md)
+source pages for definitions, empty-input behavior and references.
+
 ## Classification and regression (unreleased)
 
 The following APIs require **0.0.1a6.dev0** and are not included in the published
@@ -226,7 +266,7 @@ surface representations can change reported values even for identical segmentati
 | ASSD | Pooled surface-element mean; `combine="mean"` averages the two directed means. |
 | Empty masks | Dice/IoU return NaN when both are empty; distance metrics default to infinity when exactly one is empty, except NSD, which returns zero. Parameters make these policies explicit. |
 | Case aggregation | Stateful per-case metrics skip NaNs, average cases per class, then average class means. |
-| Pooled evaluation | `Calibration` pools voxel bins; `VoxelRanking` pools voxel rankings. Case averages and pooled scores are different quantities. |
+| Pooled evaluation | `Calibration` pools voxel bins; `VoxelRanking` pools voxel rankings; in 0.0.1a6.dev0, overlap metrics with `aggregate="pooled"` pool confusion counts. Case averages and pooled scores are different quantities. |
 | AP | Non-interpolated sum of recall increments times precision, not trapezoidal PR area. No-positive AP and single-outcome AUROC are NaN. |
 
 For distributed evaluation, every rank must participate in `compute()`, including ranks with

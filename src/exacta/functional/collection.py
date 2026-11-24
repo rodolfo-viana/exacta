@@ -8,15 +8,18 @@ from typing import Any, Literal
 
 from exacta._inputs import InputFormat, like_input, to_torch, validate
 from exacta.functional import overlap, surface as sf
-from exacta.functional.topology import cldice
+from exacta.functional.topology import betti_error, cldice
 from exacta.functional._physical import _physical_scale, _score_size
 
 MetricSelection = Sequence[str] | Mapping[str, Mapping[str, Any]]
+_GEOMETRY = ("cldice", "betti_error")
 
 _DEFAULTS: dict[str, dict[str, Any]] = {
-    "cldice": {"both_empty": math.nan},
+    "cldice": {"both_empty": math.nan, "method": None},
+    "betti_error": {"connectivity": None, "dimension": 0},
     "dice": {"both_empty": math.nan},
     "iou": {"both_empty": math.nan},
+    "fbeta": {"beta": 1.0, "both_empty": math.nan},
     "sensitivity": {"zero_division": math.nan},
     "precision": {"zero_division": math.nan},
     "specificity": {"zero_division": math.nan},
@@ -77,10 +80,10 @@ def evaluate(
     overlap/area/volume metrics. Surface and clDice masking is undefined and is rejected.
     """
     requests = _selection(metrics)
-    counts_names = [n for n, options in requests.items() if "surface" not in options and n != "cldice"]
+    counts_names = [n for n, options in requests.items() if "surface" not in options and n not in _GEOMETRY]
     if (mask is not None or ignore_index is not None) and len(counts_names) != len(requests):
         raise ValueError("mask and ignore_index support only overlap/area/volume metrics; "
-                         "surface and cldice metrics require complete segmentations")
+                         "surface, cldice and Betti metrics require complete segmentations")
     if counts_names:
         counts, seg = overlap._confusion_counts_and_seg(
             pred, target, input_format, num_classes, include_background,
@@ -108,6 +111,12 @@ def evaluate(
         if name == "cldice":
             results[name] = cldice(seg.pred, seg.target, input_format=input_format,
                                    num_classes=num_classes, include_background=include_background, **options)
+            continue
+        if name == "betti_error":
+            if options["connectivity"] is None:
+                raise ValueError("betti_error requires connectivity")
+            results[name] = betti_error(seg.pred, seg.target, input_format=input_format,
+                                        num_classes=num_classes, include_background=include_background, **options)
             continue
         if name in counts_names:
             continue

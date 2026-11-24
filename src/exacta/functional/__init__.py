@@ -1,7 +1,10 @@
 """Segmentation metrics and separate dataset-level classification/regression namespaces."""
 
 from exacta.functional.overlap import (
+    ConfusionCounts,
+    confusion_counts,
     dice,
+    fbeta,
     iou,
     precision,
     relative_volume_difference,
@@ -14,7 +17,7 @@ from exacta.functional.area import predicted_area, target_area, area_error
 from exacta.functional.volume import predicted_volume, target_volume, volume_error
 from exacta.functional.ranking import RankingCurve, RankingResult, voxel_ranking, average_precision, auroc
 from exacta.functional.collection import evaluate
-from exacta.functional.topology import cldice, skeletonize
+from exacta.functional.topology import betti_error, betti_numbers, cldice, skeletonize
 from exacta.functional.calibration import (
     ReliabilityDiagram, brier_score, negative_log_likelihood, expected_calibration_error, reliability_diagram,
 )
@@ -23,10 +26,13 @@ __all__ = [
     "RankingCurve", "RankingResult", "voxel_ranking", "average_precision", "auroc",
     "predicted_area", "target_area", "area_error",
     "predicted_volume", "target_volume", "volume_error",
-    "cldice", "skeletonize", "ReliabilityDiagram", "brier_score", "negative_log_likelihood",
+    "cldice", "skeletonize", "betti_numbers", "betti_error", "ReliabilityDiagram", "brier_score", "negative_log_likelihood",
     "expected_calibration_error", "reliability_diagram",
+    "ConfusionCounts",
+    "confusion_counts",
     "assd",
     "dice",
+    "fbeta",
     "evaluate",
     "hausdorff_distance",
     "hd95",

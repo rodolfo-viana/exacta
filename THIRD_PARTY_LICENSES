@@ -4,6 +4,11 @@ https://github.com/scikit-image/scikit-image/tree/v0.25.2
 Copyright: 2009-2022 the scikit-image team.
 Original implementation by Ignacio Arganda-Carreras (2015), based on Hanno Homann.
 
+The Zhang-Suen lookup table and two-subiteration schedule in csrc/cpu/skeleton.cpp are
+adapted from scikit-image v0.26.0, src/skimage/morphology/_skeletonize_various_cy.pyx
+(_fast_skeletonize). https://github.com/scikit-image/scikit-image/tree/v0.26.0
+Copyright: 2009-2022 the scikit-image team. Same BSD-3-Clause terms as below.
+
 BSD-3-Clause
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions

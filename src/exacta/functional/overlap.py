@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from numbers import Integral
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import torch
 from torch import Tensor
@@ -26,6 +26,39 @@ from exacta._inputs import InputFormat, Segmentations, like_input, to_torch, val
 
 # Voxels per bincount call, bounding the int64 index buffer to 128 MiB.
 _CHUNK = 1 << 24
+
+
+class ConfusionCounts(NamedTuple):
+    """Voxel counts of every case and class, each a (B, C) int64 array: ``tp`` (predicted and in
+    the target), ``fp`` (predicted only), ``fn`` (target only) and ``tn`` (neither)."""
+
+    tp: Any
+    fp: Any
+    fn: Any
+    tn: Any
+
+
+def confusion_counts(
+    pred: Any,
+    target: Any,
+    *,
+    input_format: InputFormat = "index",
+    num_classes: int | None = None,
+    include_background: bool = True,
+    ignore_index: int | None = None,
+    mask: Any = None,
+) -> ConfusionCounts:
+    """TP, FP, FN and TN of each class against the rest, per case, from one counting pass.
+
+    The statistics behind every overlap metric, for definitions Exacta does not name (e.g. MCC
+    or voxel accuracy, whose true negatives depend on the field of view) and for custom
+    aggregation, such as pooling the slices of one patient. Arguments as in :func:`dice`;
+    excluded voxels count in none of the four. Each count is in the array library of ``pred``.
+    """
+    counts = _confusion_counts(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )
+    return ConfusionCounts(*(like_input(x, pred) for x in counts))
 
 
 def dice(
@@ -213,10 +246,44 @@ def relative_volume_difference(
     return like_input(_score_counts("relative_volume_difference", counts, zero_division=zero_division, absolute=absolute), pred)
 
 
+def fbeta(
+    pred: Any,
+    target: Any,
+    *,
+    beta: float = 1.0,
+    input_format: InputFormat = "index",
+    num_classes: int | None = None,
+    include_background: bool = True,
+    ignore_index: int | None = None,
+    mask: Any = None,
+    both_empty: float = math.nan,
+) -> Any:
+    """F-beta score ``(1 + β²) TP / ((1 + β²) TP + β² FN + FP)`` for every case and class.
+
+    The weighted harmonic mean of precision and sensitivity: ``beta > 1`` weights missed target
+    voxels (FN) more than false detections (FP). ``beta=1`` is Dice. The denominator is zero
+    exactly when the class is absent from both masks, which gives ``both_empty``.
+
+    Args:
+        beta: Positive, finite weight of sensitivity relative to precision.
+        Others: As in :func:`dice`.
+    """
+    _check_beta(beta)
+    counts = _confusion_counts(
+        pred, target, input_format, num_classes, include_background, ignore_index=ignore_index, mask=mask,
+    )
+    return like_input(_score_counts("fbeta", counts, both_empty=both_empty, beta=beta), pred)
+
+
+def _check_beta(beta: float) -> None:
+    if isinstance(beta, bool) or not isinstance(beta, (int, float)) or not (math.isfinite(beta) and beta > 0):
+        raise ValueError(f"beta must be a positive finite number, got {beta!r}")
+
+
 def _score_counts(
     name: str, counts: tuple[Tensor, Tensor, Tensor, Tensor], *,
     both_empty: float = math.nan, zero_division: float = math.nan,
-    convention: str = "taha", absolute: bool = False,
+    convention: str = "taha", absolute: bool = False, beta: float = 1.0,
 ) -> Tensor:
     """Reduce shared integer statistics without rescanning a segmentation."""
     tp, fp, fn, tn = counts
@@ -224,6 +291,17 @@ def _score_counts(
         return _ratio(2 * tp, 2 * tp + fp + fn, both_empty)
     if name == "iou":
         return _ratio(tp, tp + fp + fn, both_empty)
+    if name == "fbeta":
+        _check_beta(beta)
+        # Scale by 1/β² for large beta instead of overflowing β²; the ratio is unchanged.
+        tp, fp, fn = tp.double(), fp.double(), fn.double()
+        if beta > 1:
+            r = (1 / beta) ** 2
+            num, den = (1 + r) * tp, (1 + r) * tp + fn + r * fp
+        else:
+            r = beta**2
+            num, den = (1 + r) * tp, (1 + r) * tp + r * fn + fp
+        return torch.where(tp + fp + fn > 0, num / torch.where(den > 0, den, 1), torch.full_like(den, both_empty))
     if name == "sensitivity":
         return _ratio(tp, tp + fn, zero_division)
     if name == "precision":

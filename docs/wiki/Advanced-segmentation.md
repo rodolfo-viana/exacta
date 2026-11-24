@@ -102,6 +102,75 @@ the C++ path selects the first raster neighbour, while PyTorch can split erosion
 between equal minima. These are valid, potentially different subgradients. `torch.compile`
 with the default backend uses the PyTorch path so its tensor kernels can be compiled.
 
+**Unreleased (`0.0.1a6.dev0`): thinning method.** The clDice authors compute their metric with
+scikit-image's `skeletonize`, which uses Zhang-Suen thinning in 2D and Lee thinning in 3D.
+`skeletonize(mask, method=None)` now follows that default, and `cldice`, `ClDice` and the
+collection option accept `method="zhang"` (2D only) or `"lee"`. The new C++ Zhang kernel
+reproduces scikit-image 0.26's lookup table and two-subiteration schedule exactly; that table
+differs from the textbook Zhang-Suen conditions in 25 of its 256 entries, so it is copied, with
+attribution, rather than derived. In 2D the two methods give different skeletons, and therefore
+different clDice: pass `method="lee"` to reproduce `0.0.1a5` values.
+
+## Skeleton Recall (unreleased, `0.0.1a6.dev0`)
+
+`SkeletonRecallLoss` implements the loss of
+[Kirchhoff et al. (ECCV 2024)](https://doi.org/10.1007/978-3-031-72980-5_13). With $s_c$ the
+tubed target skeleton of class $c$ and $p_c$ the predicted probabilities,
+
+$$
+\mathcal{L}_{\mathrm{SR}}=1-\frac{1}{\lvert\mathcal{C}\rvert}\sum_{c\in\mathcal{C}}
+\frac{\sum_i p_{c,i}s_{c,i}+s}{\sum_i s_{c,i}+s},
+$$
+
+averaged over cases unless `batch_dice=True` sums the batch first. The authors' code returns the
+negative mean recall, which differs by the constant 1. Background is excluded by default, as
+the authors require for softmax outputs. A class without skeleton voxels has recall 1 and no
+gradient; `mask` and `ignore_index` exclude voxels from both sums, and `distributed=True`
+reduces the global batch. The loss rewards covering thin structures end to end. It does not
+thin predictions, so its GPU cost is one product and two sums. Add it to a regional loss:
+the authors use Dice + CE + Skeleton Recall with unit weights.
+
+`skeleton_recall_target(target)` builds $s$ as the authors' nnU-Net transform does. The whole
+foreground (labels above 0) is thinned as one mask, the skeleton is dilated by `tube=2` steps
+of the face neighbourhood (in voxel steps, regardless of spacing), and every tube voxel keeps
+its target label; tube voxels on background become 0. `union=False` thins each class on its
+own, which differs where classes touch. One-hot targets default to separate channels, as
+overlapping labels require. Thinning runs on the CPU, so compute targets in the data loader after
+augmentation and pass them as `target_skeleton`; otherwise `forward` thins every target. The
+targets are tested against the authors' transform written with scikit-image, in 2D (Zhang) and
+3D (Lee).
+
+```python
+from exacta.losses import DiceCELoss, SkeletonRecallLoss, skeleton_recall_target
+
+skeleton = skeleton_recall_target(target)          # in the data loader, on CPU
+regional = DiceCELoss(include_background=False)
+recall = SkeletonRecallLoss()
+loss = regional(logits, target) + recall(logits, target, target_skeleton=skeleton.to(target.device))
+```
+
+## Betti numbers and Betti error (unreleased, `0.0.1a6.dev0`)
+
+`functional.betti_numbers(seg, connectivity=...)` returns $(\beta_0,\beta_1)$ in 2D (components,
+holes) and $(\beta_0,\beta_1,\beta_2)$ in 3D (components, tunnels, cavities) for every case and
+class. `connectivity` is required: 1 (4/6 neighbours) or `ndim` (8/26). The background takes the
+complementary neighbourhood, the pairing under which digital and continuous topology agree;
+18-connectivity has no such partner and is rejected. The image exterior is background.
+
+$\beta_0$ counts foreground components. The last Betti number counts background components of
+the zero-padded image other than the exterior. In 3D, $\beta_1=\beta_0+\beta_2-\chi$, where the
+Euler characteristic $\chi$ is counted on the cell complex that matches the connectivity:
+closed voxels for full connectivity, open voxels for faces only. The results match
+scikit-image's `label` and `euler_number` on random masks, and give $(1,1,0)$ for a solid torus
+and $(1,0,1)$ for a hollow sphere.
+
+`functional.betti_error(pred, target, connectivity=..., dimension=k)` and `metrics.BettiError`
+report $\lvert\beta_k(P)-\beta_k(T)\rvert$ as `(B, K)` float64; `dimension=0` is the Betti-0
+error of the TopCoW challenges. `functional.evaluate` and `MetricCollection` accept
+`"betti_error"` with its options; masks are rejected, because removing voxels changes topology.
+Betti errors ignore location: a missed component and a spurious one cancel. Report them
+next to an overlap or centreline metric.
+
 ## Probability quality and calibration
 
 `functional.brier_score`, `negative_log_likelihood`, `expected_calibration_error` and

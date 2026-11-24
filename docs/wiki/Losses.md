@@ -204,7 +204,7 @@ must agree across ranks; as with ordinary distributed training, a rank-local err
 ## Boundary, topology and hard-example objectives
 
 Additional objectives include `FocalTverskyLoss`, `TopKCELoss`, `DiceTopKCELoss`, `LovaszSoftmaxLoss`,
-`BoundaryLoss`, `HausdorffDTLoss` and `SoftClDiceLoss`. Their formulas, reductions, defaults,
+`BoundaryLoss`, `HausdorffDTLoss`, `SoftClDiceLoss` and (unreleased) `SkeletonRecallLoss`. Their formulas, reductions, defaults,
 reference conventions and CPU/GPU paths are documented in the
 [advanced segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation).
 
@@ -213,6 +213,37 @@ geometry/topology losses operate on each rank's local batch. Geometry masks affe
 only; complete target geometry is required. Geometry/topology losses have no `ignore_index`,
 and soft-clDice has no mask argument. Distance-transform and skeleton objectives should be
 combined with regional supervision according to the task.
+
+## Soft labels (unreleased, `0.0.1a6.dev0`)
+
+With soft targets $g_i\in(0,1)$, the product overlap $\sum_i p_i g_i$ makes Dice and Tversky
+losses minimal away from $p=g$: they push predictions towards 0 and 1. Label smoothing,
+distillation and averaged annotations therefore need another form. `soft_label=True` in
+`DiceLoss`, `TverskyLoss`, `FocalTverskyLoss`, `GeneralizedDiceLoss`, `DiceCELoss`,
+`DiceFocalLoss` and `GeneralizedDiceCELoss` uses the semimetric statistics of
+[Wang et al. (MICCAI 2023)](https://doi.org/10.1007/978-3-031-43898-1_46):
+
+$$
+\mathrm{TP}=\tfrac{1}{2}\Big(\sum_i p_i+\sum_i g_i-\sum_i\lvert p_i-g_i\rvert\Big),\qquad
+\mathrm{FP}=\sum_i p_i-\mathrm{TP},\qquad \mathrm{FN}=\sum_i g_i-\mathrm{TP}.
+$$
+
+For binary targets $\lvert p_i-g_i\rvert=p_i+g_i-2p_ig_i$, so values equal the ordinary losses
+exactly, and so do gradients except at voxels where $p_i=g_i\in\{0,1\}$, where the zero
+subgradient of $\lvert p_i-g_i\rvert$ applies; through softmax or sigmoid, whose derivative
+vanishes there, logit gradients agree. For soft targets every ratio is maximal only at $p=g$ (for Tversky,
+when both weights are positive). It matches MONAI's `soft_label=True`. The option acts on
+one-hot targets and runs on the PyTorch backend; index targets are hard and keep the fused
+path. CE terms are
+unchanged: cross-entropy is already minimal at $p=g$. `squared_pred=True` is too
+($\sum p^2+\sum g^2-2\sum pg=\sum(p-g)^2$), so the two options are exclusive.
+
+```python
+from exacta.losses import DiceCELoss
+
+loss_fn = DiceCELoss(target_format="one-hot", soft_label=True)
+loss = loss_fn(logits, smoothed_one_hot_targets)
+```
 
 ## Squared Dice denominator
 

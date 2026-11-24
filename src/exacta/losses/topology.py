@@ -1,4 +1,5 @@
-"""Differentiable clDice using fused C++ CPU morphology and PyTorch CUDA pooling."""
+"""Centreline objectives: differentiable clDice (fused C++ CPU morphology, PyTorch CUDA pooling)
+and Skeleton Recall on precomputable tubed target skeletons."""
 from __future__ import annotations
 
 import math
@@ -9,8 +10,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from exacta.functional.topology import SkeletonMethod, _skeleton_method, skeletonize
 from exacta.losses.geometry import _geometry_input, _options
-from exacta.losses.segmentation import Activation, TargetFormat
+from exacta.losses.segmentation import (
+    Activation, TargetFormat, _check_ignore_index, _check_index_target, _check_mask, _global_overlap,
+    _one_hot, _overlap_mean, _upcast,
+)
 from exacta import _native, _soft_pool
 
 SkeletonBackend = Literal["auto", "torch", "native"]
@@ -119,3 +124,169 @@ class SoftClDiceLoss(nn.Module):
         tp = ((sp * truth).sum(dims) + self.smooth) / (sp.sum(dims) + self.smooth)
         ts = ((st * probs).sum(dims) + self.smooth) / (st.sum(dims) + self.smooth)
         return (1 - 2 * tp * ts / (tp + ts)).mean()
+
+
+@torch.no_grad()
+def skeleton_recall_target(target: Tensor, *, target_format: TargetFormat = "index",
+                           union: bool | None = None, tube: int = 2,
+                           method: SkeletonMethod | None = None,
+                           ignore_index: int | None = None) -> Tensor:
+    """Tubed target skeleton for :class:`SkeletonRecallLoss` (Kirchhoff et al., ECCV 2024).
+
+    As the authors' nnU-Net transform does: the foreground (every label above 0) is thinned
+    as one mask, the skeleton is dilated by ``tube`` steps of the face-adjacent neighbourhood
+    (their ``iterate_structure(generate_binary_structure(ndim, 1), 2)`` for ``tube=2``, in
+    voxel steps whatever the spacing), and each voxel of that tube keeps its target label; tube
+    voxels on background become 0. ``union=False`` thins every class separately instead, which
+    differs where classes touch. One-hot targets (B, C, *spatial) default to separate channels,
+    as overlapping labels require; ``union=True`` there thins channels 1.. together and leaves
+    channel 0 empty. ``method`` is the thinning of :func:`exacta.functional.skeletonize`;
+    ``None`` uses scikit-image's default (Zhang in 2-D, Lee in 3-D), as the authors do.
+
+    Index targets give a (B, *spatial) label map of the target's dtype; ``ignore_index`` voxels
+    are background for thinning and 0 in the result. One-hot targets give a boolean
+    (B, C, *spatial) array. Thinning runs on the CPU: compute targets in the data loader, after
+    augmentation, as the authors do, rather than once per optimisation step on the GPU.
+    """
+    if isinstance(tube, bool) or not isinstance(tube, Integral) or tube < 0:
+        raise ValueError("tube must be a nonnegative integer")
+    if target_format not in ("index", "one-hot"):
+        raise ValueError(f"target_format must be 'index' or 'one-hot', got {target_format!r}")
+    index = target_format == "index"
+    spatial = target.ndim - (1 if index else 2)
+    if spatial not in (2, 3):
+        raise ValueError("target must be (B, *spatial) indices or (B, C, *spatial) channels, 2-D or 3-D")
+    method = _skeleton_method(method, spatial)
+    ignore_index = _check_ignore_index(ignore_index, target_format)
+    union = index if union is None else union
+    from exacta.lesions import _dilate  # avoid an import cycle through exacta.functional
+
+    def tubed(region: Tensor) -> Tensor:
+        skeleton = skeletonize(region, method=method)
+        return _dilate(skeleton, int(tube), 1) if tube else skeleton
+
+    source = target.detach().cpu()
+    if index:
+        if target.dtype.is_floating_point or target.dtype.is_complex or target.dtype == torch.bool:
+            raise TypeError("index targets must hold integer labels")
+        labels = source.long()
+        if ignore_index is not None:
+            labels = torch.where(labels == ignore_index, 0, labels)
+        if bool((labels < 0).any()):
+            raise ValueError("index targets must be nonnegative (pass ignore_index for ignored labels)")
+        out = torch.zeros_like(source)
+        for b in range(source.shape[0]):
+            if union:
+                found = tubed(labels[b] > 0)
+                out[b] = torch.where(found, labels[b], 0).to(source.dtype)
+                continue
+            for label in labels[b].unique().tolist():
+                if label > 0:
+                    region = labels[b] == label
+                    out[b][tubed(region) & region] = label
+        return out.to(target.device)
+    if not bool(((source == 0) | (source == 1)).all()):
+        raise ValueError("one-hot targets must be binary")
+    masks = source.bool()
+    out = torch.zeros_like(masks)
+    for b in range(masks.shape[0]):
+        if union:
+            if masks.shape[1] < 2:
+                raise ValueError("union=True needs a background channel 0 and foreground channels")
+            out[b, 1:] = tubed(masks[b, 1:].any(0)) & masks[b, 1:]
+            continue
+        for c in range(masks.shape[1]):
+            out[b, c] = tubed(masks[b, c]) & masks[b, c]
+    return out.to(target.device)
+
+
+class SkeletonRecallLoss(nn.Module):
+    """Skeleton Recall loss (Kirchhoff et al., ECCV 2024): ``1 - mean_c R_c``, with the soft recall
+    ``R_c = (Σ p_c·s_c + smooth) / (Σ s_c + smooth)`` of the tubed target skeleton ``s`` (see
+    :func:`skeleton_recall_target`) by the predicted probabilities ``p``.
+
+    It rewards covering thin structures end to end without thinning the prediction, so it is
+    cheap on the GPU; combine it with a regional loss (the authors add it to Dice + CE with weight
+    1). The authors' code returns ``-mean R``; this differs by the constant 1 only. Sums cover the
+    spatial axes, and the batch with ``batch_dice=True``; the mean is over cases and the selected
+    classes (background excluded by default, as the authors require for softmax outputs). A class
+    without skeleton voxels has recall 1 and no gradient. ``mask`` and ``ignore_index`` exclude
+    voxels from both sums; entirely excluded cases are left out of the mean. ``distributed=True``
+    (with ``batch_dice``) sums over the global batch with DDP-correct gradients.
+
+    ``forward(input, target, target_skeleton=None)`` thins ``target`` on the CPU when no
+    precomputed ``target_skeleton`` (the output of :func:`skeleton_recall_target` for the same
+    target) is given.
+    """
+
+    activation: Activation
+    target_format: TargetFormat
+    include_background: bool
+    batch_dice: bool
+    distributed: bool
+    smooth: float
+    ignore_index: int | None
+    union: bool | None
+    tube: int
+    method: SkeletonMethod | None
+
+    def __init__(self, *, activation: Activation = "softmax", target_format: TargetFormat = "index",
+                 include_background: bool = False, batch_dice: bool = False, distributed: bool = False,
+                 smooth: float = 1e-5, ignore_index: int | None = None, union: bool | None = None,
+                 tube: int = 2, method: SkeletonMethod | None = None) -> None:
+        super().__init__()
+        _options(activation, target_format)
+        if not math.isfinite(smooth) or smooth <= 0:
+            raise ValueError("smooth must be finite and positive, so that absent skeletons are defined")
+        if distributed and not batch_dice:
+            raise ValueError("distributed=True requires batch_dice=True")
+        if isinstance(tube, bool) or not isinstance(tube, Integral) or tube < 0:
+            raise ValueError("tube must be a nonnegative integer")
+        if method not in (None, "zhang", "lee"):
+            raise ValueError(f"method must be 'zhang', 'lee' or None, got {method!r}")
+        self.activation, self.target_format = activation, target_format
+        self.include_background, self.batch_dice, self.distributed = include_background, batch_dice, distributed
+        self.smooth = smooth
+        self.ignore_index = _check_ignore_index(ignore_index, target_format)
+        self.union, self.tube, self.method = union, int(tube), method
+
+    def forward(self, input: Tensor, target: Tensor, *, target_skeleton: Tensor | None = None,
+                mask: Tensor | None = None) -> Tensor:
+        valid = _check_mask(mask, input)
+        input = _upcast(input)
+        if self.target_format == "index":
+            _check_index_target(target, input)
+            if self.ignore_index is not None:
+                observed = target.long() != self.ignore_index
+                valid = observed if valid is None else valid & observed
+        if target_skeleton is None:
+            target_skeleton = skeleton_recall_target(
+                target, target_format=self.target_format, union=self.union, tube=self.tube,
+                method=self.method, ignore_index=self.ignore_index,
+            )
+        elif target_skeleton.shape != target.shape or target_skeleton.device != target.device:
+            raise ValueError("target_skeleton must have the target's shape and device")
+        if self.target_format == "index" and self.ignore_index is not None:
+            target_skeleton = torch.where(target_skeleton.long() == self.ignore_index, 0, target_skeleton)
+        truth = _one_hot(target_skeleton, input, self.target_format).to(input.dtype)
+        if valid is not None:
+            input = torch.where(valid[:, None], input, 0)  # sanitise before the activation
+        probs = input.softmax(1) if self.activation == "softmax" else (
+            input.sigmoid() if self.activation == "sigmoid" else input)
+        if valid is not None:
+            probs = torch.where(valid[:, None], probs, 0)
+            truth = torch.where(valid[:, None], truth, 0)
+        if not self.include_background:
+            if input.shape[1] < 2:
+                raise ValueError("include_background=False needs at least 2 channels")
+            probs, truth = probs[:, 1:], truth[:, 1:]
+        dims = tuple(range(2, probs.ndim))
+        if self.batch_dice:
+            dims = (0, *dims)
+        covered, skeleton = (probs * truth).sum(dims), truth.sum(dims)
+        counts = None if valid is None else valid.flatten(1).sum(1)
+        if counts is not None and self.batch_dice:
+            counts = counts.sum()
+        if self.distributed:
+            covered, skeleton, _, counts = _global_overlap(covered, skeleton, skeleton, counts, input)
+        return _overlap_mean(covered + self.smooth, skeleton + self.smooth, counts).to(input.dtype)

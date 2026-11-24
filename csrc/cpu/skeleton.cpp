@@ -1,6 +1,8 @@
 // Lee (1994) thinning. Euler tables and deletion order adapted from scikit-image
 // v0.25.2 _skeletonize_lee_cy.pyx.in (BSD-3-Clause); see THIRD_PARTY_LICENSES.
 // Connectivity is checked with a 27-bit flood fill instead of recursive octrees.
+// Zhang-Suen (1984) 2-D thinning with scikit-image v0.26.0's lookup table and two-subiteration
+// schedule (_skeletonize_various_cy.pyx, _fast_skeletonize; BSD-3-Clause).
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -41,7 +43,68 @@ bool candidate(const std::array<std::uint8_t, 27>& n) {
   }
   return euler == 0 && simple(n);
 }
+// scikit-image's table, indexed by the 8 neighbours (bit 0 north-west, then clockwise: north,
+// north-east, east, south-east, south, south-west, west). 1: removable in the first
+// subiteration, 2: in the second, 3: in both. It is not the textbook Zhang-Suen rule set (25
+// entries differ), so it is copied rather than derived, to reproduce scikit-image exactly.
+constexpr std::uint8_t zhang_lut[256] = {
+    0,0,0,1,0,0,1,3,0,0,3,1,1,0,1,3,0,0,0,0,0,0,0,0,2,0,2,0,3,0,3,3,
+    0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,3,0,2,2,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    2,0,0,0,0,0,0,0,2,0,0,0,2,0,0,0,3,0,0,0,0,0,0,0,3,0,0,0,3,0,2,0,
+    0,0,3,1,0,0,1,3,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,
+    3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    2,3,1,3,0,0,1,3,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    2,3,0,1,0,0,0,1,0,0,0,0,0,0,0,0,3,3,0,1,0,0,0,0,2,2,0,0,2,0,0,0,
+};
 }  // namespace
+
+extern "C" int exacta_skeleton_zhang_u8(const std::uint8_t* mask, std::uint8_t* out,
+                                         const std::int64_t* shape) {
+  const std::int64_t h = shape[0], w = shape[1];
+  if (h < 0 || w < 0 || h > std::numeric_limits<std::int64_t>::max() - 2 ||
+      w > std::numeric_limits<std::int64_t>::max() - 2)
+    return EXACTA_INVALID_ARGUMENT;
+  if (!h || !w) return EXACTA_OK;
+  const std::int64_t row = w + 2;
+  if (h + 2 > std::numeric_limits<std::int64_t>::max() / row) return EXACTA_INVALID_ARGUMENT;
+  try {
+    std::vector<std::uint8_t> img((h + 2) * row, 0);
+    std::vector<std::int64_t> active, removed;
+    for (std::int64_t y = 0; y < h; ++y)
+      for (std::int64_t x = 0; x < w; ++x) {
+        const auto padded = (y + 1) * row + x + 1;
+        img[padded] = mask[y * w + x] != 0;
+        if (img[padded]) active.push_back(padded);
+      }
+    const std::int64_t offsets[8] = {-row - 1, -row, -row + 1, 1, row + 1, row, row - 1, -1};
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (int pass = 1; pass <= 2; ++pass) {
+        // Every decision of a subiteration reads the image as it was before it (scikit-image
+        // writes removals to a copy and swaps after the subiteration).
+        removed.clear();
+        for (auto index : active) {
+          int code = 0;
+          for (int j = 0; j < 8; ++j) code |= img[index + offsets[j]] << j;
+          const int kind = zhang_lut[code];
+          if (kind == 3 || kind == pass) removed.push_back(index);
+        }
+        for (auto index : removed) img[index] = 0;
+        if (!removed.empty()) {
+          changed = true;
+          active.erase(std::remove_if(active.begin(), active.end(), [&](auto i) { return !img[i]; }),
+                       active.end());
+        }
+      }
+    }
+    for (std::int64_t y = 0; y < h; ++y)
+      for (std::int64_t x = 0; x < w; ++x) out[y * w + x] = img[(y + 1) * row + x + 1];
+    return EXACTA_OK;
+  } catch (const std::bad_alloc&) { return EXACTA_OUT_OF_MEMORY; }
+    catch (...) { return EXACTA_INTERNAL_ERROR; }
+}
 
 extern "C" int exacta_skeleton_u8(const std::uint8_t* mask, std::uint8_t* out,
                                    const std::int64_t* shape, int ndim) {

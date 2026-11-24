@@ -6,8 +6,11 @@ Definitions, empty-mask behavior and aggregation are explicit so results can be 
 
 These pages document **Exacta 0.0.1a5**, including partially annotated evaluation, physical
 area/volume measurements, independent probability channels and class-distance training losses.
-The source pages [Classification](Classification) and [Regression](Regression) describe
-unreleased `0.0.1a6.dev0` additions; they are not in the `0.0.1a5` package.
+The source pages [Classification](Classification), [Regression](Regression) and
+[Instance evaluation](Instance-evaluation) describe unreleased `0.0.1a6.dev0` additions, as do
+sections marked unreleased in other pages (dataset-pooled overlap, F-beta, soft-label Dice,
+Skeleton Recall, Zhang thinning for 2D clDice and Betti errors); they are not in the `0.0.1a5`
+package.
 
 Start with the pages that match your task:
 
@@ -21,6 +24,7 @@ Start with the pages that match your task:
 | Train/evaluate boundary, topology and probability objectives | [Advanced segmentation](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation) |
 | Match another tool's definition | [Conventions](https://github.com/rodolfo-viana/exacta/wiki/Conventions) |
 | Evaluate separate lesions | [Lesion evaluation](https://github.com/rodolfo-viana/exacta/wiki/Lesion-evaluation) |
+| Evaluate touching instances (unreleased) | [Instance evaluation](https://github.com/rodolfo-viana/exacta/wiki/Instance-evaluation) |
 | Choose and benchmark a backend | [Performance](https://github.com/rodolfo-viana/exacta/wiki/Performance) |
 | Work on the library | [Development](https://github.com/rodolfo-viana/exacta/wiki/Development) |
 

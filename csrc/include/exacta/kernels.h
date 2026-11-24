@@ -39,6 +39,12 @@ int exacta_regression_f64(const double *p, const double *t, const uint8_t *mask,
  */
 int exacta_skeleton_u8(const uint8_t *mask, uint8_t *out, const int64_t *shape, int ndim);
 
+/* Zhang-Suen thinning of a 2-D binary image (shape[0] rows, shape[1] columns), with zero exterior
+ * padding, reproducing scikit-image's skeletonize(method="zhang") (its lookup table and
+ * two-subiteration schedule). Writes a 0/1 skeleton into `out`. Input and output may alias.
+ */
+int exacta_skeleton_zhang_u8(const uint8_t *mask, uint8_t *out, const int64_t *shape);
+
 /* Soft morphology on (B,C,H,W) or (B,C,D,H,W): erosion=1 uses cross min,
  * erosion=0 uses full 3x3[x3] max. The image exterior is excluded. `indices`
  * may be null; otherwise write flattened source indices for backward. Ties

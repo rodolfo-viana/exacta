@@ -136,3 +136,32 @@ OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 TORCHINDUCTOR_COMPILE_THREADS=1 \
 Both scripts support `--device cpu/cuda`, `--dim 2/3` and configurable sizes. Output records
 raw samples, allocation measurements, configuration, environment and source hashes. Different
 mask density, class counts, hardware and compiler versions can change the best path.
+
+## Segmentation additions (unreleased, `0.0.1a6.dev0`)
+
+`benchmarks/bench_segmentation_coverage.py` times the unreleased segmentation additions on
+seeded synthetic data, and first checks that compared paths agree. Medians of 10 steps after 3
+warm-up steps, two CPU threads, Ryzen 9 5900XT and RTX 5070, PyTorch 2.14.1, float32 losses:
+
+| Operation | CPU | CUDA |
+|---|---:|---:|
+| `instances.evaluate`, 1024², 2000 touching nuclei | 16.9 ms | 9.7 ms |
+| `instances.dsb2018`, same input (10 thresholds) | 19.5 ms | 12.1 ms |
+| `skeletonize(method="zhang")`, 1024² vessels (scikit-image: 6.8 ms) | 3.4 ms | 2.7 ms, via the host |
+| `betti_numbers`, 128³, 2 classes | 25.4 ms | 3.9 ms |
+| `Dice.update`, case or pooled, `2×96×128²`, 4 classes | 1.8 / 1.8 ms | 0.28 / 0.30 ms |
+| `skeleton_recall_target`, `2×64³` (CPU thinning) | 29.9 ms | — |
+| `SkeletonRecallLoss` / `DiceCELoss` forward–backward, `2×3×64³` | 3.8 / 9.2 ms | 0.32 / 0.55 ms |
+| `DiceLoss` forward–backward, soft targets `2×4×96³`: semimetric / product (PyTorch) / product (fused) | 40.8 / 37.1 ms / — | 0.76 / 0.73 / 0.54 ms |
+
+Pooled aggregation reuses the per-case count pass and adds no measurable cost. Skeleton Recall
+is cheaper than the regional loss it is added to, once targets come from the data loader;
+thinning targets on every step would dominate. The soft-label Dice runs on PyTorch only and
+costs about 40% more than the fused product form on this GPU workload. A fused kernel needs a
+measured case before it is worth adding. Zhang thinning speed relative to scikit-image depends
+on how much foreground there is to thin.
+
+```bash
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 TORCHINDUCTOR_COMPILE_THREADS=1 \
+  python benchmarks/bench_segmentation_coverage.py --device cuda --output local/segmentation-cuda.json
+```

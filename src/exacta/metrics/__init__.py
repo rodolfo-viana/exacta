@@ -6,9 +6,11 @@ from exacta.metrics.calibration import BrierScore, NegativeLogLikelihood, Expect
 from exacta.metrics.ranking import AveragePrecision, AUROC, VoxelRanking
 from exacta.metrics.segmentation import (
     ASSD,
+    BettiError,
     HD95,
     NSD,
     Dice,
+    FBeta,
     ClDice,
     HausdorffDistance,
     IoU,
@@ -27,9 +29,11 @@ __all__ = [
     "PredictedVolume", "TargetVolume", "VolumeError",
     "ClDice", "BrierScore", "NegativeLogLikelihood", "ExpectedCalibrationError", "Calibration",
     "ASSD",
+    "BettiError",
     "HD95",
     "NSD",
     "Dice",
+    "FBeta",
     "HausdorffDistance",
     "IoU",
     "MetricResult",

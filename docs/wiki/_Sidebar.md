@@ -11,6 +11,7 @@
 - [Advanced segmentation](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation)
 - [Conventions](https://github.com/rodolfo-viana/exacta/wiki/Conventions)
 - [Lesion evaluation](https://github.com/rodolfo-viana/exacta/wiki/Lesion-evaluation)
+- [Instance evaluation (unreleased)](https://github.com/rodolfo-viana/exacta/wiki/Instance-evaluation)
 - [Performance](https://github.com/rodolfo-viana/exacta/wiki/Performance)
 - [Development](https://github.com/rodolfo-viana/exacta/wiki/Development)
 

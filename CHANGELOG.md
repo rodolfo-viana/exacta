@@ -19,6 +19,28 @@ Release notes for Exacta's alpha versions.
   classification/regression losses directly from PyTorch without extra wrappers.
 - Document numerical, tie-breaking, averaging and undefined-score conventions,
   with independent references, CPU/CUDA tests and a reproducible tabular benchmark.
+- Add `aggregate="pooled"` to count-based segmentation metrics and `MetricCollection`: O(C)
+  dataset totals of TP/FP/FN/TN, summed across ranks including empty ones, giving global Dice,
+  per-class IoU and mIoU with mmsegmentation's absent-class convention. Expose per-case
+  `functional.confusion_counts`, and add per-case and pooled F-beta (`fbeta`, `FBeta`).
+- Add `exacta.instances` for instance label maps (touching instances, arbitrary values): IoU
+  matching with unique strict matching above 0.5 and greedy or per-group Hungarian matching
+  below it, precision/recall/F1/accuracy/SQ/PQ, AJI and AJI+ following HoVer-Net's
+  procedures, the Cell Tracking Challenge SEG measure, the Data Science Bowl 2018 score, and
+  per-case or pooled `InstanceMetrics` with distributed accumulation.
+- Add Betti numbers and Betti errors (`betti_numbers`, `betti_error`, `BettiError`, collection
+  support) for 2D/3D with paired 4/8 and 6/26 connectivities; 3D tunnels follow from an Euler
+  characteristic counted on the matching closed or open cell complex.
+- Add C++ Zhang thinning that reproduces scikit-image's 2D `skeletonize` exactly, and a
+  `method` option for `skeletonize`, `cldice` and `ClDice`. **Behavior change:** 2D hard
+  clDice now defaults to Zhang thinning, as scikit-image and the clDice authors' metric do;
+  `method="lee"` reproduces 0.0.1a5 values. 3D is unchanged.
+- Add `SkeletonRecallLoss` and `skeleton_recall_target` (Kirchhoff et al., ECCV 2024), matching
+  the authors' tubed-skeleton transform and loss up to a constant, with masks, ignored labels,
+  batch and distributed reductions.
+- Add `soft_label=True` to Dice, Tversky, focal Tversky, generalized Dice and their CE/focal
+  combinations: Dice semimetric statistics (Wang et al., MICCAI 2023), identical for hard
+  labels and minimal at the target for soft labels, matching MONAI's `soft_label`.
 
 ## 0.0.1a5 — 2026-10-26
 

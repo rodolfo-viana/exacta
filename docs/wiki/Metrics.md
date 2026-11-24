@@ -10,6 +10,7 @@ does not describe lesion detection or boundary errors.
 |---|---|---|
 | `dice` | `Dice` | $2\mathrm{TP}/(2\mathrm{TP}+\mathrm{FP}+\mathrm{FN})$ |
 | `iou` | `IoU` | $\mathrm{TP}/(\mathrm{TP}+\mathrm{FP}+\mathrm{FN})$ |
+| `fbeta` (unreleased) | `FBeta` | $(1+\beta^2)\mathrm{TP}/\big((1+\beta^2)\mathrm{TP}+\beta^2\mathrm{FN}+\mathrm{FP}\big)$; $\beta=1$ is Dice |
 | `sensitivity` | `Sensitivity` | $\mathrm{TP}/(\mathrm{TP}+\mathrm{FN})$ |
 | `precision` | `Precision` | $\mathrm{TP}/(\mathrm{TP}+\mathrm{FP})$ |
 | `specificity` | `Specificity` | $\mathrm{TN}/(\mathrm{TN}+\mathrm{FP})$ |
@@ -104,6 +105,42 @@ In distributed evaluation every rank must call `compute()`, including ranks with
 updates. With NCCL, set each rank's current CUDA device. Avoid samplers that pad by duplicating
 cases. If no rank has any cases, `compute()` raises `RuntimeError`.
 
+### Dataset-pooled counts (unreleased, `0.0.1a6.dev0`)
+
+`Dice`, `IoU`, `FBeta`, `Sensitivity`, `Precision`, `Specificity`, `VolumeSimilarity`,
+`RelativeVolumeDifference` and `MetricCollection` accept `aggregate="pooled"`. They then keep
+only the totals $\mathrm{TP}_c=\sum_n \mathrm{TP}_{n,c}$ (and FP, FN, TN) over every case $n$
+and process, an $O(C)$ state, and score those totals once per class $c$. With
+$\mathcal{C}$ the selected classes whose pooled score is defined, the mean is
+
+$$
+\mathrm{mIoU}=\frac{1}{\lvert\mathcal{C}\rvert}\sum_{c\in\mathcal{C}}
+\frac{\mathrm{TP}_c}{\mathrm{TP}_c+\mathrm{FP}_c+\mathrm{FN}_c},
+$$
+
+mmsegmentation's `IoUMetric` convention: a class absent from every prediction and target is
+NaN and left out, while a class that is only ever predicted scores 0 and counts. Pooled Dice
+is the "global Dice" some challenges report; the class mean of pooled sensitivity is
+mmsegmentation's mean accuracy. `per_case` is `None` in this mode.
+
+```python
+from exacta.metrics import IoU
+
+miou = IoU(num_classes=19, ignore_index=255, aggregate="pooled")
+for prediction, target in loader:
+    miou.update(prediction, target)
+result = miou.compute()  # result.per_class: IoU of each class; result.mean: mIoU
+```
+
+Pooling weights every voxel equally, so large structures and large images dominate; a case
+mean weights every case equally. They are different estimands, and neither is a patient-level
+3D score for 2D slices. Pooled collections accept only ratios of counts, not distances, clDice
+or physical sizes. `functional.confusion_counts` returns the `(B, K)` TP, FP, FN and TN arrays
+behind every overlap metric, for definitions Exacta does not name or custom pooling such as one
+patient's slices. Voxel accuracy and MCC depend on TN, and so on the field of view; dataset
+pixel accuracy is `ClassificationMetrics(task="multiclass", metrics=("accuracy",))` applied to
+flattened labels.
+
 See [Conventions](https://github.com/rodolfo-viana/exacta/wiki/Conventions) for empty masks,
 surface representations and reference-library differences. Excluding a region from a surface
 metric needs its own definition; overlap masking does not define partial surface evaluation.
@@ -149,7 +186,8 @@ defines their empty-input behavior, probability conventions and matching protoco
 
 | Functional API | Stateful API | Quantity |
 |---|---|---|
-| `cldice` | `ClDice` | Harmonic mean of hard-skeleton precision and sensitivity; CPU Lee thinning |
+| `cldice` | `ClDice` | Harmonic mean of hard-skeleton precision and sensitivity; CPU Lee thinning (unreleased: Zhang in 2D, see the advanced guide) |
+| `betti_error` (unreleased) | `BettiError` | $\lvert\beta_k(P)-\beta_k(T)\rvert$: components, holes/tunnels or cavities |
 | `brier_score` | `BrierScore` | Mean squared probability error; binary and multiclass scales differ |
 | `negative_log_likelihood` | `NegativeLogLikelihood` | Mean true-class negative log probability, in nats |
 | `expected_calibration_error` | `ExpectedCalibrationError` | Top-label or classwise, equal-width reliability bins |

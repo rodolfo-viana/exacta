@@ -5,15 +5,22 @@ from __future__ import annotations
 import math
 from typing import Any, Literal
 
+import torch
 from torch import Tensor
 
 from exacta import functional
 from exacta._inputs import InputFormat, to_torch
+from exacta._tabular import gathered
+from exacta.functional import overlap
 from exacta.functional.surface import Backend, Combine, Surface
-from exacta.functional.overlap import _check_ignore_index
+from exacta.functional.overlap import _check_beta, _check_ignore_index
 from exacta.functional.area import AreaUnit
+from exacta.functional.topology import SkeletonMethod
 from exacta.functional.volume import VolumeUnit
-from exacta.metrics.base import PerCaseMetric
+from exacta.metrics.base import MetricResult, PerCaseMetric
+
+
+Aggregate = Literal["cases", "pooled"]
 
 
 class _OverlapMetric(PerCaseMetric):
@@ -39,35 +46,130 @@ class _OverlapMetric(PerCaseMetric):
         return self._fn(pred, target, **self._kwargs)
 
 
-class _MaskedOverlapMetric(_OverlapMetric):
-    def __init__(self, *, input_format: InputFormat = "index", num_classes: int | None = None,
-                 include_background: bool = True, both_empty: float = math.nan,
-                 ignore_index: int | None = None) -> None:
-        super().__init__(input_format=input_format, num_classes=num_classes,
-                         include_background=include_background, both_empty=both_empty)
-        self._kwargs["ignore_index"] = _check_ignore_index(ignore_index, input_format)
+class _CountMetric(PerCaseMetric):
+    """A ratio of confusion counts, averaged over cases or computed from counts pooled over cases.
+
+    ``aggregate="cases"`` (default) records the (B, C) score of every case; ``compute`` averages
+    each class over its cases, skipping NaN, then averages the classes. ``aggregate="pooled"``
+    keeps only TP, FP, FN and TN summed over every case (and process), (C, 4) values, and
+    ``compute`` scores those totals: one value per class for the whole dataset, as
+    mmsegmentation's ``IoUMetric`` (mIoU) or a "global Dice". Pooled scores weight cases by
+    their voxels, so large structures dominate; they are a different estimand from case means.
+    A class undefined over the whole dataset (e.g. absent from every prediction and target for
+    Dice) is NaN and left out of ``mean``; a class only ever predicted scores 0 and counts.
+    """
+
+    _name: str
+
+    def __init__(self, *, input_format: InputFormat, num_classes: int | None, include_background: bool,
+                 ignore_index: int | None, aggregate: Aggregate, **options: Any) -> None:
+        super().__init__()
+        if aggregate not in ("cases", "pooled"):
+            raise ValueError(f"aggregate must be 'cases' or 'pooled', got {aggregate!r}")
+        self.aggregate = aggregate
+        self._layout: dict[str, Any] = dict(
+            input_format=input_format, num_classes=num_classes, include_background=include_background,
+            ignore_index=_check_ignore_index(ignore_index, input_format),
+        )
+        self._options = options
+        self._counts: Tensor | None = None
 
     def update(self, pred: Any, target: Any, *, mask: Any = None) -> Tensor:
-        """Record scores on included voxels; the mask is not retained."""
-        return self._record(self._fn(to_torch(pred), to_torch(target), mask=mask, **self._kwargs))
+        """Add a batch and return its (B, C) per-case scores; the mask is not retained."""
+        lay = self._layout
+        counts = overlap._confusion_counts(
+            to_torch(pred), to_torch(target), lay["input_format"], lay["num_classes"],
+            lay["include_background"], ignore_index=lay["ignore_index"], mask=mask,
+        )
+        values = overlap._score_counts(self._name, counts, **self._options)
+        if self.aggregate == "cases":
+            return self._record(values)
+        self._counts = _add_counts(self._counts, counts)
+        return values
+
+    def compute(self) -> MetricResult:
+        if self.aggregate == "cases":
+            return super().compute()
+        totals = _pooled_counts(self._counts, (type(self).__name__, self._layout, self._options))
+        per_class = overlap._score_counts(self._name, totals, **self._options)[0]
+        return MetricResult(None, per_class, per_class.nanmean())
+
+    def reset(self) -> None:
+        super().reset()
+        self._counts = None
+
+
+def _add_counts(state: Tensor | None, counts: tuple[Tensor, Tensor, Tensor, Tensor]) -> Tensor:
+    """Running (C, 4) TP, FP, FN, TN totals."""
+    batch = torch.stack(counts, -1).sum(0)
+    if state is None:
+        return batch
+    if state.shape != batch.shape or state.device != batch.device:
+        raise ValueError("class count and device must remain constant across updates")
+    return state + batch
+
+
+def _pooled_counts(state: Tensor | None, config: Any) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Sum (C, 4) totals over distributed ranks, including ranks without updates; (1, C) each."""
+    # str() makes NaN options compare equal across processes.
+    rows = gathered(state, ("pooled_counts", str(config)))
+    # Ranks exchange float64, which holds every count exactly up to 2**53 voxels.
+    total = torch.stack([row.double() for row in rows]).sum(0).round().long().reshape(-1, 4)
+    return tuple(total[None, :, i] for i in range(4))  # type: ignore[return-value]
+
+
+class _MaskedOverlapMetric(_CountMetric):
+    def __init__(self, *, input_format: InputFormat = "index", num_classes: int | None = None,
+                 include_background: bool = True, both_empty: float = math.nan,
+                 ignore_index: int | None = None, aggregate: Aggregate = "cases") -> None:
+        super().__init__(input_format=input_format, num_classes=num_classes,
+                         include_background=include_background, ignore_index=ignore_index,
+                         aggregate=aggregate, both_empty=both_empty)
 
 
 class Dice(_MaskedOverlapMetric):
-    """Dice coefficient per case and class; see :func:`exacta.functional.dice`."""
+    """Dice coefficient per case and class (see :func:`exacta.functional.dice`), averaged over
+    cases or, with ``aggregate="pooled"``, computed from dataset-pooled counts."""
 
-    _fn = staticmethod(functional.dice)
+    _name = "dice"
 
 
 class IoU(_MaskedOverlapMetric):
-    """Intersection over union per case and class; see :func:`exacta.functional.iou`."""
+    """Intersection over union per case and class (see :func:`exacta.functional.iou`); with
+    ``aggregate="pooled"``, the dataset IoU of each class and their mean (mIoU)."""
 
-    _fn = staticmethod(functional.iou)
+    _name = "iou"
+
+
+class FBeta(_MaskedOverlapMetric):
+    """F-beta score per case and class; see :func:`exacta.functional.fbeta`."""
+
+    _name = "fbeta"
+
+    def __init__(self, *, beta: float = 1.0, input_format: InputFormat = "index",
+                 num_classes: int | None = None, include_background: bool = True,
+                 both_empty: float = math.nan, ignore_index: int | None = None,
+                 aggregate: Aggregate = "cases") -> None:
+        _check_beta(beta)
+        super().__init__(input_format=input_format, num_classes=num_classes,
+                         include_background=include_background, both_empty=both_empty,
+                         ignore_index=ignore_index, aggregate=aggregate)
+        self._options["beta"] = beta
 
 
 class ClDice(_OverlapMetric):
-    """Hard centreline Dice per case/class, using C++ Lee skeletonization."""
+    """Hard centreline Dice per case/class; see :func:`exacta.functional.cldice`."""
 
     _fn = staticmethod(functional.cldice)
+
+    def __init__(self, *, input_format: InputFormat = "index", num_classes: int | None = None,
+                 include_background: bool = True, both_empty: float = math.nan,
+                 method: SkeletonMethod | None = None) -> None:
+        super().__init__(input_format=input_format, num_classes=num_classes,
+                         include_background=include_background, both_empty=both_empty)
+        if method not in (None, "zhang", "lee"):
+            raise ValueError(f"method must be 'zhang', 'lee' or None, got {method!r}")
+        self._kwargs["method"] = method
 
     def update(self, pred: Any, target: Any, *, pred_skeleton: Any = None,
                target_skeleton: Any = None) -> Tensor:
@@ -75,9 +177,20 @@ class ClDice(_OverlapMetric):
                                      target_skeleton=target_skeleton, **self._kwargs))
 
 
-class _RatioMetric(PerCaseMetric):
-    _fn: Any
+class BettiError(PerCaseMetric):
+    """Absolute Betti-number error per case and class; see :func:`exacta.functional.betti_error`."""
 
+    def __init__(self, *, connectivity: int, dimension: int = 0, input_format: InputFormat = "index",
+                 num_classes: int | None = None, include_background: bool = True) -> None:
+        super().__init__()
+        self._kwargs: dict[str, Any] = dict(connectivity=connectivity, dimension=dimension, input_format=input_format,
+                                            num_classes=num_classes, include_background=include_background)
+
+    def _batch(self, pred: Tensor, target: Tensor) -> Tensor:
+        return functional.betti_error(pred, target, **self._kwargs)
+
+
+class _RatioMetric(_CountMetric):
     def __init__(
         self,
         *,
@@ -86,48 +199,37 @@ class _RatioMetric(PerCaseMetric):
         include_background: bool = True,
         zero_division: float = math.nan,
         ignore_index: int | None = None,
+        aggregate: Aggregate = "cases",
         **definition: Any,
     ) -> None:
-        super().__init__()
-        self._kwargs = dict(
-            input_format=input_format,
-            num_classes=num_classes,
-            include_background=include_background,
-            zero_division=zero_division,
-            ignore_index=_check_ignore_index(ignore_index, input_format),
-            **definition,
-        )
-
-    def update(self, pred: Any, target: Any, *, mask: Any = None) -> Tensor:
-        """Record scores on included voxels; the mask is not retained."""
-        return self._record(self._fn(to_torch(pred), to_torch(target), mask=mask, **self._kwargs))
-
-    def _batch(self, pred: Tensor, target: Tensor) -> Tensor:
-        return self._fn(pred, target, **self._kwargs)
+        super().__init__(input_format=input_format, num_classes=num_classes,
+                         include_background=include_background, ignore_index=ignore_index,
+                         aggregate=aggregate, zero_division=zero_division, **definition)
 
 
 class Sensitivity(_RatioMetric):
-    """Sensitivity (recall) per case and class; see :func:`exacta.functional.sensitivity`."""
+    """Sensitivity (recall) per case and class; see :func:`exacta.functional.sensitivity`.
+    The class mean of pooled sensitivity is mmsegmentation's mean accuracy (mAcc)."""
 
-    _fn = staticmethod(functional.sensitivity)
+    _name = "sensitivity"
 
 
 class Precision(_RatioMetric):
     """Precision per case and class; see :func:`exacta.functional.precision`."""
 
-    _fn = staticmethod(functional.precision)
+    _name = "precision"
 
 
 class Specificity(_RatioMetric):
     """Specificity per case and class; see :func:`exacta.functional.specificity`."""
 
-    _fn = staticmethod(functional.specificity)
+    _name = "specificity"
 
 
 class VolumeSimilarity(_RatioMetric):
     """Volume similarity per case and class; see :func:`exacta.functional.volume_similarity`."""
 
-    _fn = staticmethod(functional.volume_similarity)
+    _name = "volume_similarity"
 
     def __init__(
         self,
@@ -138,13 +240,17 @@ class VolumeSimilarity(_RatioMetric):
         include_background: bool = True,
         zero_division: float = math.nan,
         ignore_index: int | None = None,
+        aggregate: Aggregate = "cases",
     ) -> None:
+        if convention not in ("taha", "itk"):
+            raise ValueError(f"convention must be 'taha' or 'itk', got {convention!r}")
         super().__init__(
             input_format=input_format,
             num_classes=num_classes,
             include_background=include_background,
             zero_division=zero_division,
-            ignore_index=_check_ignore_index(ignore_index, input_format),
+            ignore_index=ignore_index,
+            aggregate=aggregate,
             convention=convention,
         )
 
@@ -153,7 +259,7 @@ class RelativeVolumeDifference(_RatioMetric):
     """Relative volume difference per case and class; see
     :func:`exacta.functional.relative_volume_difference`."""
 
-    _fn = staticmethod(functional.relative_volume_difference)
+    _name = "relative_volume_difference"
 
     def __init__(
         self,
@@ -164,13 +270,15 @@ class RelativeVolumeDifference(_RatioMetric):
         include_background: bool = True,
         zero_division: float = math.nan,
         ignore_index: int | None = None,
+        aggregate: Aggregate = "cases",
     ) -> None:
         super().__init__(
             input_format=input_format,
             num_classes=num_classes,
             include_background=include_background,
             zero_division=zero_division,
-            ignore_index=_check_ignore_index(ignore_index, input_format),
+            ignore_index=ignore_index,
+            aggregate=aggregate,
             absolute=absolute,
         )
 

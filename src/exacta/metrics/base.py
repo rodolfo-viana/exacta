@@ -17,12 +17,14 @@ class MetricResult:
     """Accumulated metric values.
 
     Attributes:
-        per_case: (N, C) values for every case and class, gathered from all processes.
-        per_class: (C,) mean over cases, ignoring NaN (cases where ``both_empty`` was NaN).
+        per_case: (N, C) values for every case and class, gathered from all processes; None
+            for ``aggregate="pooled"``, which keeps only pooled counts.
+        per_class: (C,) mean over cases, ignoring NaN (cases where ``both_empty`` was NaN); with
+            ``aggregate="pooled"``, the score of the counts pooled over every case.
         mean: Mean of ``per_class``, ignoring NaN.
     """
 
-    per_case: Tensor
+    per_case: Tensor | None
     per_class: Tensor
     mean: Tensor
 
