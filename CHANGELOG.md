@@ -2,7 +2,12 @@
 
 Release notes for Exacta's alpha versions.
 
-## Unreleased
+## 0.0.1a6 — 2026-11-24
+
+This release broadens Exacta beyond per-image segmentation scores: dataset-level classification
+and regression, instance label maps, Betti errors and dataset-pooled overlap. Training gains
+Skeleton Recall and soft-label-compatible overlap losses. 2D hard clDice changes its default
+thinning to match the clDice authors' metric.
 
 - Add general classification and regression namespaces, separate from per-image
   segmentation semantics. Classification includes hard-decision rates, confusion

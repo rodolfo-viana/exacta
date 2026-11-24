@@ -137,9 +137,9 @@ Both scripts support `--device cpu/cuda`, `--dim 2/3` and configurable sizes. Ou
 raw samples, allocation measurements, configuration, environment and source hashes. Different
 mask density, class counts, hardware and compiler versions can change the best path.
 
-## Segmentation additions (unreleased, `0.0.1a6.dev0`)
+## Instances, thinning, topology and soft-label losses
 
-`benchmarks/bench_segmentation_coverage.py` times the unreleased segmentation additions on
+`benchmarks/bench_segmentation_coverage.py`, in the `v0.0.1a6` source, times the segmentation additions of 0.0.1a6 on
 seeded synthetic data, and first checks that compared paths agree. Medians of 10 steps after 3
 warm-up steps, two CPU threads, Ryzen 9 5900XT and RTX 5070, PyTorch 2.14.1, float32 losses:
 

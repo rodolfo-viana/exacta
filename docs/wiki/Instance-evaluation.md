@@ -1,6 +1,6 @@
 # Instance evaluation
 
-These APIs are **unreleased**, introduced in `0.0.1a6.dev0`. `exacta.instances` evaluates
+These APIs were introduced in `0.0.1a6`. `exacta.instances` evaluates
 **instance label maps**: each case is a `(B, H, W)` or `(B, D, H, W)` array of nonnegative
 integers in which 0 is background and every other value is one instance. Touching instances
 such as nuclei, cells or glands stay apart, unlike the connected components of

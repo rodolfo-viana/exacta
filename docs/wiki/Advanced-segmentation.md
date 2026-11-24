@@ -80,10 +80,12 @@ Focal Tversky path has the same double-backward restriction as existing overlap 
 
 ## Hard centreline Dice
 
-`functional.cldice` and `metrics.ClDice` measure hard skeleton overlap using **Lee thinning**.
+`functional.cldice` and `metrics.ClDice` measure hard skeleton overlap using **Zhang thinning in
+2D and Lee thinning in 3D**, scikit-image's defaults (see the thinning method below).
 `functional.evaluate(..., metrics=["dice", "cldice"])` and `MetricCollection` also accept it.
-The C++ implementation matches scikit-image's `skeletonize(method="lee")`; its tables and
-attribution are included in `THIRD_PARTY_LICENSES`. This is separate from soft-clDice.
+The C++ implementations match scikit-image's `skeletonize(method="zhang")` and
+`skeletonize(method="lee")`; their tables and attribution are included in
+`THIRD_PARTY_LICENSES`. This is separate from soft-clDice.
 
 Skeleton precision is `|S_pred ∩ target|/|S_pred|`, sensitivity exchanges prediction/target,
 and clDice is their harmonic mean. One empty mask gives 0; both empty default to NaN (configurable).
@@ -92,8 +94,8 @@ assigned 0, including an identical-mask comparison in that case. This choice avo
 perfect topology when no centreline survives. Counts are in voxel space; anisotropy is not
 silently corrected by resampling.
 
-`functional.skeletonize(mask)` accepts one binary 2D/3D mask. Lee's sequential deletion
-recheck runs in C++ on CPU. CUDA inputs transfer to CPU and back; it is not GPU-native hard
+`functional.skeletonize(mask)` accepts one binary 2D/3D mask. Both thinning algorithms run
+in C++ on CPU, subiteration by subiteration. CUDA inputs transfer to CPU and back; it is not GPU-native hard
 thinning. Precomputed `pred_skeleton`/`target_skeleton` for clDice have shape
 `(B,selected_C,*spatial)` and must be binary subsets of the masks. Soft training skeletons
 stay on the input device. Eager CPU soft skeletons use fused C++ morphology plus native
@@ -102,7 +104,7 @@ the C++ path selects the first raster neighbour, while PyTorch can split erosion
 between equal minima. These are valid, potentially different subgradients. `torch.compile`
 with the default backend uses the PyTorch path so its tensor kernels can be compiled.
 
-**Unreleased (`0.0.1a6.dev0`): thinning method.** The clDice authors compute their metric with
+**Thinning method (since 0.0.1a6).** The clDice authors compute their metric with
 scikit-image's `skeletonize`, which uses Zhang-Suen thinning in 2D and Lee thinning in 3D.
 `skeletonize(mask, method=None)` now follows that default, and `cldice`, `ClDice` and the
 collection option accept `method="zhang"` (2D only) or `"lee"`. The new C++ Zhang kernel
@@ -111,7 +113,7 @@ differs from the textbook Zhang-Suen conditions in 25 of its 256 entries, so it 
 attribution, rather than derived. In 2D the two methods give different skeletons, and therefore
 different clDice: pass `method="lee"` to reproduce `0.0.1a5` values.
 
-## Skeleton Recall (unreleased, `0.0.1a6.dev0`)
+## Skeleton Recall
 
 `SkeletonRecallLoss` implements the loss of
 [Kirchhoff et al. (ECCV 2024)](https://doi.org/10.1007/978-3-031-72980-5_13). With $s_c$ the
@@ -149,7 +151,7 @@ recall = SkeletonRecallLoss()
 loss = regional(logits, target) + recall(logits, target, target_skeleton=skeleton.to(target.device))
 ```
 
-## Betti numbers and Betti error (unreleased, `0.0.1a6.dev0`)
+## Betti numbers and Betti error
 
 `functional.betti_numbers(seg, connectivity=...)` returns $(\beta_0,\beta_1)$ in 2D (components,
 holes) and $(\beta_0,\beta_1,\beta_2)$ in 3D (components, tunnels, cavities) for every case and

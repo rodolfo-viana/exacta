@@ -3,15 +3,15 @@
 Metrics and differentiable losses for **2D and 3D medical-image segmentation**, on CPU and GPU.
 Exacta provides reusable implementations of Dice, HD95, surface distances, lesion scores,
 probability metrics and training objectives, with explicit mathematical conventions.
-The development version adds general **classification and regression** APIs, instance-map
-evaluation and further segmentation metrics and losses.
+Version 0.0.1a6 adds general **classification and regression** APIs, instance-map evaluation,
+Betti errors, dataset-pooled overlap and further segmentation losses.
 
 CPU operations use C++ kernels where implemented; CUDA paths use Triton or native PyTorch.
 Definitions are checked against independent references such as SciPy, MONAI, MedPy,
 DeepMind's surface-distance, MeshMetrics, SimpleITK, Panoptica and the BraTS 2023 evaluation
 code. Where conventions differ, parameters select the intended definition.
 
-**Published version: 0.0.1a5 (alpha). Development: 0.0.1a6.dev0.**
+**Published version: 0.0.1a6 (alpha).**
 [Documentation](https://github.com/rodolfo-viana/exacta/wiki) ·
 [Source](https://github.com/rodolfo-viana/exacta) ·
 [Issues](https://github.com/rodolfo-viana/exacta/issues)
@@ -22,7 +22,7 @@ Exacta requires **Python 3.10+**, **PyTorch 2.4+** and **NumPy 1.22+**. Install 
 your CPU or CUDA environment, then install Exacta:
 
 ```bash
-python -m pip install exacta==0.0.1a5
+python -m pip install exacta==0.0.1a6
 ```
 
 Binary wheels target Linux x86-64 with glibc 2.28 or newer: Python 3.10 and 3.11 wheels,
@@ -145,10 +145,9 @@ and topology objectives require complete target geometry; combine them with regi
 supervision where appropriate. See [Losses](https://github.com/rodolfo-viana/exacta/wiki/Losses)
 for equations, smoothing, reductions, target formats and derivative support.
 
-## Segmentation additions (unreleased)
+## Instances, topology and pooled overlap
 
-The following APIs require **0.0.1a6.dev0** and are not included in the published `0.0.1a5`
-package.
+Version 0.0.1a6 adds the following segmentation APIs.
 
 | API | Purpose |
 |---|---|
@@ -177,18 +176,17 @@ print(miou.compute().per_class, miou.compute().mean)
 ```
 
 Pooled scores weight every voxel equally and differ from case means. Instance matching above
-0.5 IoU is unique; lower thresholds and AJI follow documented reference procedures. See the
-[Metrics](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Metrics.md),
-[Instance evaluation](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Instance-evaluation.md),
-[Losses](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Losses.md) and
-[Advanced segmentation](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Advanced-segmentation.md)
-source pages for definitions, empty-input behavior and references.
+0.5 IoU is unique; lower thresholds and AJI follow documented reference procedures. See
+[Metrics](https://github.com/rodolfo-viana/exacta/wiki/Metrics),
+[Instance evaluation](https://github.com/rodolfo-viana/exacta/wiki/Instance-evaluation),
+[Losses](https://github.com/rodolfo-viana/exacta/wiki/Losses) and
+[Advanced segmentation](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation)
+for definitions, empty-input behavior and references.
 
-## Classification and regression (unreleased)
+## Classification and regression
 
-The following APIs require **0.0.1a6.dev0** and are not included in the published
-`0.0.1a5` package. They evaluate samples across a dataset, with separate namespaces
-from the per-image segmentation metrics.
+These APIs evaluate samples across a dataset, with separate namespaces from the per-image
+segmentation metrics.
 
 | Namespace | Metrics or losses |
 |---|---|
@@ -226,8 +224,8 @@ print(regression_metrics.compute())
 
 Undefined classification rates default to NaN; `zero_division=0` or `1` is explicit.
 Regression R² preserves undefined constant-target cases unless `force_finite=True`.
-See [classification](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Classification.md)
-and [regression](https://github.com/rodolfo-viana/exacta/blob/main/docs/wiki/Regression.md)
+See [classification](https://github.com/rodolfo-viana/exacta/wiki/Classification)
+and [regression](https://github.com/rodolfo-viana/exacta/wiki/Regression)
 for formulas, averaging, empty-input behavior and examples.
 
 ## Partial annotations and probability channels
@@ -266,7 +264,7 @@ surface representations can change reported values even for identical segmentati
 | ASSD | Pooled surface-element mean; `combine="mean"` averages the two directed means. |
 | Empty masks | Dice/IoU return NaN when both are empty; distance metrics default to infinity when exactly one is empty, except NSD, which returns zero. Parameters make these policies explicit. |
 | Case aggregation | Stateful per-case metrics skip NaNs, average cases per class, then average class means. |
-| Pooled evaluation | `Calibration` pools voxel bins; `VoxelRanking` pools voxel rankings; in 0.0.1a6.dev0, overlap metrics with `aggregate="pooled"` pool confusion counts. Case averages and pooled scores are different quantities. |
+| Pooled evaluation | `Calibration` pools voxel bins; `VoxelRanking` pools voxel rankings; overlap metrics with `aggregate="pooled"` pool confusion counts. Case averages and pooled scores are different quantities. |
 | AP | Non-interpolated sum of recall increments times precision, not trapezoidal PR area. No-positive AP and single-outcome AUROC are NaN. |
 
 For distributed evaluation, every rank must participate in `compute()`, including ranks with

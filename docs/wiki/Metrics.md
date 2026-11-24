@@ -10,7 +10,7 @@ does not describe lesion detection or boundary errors.
 |---|---|---|
 | `dice` | `Dice` | $2\mathrm{TP}/(2\mathrm{TP}+\mathrm{FP}+\mathrm{FN})$ |
 | `iou` | `IoU` | $\mathrm{TP}/(\mathrm{TP}+\mathrm{FP}+\mathrm{FN})$ |
-| `fbeta` (unreleased) | `FBeta` | $(1+\beta^2)\mathrm{TP}/\big((1+\beta^2)\mathrm{TP}+\beta^2\mathrm{FN}+\mathrm{FP}\big)$; $\beta=1$ is Dice |
+| `fbeta` | `FBeta` | $(1+\beta^2)\mathrm{TP}/\big((1+\beta^2)\mathrm{TP}+\beta^2\mathrm{FN}+\mathrm{FP}\big)$; $\beta=1$ is Dice |
 | `sensitivity` | `Sensitivity` | $\mathrm{TP}/(\mathrm{TP}+\mathrm{FN})$ |
 | `precision` | `Precision` | $\mathrm{TP}/(\mathrm{TP}+\mathrm{FP})$ |
 | `specificity` | `Specificity` | $\mathrm{TN}/(\mathrm{TN}+\mathrm{FP})$ |
@@ -105,7 +105,7 @@ In distributed evaluation every rank must call `compute()`, including ranks with
 updates. With NCCL, set each rank's current CUDA device. Avoid samplers that pad by duplicating
 cases. If no rank has any cases, `compute()` raises `RuntimeError`.
 
-### Dataset-pooled counts (unreleased, `0.0.1a6.dev0`)
+### Dataset-pooled counts
 
 `Dice`, `IoU`, `FBeta`, `Sensitivity`, `Precision`, `Specificity`, `VolumeSimilarity`,
 `RelativeVolumeDifference` and `MetricCollection` accept `aggregate="pooled"`. They then keep
@@ -186,8 +186,8 @@ defines their empty-input behavior, probability conventions and matching protoco
 
 | Functional API | Stateful API | Quantity |
 |---|---|---|
-| `cldice` | `ClDice` | Harmonic mean of hard-skeleton precision and sensitivity; CPU Lee thinning (unreleased: Zhang in 2D, see the advanced guide) |
-| `betti_error` (unreleased) | `BettiError` | $\lvert\beta_k(P)-\beta_k(T)\rvert$: components, holes/tunnels or cavities |
+| `cldice` | `ClDice` | Harmonic mean of hard-skeleton precision and sensitivity; CPU Zhang (2D) or Lee (3D) thinning |
+| `betti_error` | `BettiError` | $\lvert\beta_k(P)-\beta_k(T)\rvert$: components, holes/tunnels or cavities |
 | `brier_score` | `BrierScore` | Mean squared probability error; binary and multiclass scales differ |
 | `negative_log_likelihood` | `NegativeLogLikelihood` | Mean true-class negative log probability, in nats |
 | `expected_calibration_error` | `ExpectedCalibrationError` | Top-label or classwise, equal-width reliability bins |

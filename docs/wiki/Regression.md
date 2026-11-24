@@ -1,6 +1,6 @@
 # Regression
 
-These APIs are **unreleased**, introduced in `0.0.1a6.dev0`. Functions in
+These APIs were introduced in `0.0.1a6`. Functions in
 `exacta.functional.regression` evaluate continuous predictions shaped `(N,)` or `(N,D)`.
 Predictions come first; targets must have the identical shape. Functional outputs retain
 the prediction's PyTorch, NumPy, CuPy or JAX array library. All metric statistics use

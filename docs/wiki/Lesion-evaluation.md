@@ -4,7 +4,7 @@
 lesions. Matching conventions affect detection counts and segmentation quality, so connectivity
 and matching are explicit required arguments. Components merge instances that touch; for
 instance label maps (nuclei, cells), see
-[Instance evaluation](https://github.com/rodolfo-viana/exacta/wiki/Instance-evaluation) (unreleased).
+[Instance evaluation](https://github.com/rodolfo-viana/exacta/wiki/Instance-evaluation).
 
 | Matching | Behavior |
 |---|---|
