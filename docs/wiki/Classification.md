@@ -1,6 +1,6 @@
 # Classification
 
-These APIs are **unreleased**, introduced in `0.0.1a6.dev0`. They evaluate independent
+These APIs were introduced in `0.0.1a6`. They evaluate independent
 samples across a dataset, separate from segmentation's per-image scores. Functional
 metrics live in `exacta.functional.classification`; predictions always come first.
 PyTorch, NumPy, CuPy and JAX inputs retain their array library in functional outputs.

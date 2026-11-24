@@ -196,7 +196,7 @@ their nonlinear Dice ratios into one larger-batch ratio.
 Only small statistics communicate. NCCL keeps these on the rank's CUDA device. Gloo uses CPU
 buffers, also allowing two CUDA workers on a single GPU for correctness tests. Local tests
 cover CPU and fused CUDA with two Gloo ranks, uneven batches, empty ranks, ignored ranks and
-all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in 0.0.1a5:**
+all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in 0.0.1a6:**
 the two-GPU tests have not been run on suitable hardware. Gloo checks do not establish NCCL
 correctness or multi-GPU training throughput. Loss configuration and valid input shapes
 must agree across ranks; as with ordinary distributed training, a rank-local error can interrupt its peers.
@@ -204,7 +204,7 @@ must agree across ranks; as with ordinary distributed training, a rank-local err
 ## Boundary, topology and hard-example objectives
 
 Additional objectives include `FocalTverskyLoss`, `TopKCELoss`, `DiceTopKCELoss`, `LovaszSoftmaxLoss`,
-`BoundaryLoss`, `HausdorffDTLoss`, `SoftClDiceLoss` and (unreleased) `SkeletonRecallLoss`. Their formulas, reductions, defaults,
+`BoundaryLoss`, `HausdorffDTLoss`, `SoftClDiceLoss` and `SkeletonRecallLoss`. Their formulas, reductions, defaults,
 reference conventions and CPU/GPU paths are documented in the
 [advanced segmentation guide](https://github.com/rodolfo-viana/exacta/wiki/Advanced-segmentation).
 
@@ -214,7 +214,7 @@ only; complete target geometry is required. Geometry/topology losses have no `ig
 and soft-clDice has no mask argument. Distance-transform and skeleton objectives should be
 combined with regional supervision according to the task.
 
-## Soft labels (unreleased, `0.0.1a6.dev0`)
+## Soft labels
 
 With soft targets $g_i\in(0,1)$, the product overlap $\sum_i p_i g_i$ makes Dice and Tversky
 losses minimal away from $p=g$: they push predictions towards 0 and 1. Label smoothing,

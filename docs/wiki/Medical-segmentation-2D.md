@@ -3,7 +3,7 @@
 Exacta's segmentation losses and overlap, boundary, topology and probability metrics accept
 2D images as well as 3D volumes. This guide uses synthetic images to demonstrate the input
 contracts; it does not measure model quality. Physical area and independent-label probability
-APIs are included in Exacta 0.0.1a5.
+APIs are included since Exacta 0.0.1a5.
 
 ## Choose the target representation
 
