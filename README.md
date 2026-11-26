@@ -3,15 +3,17 @@
 Metrics and differentiable losses for **2D and 3D medical-image segmentation**, on CPU and GPU.
 Exacta provides reusable implementations of Dice, HD95, surface distances, lesion scores,
 probability metrics and training objectives, with explicit mathematical conventions.
-Version 0.0.1a6 adds general **classification and regression** APIs, instance-map evaluation,
-Betti errors, dataset-pooled overlap and further segmentation losses.
+Version 0.1.0 makes NSD count distances equal to the tolerance as its definition intends, adds
+**reporting signatures** that encode a score's full definition, and lets Dice and Tversky losses
+reproduce segmentation_models_pytorch's treatment of absent classes. Version 0.0.1a6 added
+classification and regression APIs, instance-map evaluation, Betti errors and pooled overlap.
 
 CPU operations use C++ kernels where implemented; CUDA paths use Triton or native PyTorch.
 Definitions are checked against independent references such as SciPy, MONAI, MedPy,
 DeepMind's surface-distance, MeshMetrics, SimpleITK, Panoptica and the BraTS 2023 evaluation
 code. Where conventions differ, parameters select the intended definition.
 
-**Published version: 0.0.1a6 (alpha).**
+**Published version: 0.1.0.**
 [Documentation](https://github.com/rodolfo-viana/exacta/wiki) ·
 [Source](https://github.com/rodolfo-viana/exacta) ·
 [Issues](https://github.com/rodolfo-viana/exacta/issues)
@@ -22,7 +24,7 @@ Exacta requires **Python 3.10+**, **PyTorch 2.4+** and **NumPy 1.22+**. Install 
 your CPU or CUDA environment, then install Exacta:
 
 ```bash
-python -m pip install exacta==0.0.1a6
+python -m pip install exacta==0.1.0
 ```
 
 Binary wheels target Linux x86-64 with glibc 2.28 or newer: Python 3.10 and 3.11 wheels,
@@ -130,7 +132,9 @@ explicitly; different loss definitions produce different gradients.
 | Soft centreline objective | `SoftClDiceLoss` |
 
 `DeepSupervisionLoss` combines a loss across explicitly paired prediction/target resolutions.
-`DiceLoss(squared_pred=True)` uses a squared denominator; Dice–CE, Dice–focal and Dice–top-k CE
+`zero_absent=True` on Dice and Tversky losses gives zero loss to classes absent from the
+target, as segmentation_models_pytorch does; by default, as in MONAI, an empty target still
+penalizes predicted probability. `DiceLoss(squared_pred=True)` uses a squared denominator; Dice–CE, Dice–focal and Dice–top-k CE
 support the same option. Generalized Dice supports inverse-square, inverse-volume and uniform
 class weights. Standard cross-entropy and binary cross-entropy remain available in PyTorch.
 
@@ -147,7 +151,7 @@ for equations, smoothing, reductions, target formats and derivative support.
 
 ## Instances, topology and pooled overlap
 
-Version 0.0.1a6 adds the following segmentation APIs.
+Version 0.0.1a6 added the following segmentation APIs.
 
 | API | Purpose |
 |---|---|
@@ -249,6 +253,25 @@ independent probability channels with same-shaped binary targets. Logit inputs t
 independent sigmoids. Shared or per-label masks and explicit macro/micro reductions are
 available where documented.
 
+## Reporting signatures
+
+A metric's name does not fix its value. `exacta.conventions.signature` writes every convention
+behind a score, with defaults filled in, and the Exacta version, in one string to report next
+to the number; `parse_signature` reads it back into options that recompute the same score:
+
+```python
+from exacta.conventions import parse_signature, signature
+
+text = signature("hd95", combine="pooled")
+# 'hd95[both_empty=nan;combine=pooled;one_empty=inf;surface=voxels]@exacta-0.1.0'
+name, options, version = parse_signature(text)
+again = EF.evaluate(prediction, target, metrics={name: options}, num_classes=3,
+                    include_background=False, spacing=(1.5, 0.8, 0.8))
+```
+
+`MetricCollection.signatures()` returns the signatures of a collection, including whether
+scores are averaged over cases or pooled.
+
 ## Mathematical conventions
 
 Specify the definition as part of your evaluation protocol. Empty inputs, aggregation and
@@ -263,6 +286,7 @@ surface representations can change reported values even for identical segmentati
 | HD95 | Maximum of the two directed 95th percentiles; `combine="pooled"` instead pools distances before the percentile. |
 | ASSD | Pooled surface-element mean; `combine="mean"` averages the two directed means. |
 | Empty masks | Dice/IoU return NaN when both are empty; distance metrics default to infinity when exactly one is empty, except NSD, which returns zero. Parameters make these policies explicit. |
+| NSD ties | A distance counts as within the tolerance when `d <= tolerance * (1 + tie_rtol)`, default `tie_rtol=1e-6`, so distances equal to the tolerance in exact arithmetic count despite rounding; `tie_rtol=0` compares strictly in float64, as SciPy-based tools do. |
 | Case aggregation | Stateful per-case metrics skip NaNs, average cases per class, then average class means. |
 | Pooled evaluation | `Calibration` pools voxel bins; `VoxelRanking` pools voxel rankings; overlap metrics with `aggregate="pooled"` pool confusion counts. Case averages and pooled scores are different quantities. |
 | AP | Non-interpolated sum of recall increments times precision, not trapezoidal PR area. No-positive AP and single-outcome AUROC are NaN. |
