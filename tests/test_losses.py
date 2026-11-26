@@ -335,3 +335,61 @@ def test_fused_ce_stable_under_logit_offsets(dtype, offset, target_format):
     tol = dict(rtol=1e-12, atol=1e-15) if dtype == torch.float64 else dict(rtol=1e-5, atol=1e-7)
     torch.testing.assert_close(loss_f, loss_t, **tol)
     torch.testing.assert_close(grad_f, grad_t, **tol)
+
+
+# --- zero_absent: segmentation_models_pytorch's treatment of classes absent from the target ------
+
+
+def _smp_reference(loss_cls, **kw):
+    smp = pytest.importorskip("segmentation_models_pytorch.losses")
+    return getattr(smp, loss_cls)(mode="multiclass", **kw)
+
+
+@pytest.mark.parametrize("batch_dice", [True, False])
+def test_zero_absent_zeroes_empty_target_classes(batch_dice):
+    from exacta.losses import DiceLoss
+
+    torch.manual_seed(0)
+    logits = torch.randn(2, 4, 6, 7, 8, dtype=torch.float64, requires_grad=True)
+    target = torch.randint(0, 3, (2, 6, 7, 8))  # class 3 never occurs
+    loss = DiceLoss(zero_absent=True, batch_dice=batch_dice)(logits, target)
+    loss.backward()
+    probs = logits.detach().softmax(1)
+    dims = (0, 2, 3, 4) if batch_dice else (2, 3, 4)
+    onehot = torch.nn.functional.one_hot(target, 4).movedim(-1, 1).double()
+    ratio = (2 * (probs * onehot).sum(dims) + 1e-5) / (probs.sum(dims) + onehot.sum(dims) + 1e-5)
+    ratio = torch.where(onehot.sum(dims) == 0, 1.0, ratio)
+    torch.testing.assert_close(loss, 1 - ratio.mean())
+    assert torch.isfinite(logits.grad).all()
+    default = DiceLoss(batch_dice=batch_dice)(logits.detach(), target)
+    assert default > loss  # the empty class 3 is penalised by default
+
+
+def test_zero_absent_matches_smp_dice_and_tversky():
+    from exacta.losses import DiceLoss, TverskyLoss
+
+    torch.manual_seed(1)
+    logits = torch.randn(2, 3, 8, 9, 10)
+    target = torch.randint(0, 2, (2, 8, 9, 10))  # class 2 absent
+    cases = [
+        (DiceLoss(batch_dice=True, smooth=0.0, zero_absent=True), _smp_reference("DiceLoss")),
+        (TverskyLoss(alpha=0.3, beta=0.7, batch_dice=True, smooth=0.0, zero_absent=True),
+         _smp_reference("TverskyLoss", alpha=0.3, beta=0.7)),
+    ]
+    for ours, theirs in cases:
+        a = logits.clone().requires_grad_(True)
+        b = logits.clone().requires_grad_(True)
+        la, lb = ours(a, target), theirs(b, target)
+        la.backward()
+        lb.backward()
+        torch.testing.assert_close(la, lb, rtol=1e-6, atol=1e-7)
+        torch.testing.assert_close(a.grad, b.grad, rtol=1e-5, atol=1e-8)
+
+
+def test_zero_absent_rejects_triton_and_non_bool():
+    from exacta.losses import DiceLoss
+
+    with pytest.raises(NotImplementedError):
+        DiceLoss(zero_absent=True, backend="triton")
+    with pytest.raises(TypeError):
+        DiceLoss(zero_absent=1)
