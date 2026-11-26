@@ -10,11 +10,11 @@ Let `p` be activated predictions, `g` the target and `s` smoothing. Core overlap
 
 | Loss | Definition and reduction |
 |---|---|
-| `DiceLoss` | `1 - (2 sum(p*g)+s)/(sum(p)+sum(g)+s)`, averaged across cases and selected classes |
+| `DiceLoss` | `1 - (2 sum(p*g)+s)/(sum(p)+sum(g)+s)`, averaged across cases and selected classes; `average`, `skip_absent` and `smooth_numerator` select other reductions and smoothing placement |
 | `DiceCELoss` | `lambda_dice * DiceLoss + lambda_ce * CE`; sigmoid uses BCE |
 | `DiceFocalLoss` | `lambda_dice * DiceLoss + lambda_focal * FocalLoss` |
 | `GeneralizedDiceCELoss` | `lambda_dice * GeneralizedDiceLoss + lambda_ce * CE`; sigmoid uses BCE |
-| `TverskyLoss` | `1 - (TP+s)/(TP+alpha*FP+beta*FN+s)`, averaged across cases and selected classes |
+| `TverskyLoss` | `1 - (TP+s)/(TP+alpha*FP+beta*FN+s)`, averaged across cases and selected classes; same three arguments |
 | `GeneralizedDiceLoss` | Ratio of class-weighted overlap sums; class weights derive from target volumes |
 | `FocalLoss` | Focal CE/BCE with exponent `gamma`; softmax sums classes then averages voxels, sigmoid averages all entries |
 
@@ -73,6 +73,25 @@ Definitions differ across libraries, so select parameters intentionally:
   segmentation_models_pytorch's Dice and Tversky losses with `batch_dice=True` and `smooth=0`.
   By default, as in MONAI, an empty target still penalizes predicted probability. It runs on the
   PyTorch backend.
+- `average` (Dice and Tversky; development version, after 0.1.2) selects how classes are reduced.
+  `"macro"` (default) takes one ratio per class and averages them. `"micro"` first sums the
+  statistics of the selected classes into one ratio per case (per batch with `batch_dice=True`),
+  as in the `average="micro"` of Exacta's classification metrics and of Kornia's Dice loss; a
+  class with a large target then weighs more than a small one. `include_background=False` leaves
+  channel zero out of the pooled sums too.
+- `skip_absent=True` (Dice and Tversky; development version) averages only over the classes
+  present in the target of each case (target mass above zero; the whole batch with
+  `batch_dice=True`), so an absent class leaves the mean and contributes neither loss nor
+  gradient. `zero_absent=True` also gives an absent class no loss but keeps it in the mean, which
+  divides by all selected classes. A case with no present class (for example an all-background
+  case with `include_background=False`) has loss one and zero gradient and stays in the mean; an
+  entirely ignored case is still omitted. The two options are mutually exclusive, and
+  `skip_absent` does not combine with `average="micro"`, which has no class mean.
+- `smooth_numerator=False` (Dice and Tversky; development version) adds the smoothing constant to
+  the denominator only, `1 - 2 sum(p*g)/(sum(p)+sum(g)+s)`, instead of to both terms (the
+  default, as in MONAI with equal `smooth_nr` and `smooth_dr`). With `s=0` the two agree.
+  Tversky with `alpha=beta=0.5` still equals Dice with twice the smoothing constant in either
+  placement.
 - Generalized Dice supports `weight_type="square"`, `"simple"` and `"uniform"`. Smoothing
   is added after class weighting. Absent classes receive the largest present-class weight.
   With inverse-volume weighting, `empty_target="zero"` gives zero for entirely absent selected
@@ -83,9 +102,52 @@ Definitions differ across libraries, so select parameters intentionally:
   classes. `gamma=0, alpha=None` reproduces CE/BCE. Softmax reduction differs from MONAI's mean
   over channels by a factor of the channel count.
 
+## Reproducing Kornia's Dice and Tversky losses
+
+Kornia 0.9.2 defines `kornia.losses.dice_loss` and `TverskyLoss`/`tversky_loss` on softmax probabilities of `(B, C, H, W)` logits and integer targets, with the smoothing
+$\epsilon$ in the denominator only. With $P_b$ the classes that occur in the non-ignored target of
+sample $b$, $\mathrm{TP}_{bc},\mathrm{FP}_{bc},\mathrm{FN}_{bc}$ the statistics above and $\mathcal{B}$ the
+samples, the three losses are:
+
+$$
+\mathcal{L}_{\mathrm{micro}}=\frac{1}{|\mathcal{B}|}\sum_b\left(1-\frac{2\sum_c\mathrm{TP}_{bc}}
+{\sum_c\sum_i(p_{bic}+g_{bic})+\epsilon}\right),\qquad
+\mathcal{L}_{\mathrm{macro}}=\frac{1}{|\mathcal{B}|}\sum_b\frac{1}{|P_b|}\sum_{c\in P_b}
+\left(1-\frac{2\,\mathrm{TP}_{bc}}{\sum_i(p_{bic}+g_{bic})+\epsilon}\right),
+$$
+
+$$
+\mathcal{L}_{\mathrm{Tversky}}=1-\frac{1}{|\mathcal{B}|}\sum_b\frac{1}{|P_b|}\sum_{c\in P_b}
+\frac{\mathrm{TP}_{bc}}{\mathrm{TP}_{bc}+\alpha\,\mathrm{FP}_{bc}+\beta\,\mathrm{FN}_{bc}+\epsilon}.
+$$
+
+Each is a composition of Exacta arguments. Kornia's defaults are `eps=1e-8` and `ignore_index=-100`,
+whereas Exacta's are `smooth=1e-5` and no ignored label, so pass both explicitly:
+
+| Kornia 0.9.2 | Exacta |
+|---|---|
+| `dice_loss(x, t, average="micro", eps=e)` | `DiceLoss(average="micro", smooth=e, smooth_numerator=False, ignore_index=-100)` |
+| `dice_loss(x, t, average="macro", eps=e)` | `DiceLoss(skip_absent=True, smooth=e, smooth_numerator=False, ignore_index=-100)` |
+| `tversky_loss(x, t, alpha, beta, eps=e)` | `TverskyLoss(alpha=alpha, beta=beta, skip_absent=True, smooth=e, smooth_numerator=False, ignore_index=-100)` |
+
+In binary64 on random 2D inputs (four shapes, 20 draws each, with absent classes, all-background
+cases and ignored pixels), values and input gradients agree with Kornia's within `2e-15` relative to
+the value and to the largest gradient, with `eps=0` and `eps=1e-8`. This is why the three arguments
+exist: with the smoothing in both terms, `eps=1e-8` leaves a value difference of order `eps` over the
+denominator, up to `7e-10` in these draws.
+
+Differences that remain: Kornia's optional class `weight` has no Exacta counterpart; Kornia keeps an
+entirely ignored sample in the batch mean with loss one, where Exacta omits it, as every overlap loss
+does; and Kornia accepts only `(B, C, H, W)` logits, whereas Exacta takes any number of spatial
+dimensions. The three arguments run on the PyTorch backend, and `FocalTverskyLoss`,
+`GeneralizedDiceLoss` and the combined losses do not take them.
+
 ## Backends and derivatives
 
-`backend="auto"` selects fused Triton for supported CUDA inputs and PyTorch otherwise.
+`backend="auto"` selects fused Triton for supported CUDA inputs and PyTorch otherwise. The overlap
+options `average="micro"`, `skip_absent=True` and `smooth_numerator=False`, like `zero_absent=True`
+and `soft_label=True` with one-hot targets, run on PyTorch: `"auto"` leaves the fused kernels for
+them and `backend="triton"` raises `NotImplementedError`.
 Half/bfloat16 inputs compute in float32; float64 inputs retain their precision. Fused losses
 support first derivatives. Use `backend="torch"` for higher-order derivatives; `auto` also
 selects PyTorch when targets require gradients. Full-graph `torch.compile` is tested for
@@ -289,6 +351,10 @@ increments of the Jaccard error for that ordering. The objective is:
 $$
 \mathcal{L}_{\mathrm{Lovasz\ hinge}}=\sum_j\max(e_{(j)},0)\,\Delta J_j.
 $$
+
+Both Lovasz losses compute $\Delta J_j$ from integer counts of the sorted prefixes, with one
+binary64 division per increment, instead of subtracting rounded Jaccard values, so the error of
+a gradient component does not grow with the number of voxels.
 
 Binary input has shape `(B,1,*spatial)` with target `(B,*spatial)`. Independent overlapping
 labels use `multilabel=True` and a same-shaped binary target. No sigmoid is applied and

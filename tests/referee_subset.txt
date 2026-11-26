@@ -5,7 +5,7 @@
 # starting with # are ignored. A listed file whose tests are collected but that matches nothing
 # stops the run, so a renamed test cannot drop out silently.
 #
-# Tests that need an optional reference package skip when it is missing: MONAI, MedPy, SimpleITK,
+# Tests that need an optional reference package skip when it is missing: MONAI, Kornia, MedPy, SimpleITK,
 # DeepMind's surface-distance, MeshMetrics and VTK (see the user manual for how to install them).
 
 # Exact Euclidean distance transform: SciPy and brute-force oracles, the exact floating-point
@@ -37,13 +37,17 @@ tests/test_volume.py::test_matches_monai
 tests/test_volume.py::test_relative_volume_difference_matches_medpy
 tests/test_volume.py::test_itk_volume_similarity_matches_simpleitk
 
-# Losses against independent formulas, MONAI, segmentation_models_pytorch and PyTorch
+# Losses against independent formulas, MONAI, segmentation_models_pytorch, Kornia and PyTorch
 # compositions of their terms, with finite-difference gradient checks.
 tests/test_losses.py::test_dice_loss_matches_formula
 tests/test_losses.py::test_dice_ce_is_weighted_sum
 tests/test_losses.py::test_matches_monai
 tests/test_losses.py::test_gradcheck
 tests/test_losses.py::test_zero_absent_matches_smp_dice_and_tversky
+tests/test_loss_conventions.py::test_dice_composition_matches_kornia_arithmetic
+tests/test_loss_conventions.py::test_tversky_composition_matches_kornia_arithmetic
+tests/test_loss_conventions.py::test_dice_composition_matches_installed_kornia
+tests/test_loss_conventions.py::test_tversky_composition_matches_installed_kornia
 tests/test_composed_losses.py::test_composed_value_and_gradient
 tests/test_composed_losses.py::test_soft_target_gradcheck
 tests/test_generalized_dice.py::test_independent_formula

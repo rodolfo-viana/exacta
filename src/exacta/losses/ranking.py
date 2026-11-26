@@ -27,6 +27,43 @@ def _indexed(input: Tensor, target: Tensor, ignore_index: int | None,
     return input, target.long(), valid
 
 
+# Longest ranked vector for which the denominator of a Jaccard increment, at most (2 n)^2, fits in
+# int64 (4 n^2 <= 2^62 < 2^63 for n <= 2^30). Longer vectors divide twice instead of forming it.
+_JACCARD_DENOMINATOR_LIMIT = 2**30
+
+
+def _jaccard_increments(fg: Tensor, keep: Tensor, total: Tensor, dtype: torch.dtype) -> Tensor:
+    """Increments Delta J_k = J_k - J_{k-1} of the Lovasz-Jaccard sequence along the last dimension.
+
+    ``fg`` and ``keep`` are boolean and in sorted order (valid positions first): ``fg`` marks a valid
+    foreground position, ``keep`` a valid one; ``total`` counts the foreground positions (int64,
+    broadcastable to ``fg``). With I_k and U_k the intersection and union after k positions and K_k
+    the number of valid positions among them, J_k = 1 - I_k / U_k = K_k / U_k and
+
+        Delta J_k = (I_{k-1} U_k - I_k U_{k-1}) / (U_{k-1} U_k)
+                  = (keep_k U_{k-1} - K_{k-1} (U_k - U_{k-1})) / (U_{k-1} U_k),   K_0 = 0, U_0 = 1.
+
+    Subtracting rounded Jaccard values loses about log2(n) bits to cancellation, because Delta J_k is
+    of order 1/n while each J_k carries an error of order u. Here the counts are int64 and exact, the
+    numerator is an exact integer of magnitude at most 3 n, and the quotient is formed in binary64:
+    one rounding when U_{k-1} U_k <= 2^53, two (relative error below 2 u64) when the denominator has
+    to be rounded to binary64 first, and for n > 2^30, where it could overflow int64, two divisions.
+    The error does not grow with n. The result is rounded once to ``dtype``. Positions after the last
+    valid one get 0.
+    """
+    long = torch.long
+    kept = keep.cumsum(-1, dtype=long)
+    union = total + kept - fg.cumsum(-1, dtype=long)
+    prev_kept = torch.cat((torch.zeros_like(kept[..., :1]), kept[..., :-1]), -1)
+    prev_union = torch.cat((torch.ones_like(union[..., :1]), union[..., :-1]), -1)
+    numerator = keep.to(long) * prev_union - prev_kept * (union - prev_union)
+    if fg.shape[-1] <= _JACCARD_DENOMINATOR_LIMIT:
+        increments = numerator.double() / (prev_union * union).clamp_min(1).double()
+    else:
+        increments = numerator.double() / prev_union.clamp_min(1).double() / union.clamp_min(1).double()
+    return increments.to(dtype)
+
+
 class TopKCELoss(nn.Module):
     """Mean softmax cross entropy of the hardest ``ceil(fraction * N)`` valid voxels.
 
@@ -125,16 +162,12 @@ class LovaszSoftmaxLoss(nn.Module):
         target, valid = target.flatten(), valid.flatten()
         losses, active = [], []
         for c in range(first, probs.shape[0]):
-            foreground = ((target == c) & valid).to(probs.dtype)
-            errors = (foreground - probs[c].flatten()).abs()
+            foreground = (target == c) & valid
+            errors = (foreground.to(probs.dtype) - probs[c].flatten()).abs()
             ranked, order = torch.sort(torch.where(valid, errors, -1), descending=True, stable=True)
-            fg = foreground[order]
             keep = valid[order]
             total = foreground.sum()
-            intersection = total - fg.cumsum(0)
-            union = total + (keep.to(probs.dtype) - fg).cumsum(0)
-            jaccard = 1 - intersection / union.clamp_min(1)
-            gradient = torch.cat((jaccard[:1], jaccard[1:] - jaccard[:-1]))
+            gradient = _jaccard_increments(foreground[order], keep, total, probs.dtype)
             losses.append((torch.where(keep, ranked, 0) * gradient).sum())
             active.append((total > 0) if self.classes == "present" else valid.any())
         selected = torch.stack(active)
@@ -215,11 +248,7 @@ class LovaszHingeLoss(nn.Module):
         errors = 1 - clean * (2 * positive.to(clean.dtype) - 1)
         ranked, order = torch.sort(torch.where(valid, errors, -torch.inf), descending=True, stable=True)
         fg, keep = positive.gather(1, order), valid.gather(1, order)
-        total = positive.sum(1, keepdim=True)
-        intersection = total - fg.cumsum(1)
-        union = total + (keep.long() - fg.long()).cumsum(1)
-        jaccard = 1 - intersection.double() / union.clamp_min(1)
-        gradient = torch.cat((jaccard[:, :1], jaccard[:, 1:] - jaccard[:, :-1]), 1).to(clean.dtype)
+        gradient = _jaccard_increments(fg, keep, positive.sum(1, keepdim=True), clean.dtype)
         values = (torch.where(keep, ranked, 0).relu() * gradient).sum(1)
         active = valid.any(1)
         return torch.where(active, values, 0).sum() / active.sum().clamp_min(1)
