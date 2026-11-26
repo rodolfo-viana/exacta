@@ -11,6 +11,7 @@ makes these choices arguments; matching a library requires matching all relevant
 | Surfels | `surface="surfels"`: marching-cubes surface elements weighted by area (contour lengths in 2D); percentiles use these weights |
 | Meshes | `surface="mesh"`: triangle centers to nearest points on the other mesh, weighted by triangle area (contour segments in 2D); evaluated on CPU |
 | NSD threshold | Distances at or below tolerance are included, up to a relative margin `tie_rtol` (default `1e-6`, since 0.1.0) that keeps exact ties within despite rounding; `tie_rtol=0` compares strictly |
+| Sums over surface elements | Means (ASSD) and weighted NSD fractions use correctly rounded sums (since 0.1.2), so their bits do not depend on element order, thread count or device |
 | Image exterior | Counts as background |
 | Both masks empty | `both_empty`, default NaN |
 | One mask empty | Dice/IoU: zero; HD/ASSD: `one_empty`, default infinity; NSD: `one_empty`, default zero |
