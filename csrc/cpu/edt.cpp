@@ -23,7 +23,7 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 // Evaluates, at every sample q, min over samples p with finite f[p] of (h*(q - p))^2 + f[p],
 // exactly as rounded in floating point (the value a brute-force minimum would give).
 // tol is the tie tolerance of the breakpoints (see tolerance()). Scratch: v holds n indices,
-// z holds n + 1 breakpoints.
+// z and b hold n + 1 breakpoints each.
 //
 // The lower envelope gives the minimising parabola, but its breakpoints carry rounding error.
 // Where several parabolas meet at one point, which is common on a voxel grid, they tie
@@ -31,27 +31,38 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 // discard the one that rounds lowest. So breakpoints that agree to within their rounding error
 // count as ties: tied parabolas are all kept, and all of them are evaluated near the breakpoint.
 // Extra candidates can only lower the result towards the true minimum, never below it.
+//
+// Each stack entry k keeps b[k], its computed breakpoint with the entry below it (the parabola
+// below is lower left of b[k]), and z[k], the running maximum of b. The top is popped only when
+// the new parabola's breakpoint with it lies a full tol left of b[k]: then one of the two
+// neighbours is below it everywhere by more than any rounding error, so it is never the rounded
+// minimum. A kept entry can be lowest only between b[k] and b[k + 1], up to rounding error; the
+// scan therefore looks left while the running maximum z[i + 1] reaches xq - tol and right while
+// the suffix minimum of b (stored back into b) stays below xq + tol. Testing pops against z, or
+// scanning right with z, can miss the minimum by an ulp when tied parabolas are far apart on
+// the line (tests/test_edt.py has such lines).
 void edt_1d(const double *f, double tol, double *d, std::int64_t n, double h, std::int64_t *v,
-            double *z) {
+            double *z, double *b) {
   std::int64_t k = -1;
   for (std::int64_t q = 0; q < n; ++q) {
     if (f[q] == kInf) continue;
     const double xq = h * static_cast<double>(q);
     // The breakpoint with the top of the stack is num / den, den > 0. Comparing num with
-    // (z[k] - tol) * den decides as comparing the quotient would, but for an ulp far inside the
+    // (b[k] - tol) * den decides as comparing the quotient would, but for an ulp far inside the
     // tolerance, and leaves one division per kept breakpoint.
     double num = 0.0, den = 1.0;
     while (k >= 0) {
       const double xv = h * static_cast<double>(v[k]);
       num = (f[q] + xq * xq) - (f[v[k]] + xv * xv);
       den = 2.0 * (xq - xv);
-      if (num > (z[k] - tol) * den) break;  // v[k] is lowest somewhere, or ties at z[k]: keep it
+      if (num > (b[k] - tol) * den) break;  // v[k] may be lowest somewhere, or tie: keep it
       --k;
     }
-    // z[0] = -inf, so the stack, once started, never empties.
+    // b[0] = -inf, so the stack, once started, never empties.
     const double s = k >= 0 ? num / den : -kInf;
     ++k;
     v[k] = q;
+    b[k] = s;
     z[k] = k == 0 ? s : std::max(s, z[k - 1]);  // a kept tie leaves v[k - 1] a zero-width interval
     z[k + 1] = kInf;
   }
@@ -59,6 +70,7 @@ void edt_1d(const double *f, double tol, double *d, std::int64_t n, double h, st
     for (std::int64_t q = 0; q < n; ++q) d[q] = kInf;
     return;
   }
+  for (std::int64_t i = k - 1; i >= 0; --i) b[i] = std::min(b[i], b[i + 1]);  // suffix minimum
   // h * (q - p) rounds once, unlike h*q - h*p, and is how SciPy forms the offset, so values
   // match SciPy's bit for bit; threshold metrics (NSD) are sensitive to the last bit.
   const auto parabola = [&](std::int64_t q, std::int64_t p) {
@@ -73,7 +85,7 @@ void edt_1d(const double *f, double tol, double *d, std::int64_t n, double h, st
     for (std::int64_t i = j - 1; i >= 0 && z[i + 1] >= xq - tol; --i) {
       best = std::min(best, parabola(q, v[i]));
     }
-    for (std::int64_t i = j + 1; i <= k && z[i] <= xq + tol; ++i) {
+    for (std::int64_t i = j + 1; i <= k && b[i] <= xq + tol; ++i) {
       best = std::min(best, parabola(q, v[i]));
     }
     d[q] = best;
@@ -166,7 +178,7 @@ int edt_sq(const std::uint8_t *features, double *out, const std::int64_t *shape,
 
   // Per-thread line buffers, allocated once so no allocation happens inside parallel regions.
   std::vector<double> f_buf(threads * kGroup * max_n), d_buf(threads * max_n);
-  std::vector<double> z_buf(threads * (max_n + 1));
+  std::vector<double> z_buf(threads * (max_n + 1)), b_buf(threads * (max_n + 1));
   std::vector<std::int64_t> v_buf(threads * max_n);
 
   for (int axis = batch_ndim + 1; axis < ndim; ++axis) {
@@ -187,6 +199,7 @@ int edt_sq(const std::uint8_t *features, double *out, const std::int64_t *shape,
       double *f = f_buf.data() + tid * kGroup * max_n;
       double *d = d_buf.data() + tid * max_n;
       double *z = z_buf.data() + tid * (max_n + 1);
+      double *brk = b_buf.data() + tid * (max_n + 1);
       std::int64_t *v = v_buf.data() + tid * max_n;
 
 #pragma omp for schedule(static)
@@ -198,7 +211,7 @@ int edt_sq(const std::uint8_t *features, double *out, const std::int64_t *shape,
           for (std::int64_t b = 0; b < width; ++b) f[b * n + i] = out[base + i * stride + b];
         }
         for (std::int64_t b = 0; b < width; ++b) {
-          edt_1d(f + b * n, tol, d, n, h, v, z);
+          edt_1d(f + b * n, tol, d, n, h, v, z, brk);
           std::copy(d, d + n, f + b * n);
         }
         for (std::int64_t i = 0; i < n; ++i) {
@@ -245,6 +258,28 @@ extern "C" int exacta_edt_sq_f64(const uint8_t *features, double *out, const int
   if (features == nullptr || out == nullptr) return EXACTA_INVALID_ARGUMENT;
   try {
     return edt_sq(features, out, shape, ndim, batch_ndim, spacing, num_threads);
+  } catch (const std::bad_alloc &) {
+    return EXACTA_OUT_OF_MEMORY;
+  } catch (...) {
+    return EXACTA_INTERNAL_ERROR;
+  }
+}
+
+extern "C" int exacta_edt_lines_f64(const double *f, double *out, int64_t lines, int64_t n,
+                                    double h, double bound) {
+  if (lines < 0 || n < 0 || !(h >= 1e-100 && h <= 1e100) || !(bound >= 0.0 && bound < kInf)) {
+    return EXACTA_INVALID_ARGUMENT;
+  }
+  if (lines == 0 || n == 0) return EXACTA_OK;
+  if (f == nullptr || out == nullptr) return EXACTA_INVALID_ARGUMENT;
+  try {
+    std::vector<double> z(n + 1), b(n + 1);
+    std::vector<std::int64_t> v(n);
+    const double tol = tolerance(bound, h, n);
+    for (std::int64_t line = 0; line < lines; ++line) {
+      edt_1d(f + line * n, tol, out + line * n, n, h, v.data(), z.data(), b.data());
+    }
+    return EXACTA_OK;
   } catch (const std::bad_alloc &) {
     return EXACTA_OUT_OF_MEMORY;
   } catch (...) {

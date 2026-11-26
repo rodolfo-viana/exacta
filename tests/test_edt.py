@@ -78,6 +78,89 @@ def test_is_the_exact_floating_point_minimum(features, spacing):
         np.testing.assert_array_equal(edt_sq(torch.from_numpy(features), spacing).numpy(), expected)
 
 
+# Lines on which the 0.1.0 envelope missed the rounded minimum by an ulp: parabolas c and c + 1
+# whose breakpoint lies one tolerance right of the point where c ties with c + G and c + G + 1,
+# G large, so that c + 1 survives as a zero-width tie and c + G is popped. Found by fuzzing the
+# worst case of the exactness proof. Each case: n, h, bound, then (index, f) pairs; inf elsewhere.
+FAR_TIES = [
+    (749, 0.3, 36957.237702106751, ((70, 36948.507702104274), (71, 36957.237702106751),
+                                     (728, 3785.3077021038771), (729, 3675.5977021038775))),
+    (788, 0.6, 242165.36564522516, ((8, 242152.76564521194), (9, 242165.36564522516),
+                                     (775, 40309.045645208796), (776, 39769.405645208812))),
+    (794, 1.5726659790111748, 2484073.9947091881, ((67, 2483764.8349238811), (68, 2484073.9947091881),
+                                                   (790, 1416221.2569848425), (791, 1412954.0563749289))),
+    (1033, 1.1, 2574667.2310094885, ((6, 2574639.401009379), (7, 2574667.2310094885),
+                                      (1028, 1340492.641009348), (1029, 1338047.2310093478))),
+    (1065, 0.4, 177668.01497944829, ((34, 177653.77497943811), (35, 177668.01497944829),
+                                      (1061, 23685.934979433048), (1062, 23371.534979433036))),
+    (1131, 0.7, 925503.49714840332, ((138, 925407.94714835926), (139, 925503.49714840332),
+                                      (1127, 541112.21714834159), (1128, 540238.54714834166))),
+]
+
+
+def _line_minimum(f: np.ndarray, h: float) -> np.ndarray:
+    """Brute-force pass: min over p with finite f[p] of fl(fl(fl(h * (q - p))^2) + f[p])."""
+    q = np.arange(f.shape[-1])
+    dx = (q[:, None] - q[None, :]).astype(np.float64) * h
+    return (dx * dx + f[..., None, :]).min(-1)
+
+
+def _far_tie_line(n, pairs):
+    f = np.full((1, n), np.inf)
+    for index, value in pairs:
+        f[0, index] = value
+    return f
+
+
+def _line_kernels():
+    kernels = [_native.edt_lines]
+    if GPU:
+        kernels.append(lambda f, h, bound: _triton_edt.edt_lines(f.cuda(), h, bound).cpu())
+    return kernels
+
+
+@pytest.mark.parametrize(("n", "h", "bound", "pairs"), FAR_TIES)
+def test_far_apart_ties_keep_the_rounded_minimum(n, h, bound, pairs):
+    f = _far_tie_line(n, pairs)
+    expected = _line_minimum(f, h)
+    for edt_lines in _line_kernels():
+        np.testing.assert_array_equal(edt_lines(torch.from_numpy(f), h, bound).numpy(), expected)
+
+
+def test_lines_with_near_ties_are_exact():
+    # Clusters of parabolas through one point, each raised by up to ~3000 eps * M: breakpoints
+    # that tie within rounding error and others a tolerance or more apart.
+    rng = np.random.default_rng(7)
+    eps = np.finfo(np.float64).eps
+    for n in (5, 17, 40, 96):
+        for h in (0.3, 0.7, 1.1, 2.6457513110645907):
+            f = np.full((400, n), np.inf)
+            span = (h * n) ** 2
+            for row in f:
+                for _ in range(rng.integers(1, 4)):
+                    x0 = rng.integers(n) * h if rng.random() < 0.6 else rng.random() * (n - 1) * h
+                    level = rng.random() * span
+                    p = rng.integers(n, size=rng.integers(3, 8))
+                    value = level - (x0 - h * p) ** 2
+                    value += rng.uniform(-1, 1, p.size) * 10 ** rng.uniform(-1, 3.5, p.size) * eps * (level + span)
+                    keep = value >= 0
+                    np.minimum.at(row, p[keep], value[keep])
+                if np.isinf(row).all():
+                    row[rng.integers(n)] = 0.0
+            bound = float(f[np.isfinite(f)].max())
+            expected = _line_minimum(f, h)
+            for edt_lines in _line_kernels():
+                np.testing.assert_array_equal(edt_lines(torch.from_numpy(f), h, bound).numpy(), expected)
+
+
+def test_edt_lines_rejects_bad_arguments():
+    f = torch.zeros(2, 3, dtype=torch.float64)
+    with pytest.raises(ValueError):
+        _native.edt_lines(f, 0.0, 1.0)
+    with pytest.raises(ValueError):
+        _native.edt_lines(f, 1.0, math.inf)
+
+
 @needs_gpu
 @pytest.mark.parametrize(
     ("shape", "spacing"), CASES + [((1, 1, 7), (1.0, 2.0, 0.5)), ((300, 7, 1), (0.5, 1.5, 2.0))]

@@ -66,6 +66,13 @@ int exacta_soft_pool_f64(const double *x, double *out, int64_t *indices,
 int exacta_edt_sq_f64(const uint8_t *features, double *out, const int64_t *shape, int ndim,
                       int batch_ndim, const double *spacing, int num_threads);
 
+/* One pass of that transform over `lines` independent lines of `n` values each, for testing:
+ * out[q] = min over p with finite f[p] of (h*(q - p))^2 + f[p], rounded as written. Finite
+ * inputs must lie in [0, bound]; +inf marks samples without a parabola.
+ */
+int exacta_edt_lines_f64(const double *f, double *out, int64_t lines, int64_t n, double h,
+                         double bound);
+
 /* Connected-component labelling of a binary image of 1 to 3 dimensions.
  *
  * Writes to `out` 0 for every zero element of `mask` and, for every nonzero element, the

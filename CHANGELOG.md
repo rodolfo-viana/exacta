@@ -4,7 +4,14 @@ Release notes for Exacta.
 
 ## Unreleased
 
-Changes for the next release will be recorded here.
+- **Fix:** the squared Euclidean distance transform (CPU and Triton) could return a value one or
+  two ulps above the exact floating-point minimum when several parabolas of a pass tie within
+  rounding error far apart on a line. The envelope now removes a parabola only when one of its two
+  neighbours lies below it everywhere by more than any rounding error, and evaluates every kept
+  parabola whose breakpoints come within the tie tolerance of the sample. The failing lines were
+  constructed adversarially from the worst case of the exactness argument; random lines, random
+  masks and all label volumes of three Medical Segmentation Decathlon tasks gave the exact minimum
+  with 0.1.0 as well. Surface distances built on the transform change only in such cases.
 
 ## 0.1.0 — 2026-11-25
 

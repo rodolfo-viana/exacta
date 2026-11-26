@@ -52,6 +52,20 @@ def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> T
     return out
 
 
+def edt_lines(f: Tensor, h: float, bound: float) -> Tensor:
+    """One pass of :func:`edt_sq` over each row of ``f`` (float64, ``(lines, n)``), for testing.
+
+    ``out[q] = min_p fl(fl(fl(h * (q - p))^2) + f[p])`` over ``p`` with finite ``f[p]``; finite
+    values must lie in ``[0, bound]``, and ``inf`` marks samples without a parabola.
+    """
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    f = f.to(torch.float64).contiguous()
+    out = torch.empty_like(f)
+    _C.edt_lines(f, out, float(h), float(bound))
+    return out
+
+
 def label(mask: Tensor, connectivity: int) -> tuple[Tensor, int]:
     """Connected-component labels (int32) of a CPU mask and the number of components.
 
