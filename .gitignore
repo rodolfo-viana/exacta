@@ -20,3 +20,5 @@ dist/
 !CHANGELOG.md
 !/docs/wiki/*.md
 !tests/fixtures/*.json
+# Paper drafts (local only)
+/paper/

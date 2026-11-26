@@ -12,7 +12,7 @@ from exacta import functional
 from exacta._inputs import InputFormat, to_torch
 from exacta._tabular import gathered
 from exacta.functional import overlap
-from exacta.functional.surface import Backend, Combine, Surface
+from exacta.functional.surface import DEFAULT_TIE_RTOL, Backend, Combine, Surface
 from exacta.functional.overlap import _check_beta, _check_ignore_index
 from exacta.functional.area import AreaUnit
 from exacta.functional.topology import SkeletonMethod
@@ -469,6 +469,7 @@ class NSD(_SurfaceMetric):
         self,
         *,
         tolerance: Any,
+        tie_rtol: float = DEFAULT_TIE_RTOL,
         spacing: Any = None,
         surface: Surface = "voxels",
         input_format: InputFormat = "index",
@@ -481,6 +482,7 @@ class NSD(_SurfaceMetric):
         super().__init__(
             spacing,
             tolerance=tolerance,
+            tie_rtol=tie_rtol,
             surface=surface,
             input_format=input_format,
             num_classes=num_classes,

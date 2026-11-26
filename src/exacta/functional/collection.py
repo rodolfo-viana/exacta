@@ -35,7 +35,8 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
                            "both_empty": math.nan, "one_empty": math.inf},
     "hd95": {"combine": "max", "surface": "voxels", "both_empty": math.nan, "one_empty": math.inf},
     "assd": {"combine": "pooled", "surface": "voxels", "both_empty": math.nan, "one_empty": math.inf},
-    "nsd": {"tolerance": None, "surface": "voxels", "both_empty": math.nan, "one_empty": 0.0},
+    "nsd": {"tolerance": None, "tie_rtol": sf.DEFAULT_TIE_RTOL, "surface": "voxels",
+            "both_empty": math.nan, "one_empty": 0.0},
 }
 
 
@@ -134,11 +135,11 @@ def _surface_score(name: str, options: dict[str, Any], classes: range):
     if name == "nsd":
         if options["tolerance"] is None:
             raise ValueError("nsd requires tolerance")
-        tau = sf._tolerances(options["tolerance"], classes)
+        bound = sf._nsd_bounds(options["tolerance"], classes, options["tie_rtol"])
 
         def score(pt, tp, k):
-            within_p, total_p = sf._within(pt, tau[k])
-            within_t, total_t = sf._within(tp, tau[k])
+            within_p, total_p = sf._within(pt, bound[k])
+            within_t, total_t = sf._within(tp, bound[k])
             return (within_p + within_t) / (total_p + total_t)
         return score
     combine = options["combine"]

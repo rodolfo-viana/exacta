@@ -67,6 +67,12 @@ Definitions differ across libraries, so select parameters intentionally:
 
 - Dice/Tversky smoothing defaults to `1e-5`. Tversky's default `alpha=beta=0.5` equals Dice
   with twice the smoothing constant; alpha weights false positives and beta false negatives.
+- `zero_absent=True` (Dice, Tversky and focal Tversky, since 0.1.0) gives zero loss and
+  gradient to classes whose target is empty within the reduction (case, or batch with
+  `batch_dice=True`), however much is predicted; they still count in the mean. This reproduces
+  segmentation_models_pytorch's Dice and Tversky losses with `batch_dice=True` and `smooth=0`.
+  By default, as in MONAI, an empty target still penalizes predicted probability. It runs on the
+  PyTorch backend.
 - Generalized Dice supports `weight_type="square"`, `"simple"` and `"uniform"`. Smoothing
   is added after class weighting. Absent classes receive the largest present-class weight.
   With inverse-volume weighting, `empty_target="zero"` gives zero for entirely absent selected

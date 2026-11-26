@@ -47,6 +47,7 @@ class _OverlapLoss(nn.Module):
         ignore_index: int | None = None,
         backend: Backend = "auto",
         soft_label: bool = False,
+        zero_absent: bool = False,
     ) -> None:
         super().__init__()
         if activation not in ("softmax", "sigmoid", "none"):
@@ -67,6 +68,11 @@ class _OverlapLoss(nn.Module):
         self.ignore_index = _check_ignore_index(ignore_index, target_format)
         self.backend = backend
         self.soft_label = soft_label
+        if not isinstance(zero_absent, bool):
+            raise TypeError("zero_absent must be a bool")
+        if zero_absent and backend == "triton":
+            raise NotImplementedError("zero_absent=True runs on backend='torch' (or 'auto')")
+        self.zero_absent = zero_absent
         if soft_label and target_format == "one-hot" and backend == "triton":
             raise NotImplementedError("soft_label=True with one-hot targets runs on backend='torch' (or 'auto')")
 
@@ -76,7 +82,8 @@ class _OverlapLoss(nn.Module):
         return self.soft_label and self.target_format == "one-hot"
 
     def _fusable(self, input: Tensor, target: Tensor) -> bool:
-        return not self._semimetric() and _use_triton(self.backend, input, target, allow_empty=self.distributed)
+        return (not self._semimetric() and not getattr(self, "zero_absent", False)
+                and _use_triton(self.backend, input, target, allow_empty=self.distributed))
 
     def _tversky_weights(self) -> tuple[float, float] | None:
         return None
@@ -134,8 +141,11 @@ class _OverlapLoss(nn.Module):
                 fn = ((1 - probs) * onehot).sum(dims)
             if self.distributed:
                 intersection, fp, fn, valid_counts = _global_overlap(intersection, fp, fn, valid_counts, input)
-            return _overlap_mean(intersection + self.smooth,
-                                 intersection + alpha * fp + beta * fn + self.smooth, valid_counts,
+            numerator = intersection + self.smooth
+            denominator = intersection + alpha * fp + beta * fn + self.smooth
+            if self.zero_absent:
+                numerator, denominator = _zero_absent(numerator, denominator, intersection + fn)
+            return _overlap_mean(numerator, denominator, valid_counts,
                                  power=self._overlap_power()).to(input.dtype)
         if self._squared_denominator():
             prediction, truth = probs.square().sum(dims), onehot.square().sum(dims)
@@ -152,8 +162,10 @@ class _OverlapLoss(nn.Module):
                 empty_target=generalized[1], smooth=self.smooth,
             )
             return _overlap_mean(numerator, denominator, valid_counts).to(input.dtype)
-        denominator = prediction + truth
-        return _overlap_mean(2 * intersection + self.smooth, denominator + self.smooth, valid_counts).to(input.dtype)
+        numerator, denominator = 2 * intersection + self.smooth, prediction + truth + self.smooth
+        if self.zero_absent:
+            numerator, denominator = _zero_absent(numerator, denominator, truth)
+        return _overlap_mean(numerator, denominator, valid_counts).to(input.dtype)
 
     def _fused(
         self, input: Tensor, target: Tensor, *, lambda_dice: float, lambda_ce: float, cross_entropy: bool,
@@ -212,6 +224,12 @@ class DiceLoss(_OverlapLoss):
     runs on the PyTorch backend. ``squared_pred=True`` is already minimal at ``p = g``
     (``Σ p² + Σ g² - 2 Σ p·g = Σ (p - g)²``), so the two options are exclusive.
 
+    ``zero_absent=True`` gives zero loss and gradient to every class whose target is empty within
+    its reduction (the case, or the batch with ``batch_dice``), however much of it is predicted;
+    such classes still count in the mean. This is segmentation_models_pytorch's convention; by
+    default, as in MONAI, an empty target still penalizes predicted probability through the
+    smoothed ratio. It runs on the PyTorch backend.
+
     ``ignore_index`` excludes that integer label. All losses also accept a keyword-only
     boolean ``mask`` of shape ``(B, *spatial)`` or ``(B, 1, *spatial)`` in forward; True
     includes a voxel. Both exclusions combine. Excluded values have zero gradient, including
@@ -231,11 +249,11 @@ class DiceLoss(_OverlapLoss):
                  target_format: TargetFormat = "index", include_background: bool = True,
                  batch_dice: bool = False, distributed: bool = False, smooth: float = 1e-5,
                  ignore_index: int | None = None, backend: Backend = "auto",
-                 soft_label: bool = False) -> None:
+                 soft_label: bool = False, zero_absent: bool = False) -> None:
         super().__init__(activation=activation, target_format=target_format,
                          include_background=include_background, batch_dice=batch_dice,
                          distributed=distributed, smooth=smooth, ignore_index=ignore_index, backend=backend,
-                         soft_label=soft_label)
+                         soft_label=soft_label, zero_absent=zero_absent)
         if not isinstance(squared_pred, bool):
             raise TypeError("squared_pred must be a bool")
         if squared_pred and soft_label:
@@ -272,11 +290,12 @@ class TverskyLoss(_OverlapLoss):
         ignore_index: int | None = None,
         backend: Backend = "auto",
         soft_label: bool = False,
+        zero_absent: bool = False,
     ) -> None:
         super().__init__(
             activation=activation, target_format=target_format, include_background=include_background,
             batch_dice=batch_dice, distributed=distributed, smooth=smooth, ignore_index=ignore_index, backend=backend,
-            soft_label=soft_label,
+            soft_label=soft_label, zero_absent=zero_absent,
         )
         _nonnegative_finite("alpha", alpha)
         _nonnegative_finite("beta", beta)
@@ -300,11 +319,12 @@ class FocalTverskyLoss(TverskyLoss):
                  activation: Activation = "softmax", target_format: TargetFormat = "index",
                  include_background: bool = True, batch_dice: bool = False,
                  distributed: bool = False, smooth: float = 1e-5,
-                 ignore_index: int | None = None, backend: Backend = "auto", soft_label: bool = False) -> None:
+                 ignore_index: int | None = None, backend: Backend = "auto", soft_label: bool = False,
+                 zero_absent: bool = False) -> None:
         super().__init__(alpha=alpha, beta=beta, activation=activation, target_format=target_format,
                          include_background=include_background, batch_dice=batch_dice,
                          distributed=distributed, smooth=smooth, ignore_index=ignore_index, backend=backend,
-                         soft_label=soft_label)
+                         soft_label=soft_label, zero_absent=zero_absent)
         if not math.isfinite(gamma) or gamma <= 0:
             raise ValueError("gamma must be finite and positive")
         self.gamma = gamma
@@ -643,6 +663,13 @@ def _overlap_mean(numerator: Tensor, denominator: Tensor, valid_counts: Tensor |
         return _loss_reductions.overlap_power(1 - numerator / denominator, power).mean()
     numerator, denominator, scale = masked_overlap_terms(numerator, denominator, valid_counts)
     return (_loss_reductions.overlap_power(1 - numerator / denominator, power) * scale).sum()
+
+
+def _zero_absent(numerator: Tensor, denominator: Tensor, truth: Tensor) -> tuple[Tensor, Tensor]:
+    """Ratio 1 (loss and gradient 0) for terms whose target is empty; they stay in the mean."""
+    absent = truth == 0
+    one = torch.ones((), dtype=numerator.dtype, device=numerator.device)
+    return torch.where(absent, one, numerator), torch.where(absent, one, denominator)
 
 
 def _global_overlap(

@@ -86,6 +86,12 @@ class MetricCollection:
             results[name] = MetricResult(per_case, per_class, per_class.nanmean())
         return results
 
+    def signatures(self) -> dict[str, str]:
+        """Reporting signature of every metric, with ``aggregate``; see :mod:`exacta.conventions`."""
+        from exacta.conventions import signatures
+
+        return signatures(self._metrics, aggregate=self.aggregate)
+
     def reset(self) -> None:
         self._values.clear()
         self._counts = None
