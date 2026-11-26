@@ -4,6 +4,26 @@ Release notes for Exacta.
 
 ## Unreleased
 
+- **Lovasz losses:** `LovaszSoftmaxLoss` and `LovaszHingeLoss` now compute the increments of the
+  Jaccard sequence (the weights of the sorted errors) from exact int64 counts,
+  `(I[k-1] U[k] - I[k] U[k-1]) / (U[k-1] U[k])`, with one binary64 division and one cast to the dtype
+  of the loss, instead of subtracting rounded Jaccard values (in the input dtype for the softmax
+  loss, in binary64 for the hinge). That subtraction loses about log2(n) bits: the gradient error,
+  relative to the largest component, was about `0.45 n u` (`2.7e-2` for the softmax loss in binary32
+  and `5e-11` in binary64 with `1e6` voxels; `2e-13` for the hinge in binary64 with 1728 voxels per
+  case). For the same sort order every component of the gradient (with respect to the probabilities
+  for the softmax loss, to the logits for the hinge) now has a relative error of at most `2u`, `u`
+  being the unit roundoff of the dtype (the rounding of the increment and that of the division by
+  the number of classes or cases averaged), in binary32 and binary64, on CPU and GPU, whatever `n`
+  (`3u` in binary64 beyond 4.7e7 voxels, where the denominator is rounded as well). Binary32 counts
+  are exact beyond `2**24` voxels too. The sort, its tie breaking, the masks and the
+  values of the losses do not change (values differ in the last bits); the temporary counts take
+  the memory of int64 instead of the input dtype. smp's Lovasz loss (binary32) differences the
+  sequence as Exacta did, so under the same sort order its gradient used to equal Exacta's bit for
+  bit and now differs by smp's own error, which grows with `n`: relative difference of the gradient
+  norm, median over the batches of real binary32 logits, 1.4e-4 with 3e5 voxels, 1.3e-3 with 1.2e6
+  and 2.8e-3 with 1.8e6 (at most 5.3e-2). kornia's, in binary64 on 2-D slices, differs by at most
+  3e-14 under the same sort order.
 - **MeshMetrics compatibility:** with `surface="mesh"` in 3-D, masks are now meshed in the box
   MeshMetrics 1.2 to 1.4.1 use for NumPy masks (the bounding box of both masks, starting one voxel
   before it), so vertex coordinates are measured from the same voxel. This removes many differences
