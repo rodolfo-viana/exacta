@@ -2,7 +2,7 @@ name: Portability CI
 
 # Builds the source distribution from scratch and runs the test suite on platforms and compilers
 # other than the Linux x86-64 GCC job of Development CI, then compares a bit-level digest of
-# fixed results across all of them. Used as portability evidence for the TOMS submission.
+# fixed results across all of them.
 # It runs for pull requests, pushes to main and on demand, not on every branch push, because
 # the macOS runners are scarce and slow.
 
@@ -77,7 +77,7 @@ jobs:
             cc: clang
             cxx: clang++
           # The same suite with the reference tools the tests compare against (otherwise skipped),
-          # pinned to the versions of the paper's experiments, on the latest PyTorch and NumPy 2.
+          # at pinned versions, on the latest PyTorch and NumPy 2.
           - id: linux-x86-64-gcc-references
             name: Linux x86-64, GCC, with reference tools
             runner: ubuntu-24.04

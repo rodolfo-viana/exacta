@@ -12,19 +12,6 @@ dist/
 # Local notes and measurements; keep the public Wiki sources.
 /docs/*
 !/docs/wiki/
-!/docs/manual/
-# The user manual's LaTeX sources are tracked; the PDF and the build products are not.
-/docs/manual/*.pdf
-/docs/manual/*.aux
-/docs/manual/*.fdb_latexmk
-/docs/manual/*.fls
-/docs/manual/*.lof
-/docs/manual/*.log
-/docs/manual/*.lot
-/docs/manual/*.out
-/docs/manual/*.toc
-/docs/manual/*.synctex.gz
-/docs/manual/version.tex
 /local/
 /wheelhouse/
 *.json

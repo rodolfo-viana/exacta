@@ -20,7 +20,7 @@ namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
-// Limits of the exactness proof (Proposition 1 of the paper): lines of at most 2^40 samples, and
+// Limits under which the pass is exact: lines of at most 2^40 samples, and
 // (B + (h n)^2) / h at most kMaxScale in every pass, which keeps each intermediate quantity far
 // from overflow (breakpoints reach about M / (2 h), the tie tolerance is 128 u M / h, with
 // M = B + (h n)^2). check_edt_extent in src/exacta/_native.py applies the same limits.
@@ -61,9 +61,9 @@ bool pass_in_range(double bound, double h, std::int64_t n) {
 // scanning right with z, can miss the minimum by an ulp when tied parabolas are far apart on
 // the line (tests/test_edt.py has such lines).
 //
-// The comments "Alg. 1, line N" refer to the pseudo-code of this pass in the paper that
-// describes Exacta (Algorithm 1, the tie-tolerant lower envelope); its proof of exactness assumes
-// exactly these binary64 operations, each rounded once (no fused multiply-add, see CMakeLists.txt).
+// The comments "Alg. 1, line N" number the steps of this pass, the tie-tolerant lower envelope;
+// its exactness argument assumes exactly these binary64 operations, each rounded once (no fused
+// multiply-add, see CMakeLists.txt).
 void edt_1d(const double *f, double tol, double *d, std::int64_t n, double h, std::int64_t *v,
             double *z, double *b) {
   std::int64_t k = -1;  // Alg. 1, line 1
@@ -307,7 +307,7 @@ extern "C" int exacta_edt_lines_f64(const double *f, double *out, int64_t lines,
   if (!pass_in_range(bound, h, n)) return EXACTA_OUT_OF_RANGE;
   if (lines == 0 || n == 0) return EXACTA_OK;
   if (f == nullptr || out == nullptr) return EXACTA_INVALID_ARGUMENT;
-  // Proposition 1 takes every input in [0, bound] or +inf; NaN, negative and -inf fail the test.
+  // The pass is exact for inputs in [0, bound] or +inf; NaN, negative and -inf fail the test.
   for (std::int64_t i = 0; i < lines * n; ++i) {
     if (!(f[i] == kInf || (f[i] >= 0.0 && f[i] <= bound))) return EXACTA_INVALID_ARGUMENT;
   }
