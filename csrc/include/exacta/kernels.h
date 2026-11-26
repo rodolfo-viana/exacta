@@ -18,6 +18,9 @@ enum exacta_status {
   EXACTA_INVALID_ARGUMENT = 1,
   EXACTA_OUT_OF_MEMORY = 2,
   EXACTA_INTERNAL_ERROR = 3,
+  /* The arguments are valid, but the computation would leave the numeric range in which the
+   * kernel is exact (see exacta_edt_sq_f64). */
+  EXACTA_OUT_OF_RANGE = 4,
 };
 
 const char *exacta_status_string(int status);
@@ -62,13 +65,24 @@ int exacta_soft_pool_f64(const double *x, double *out, int64_t *indices,
  * units of `spacing` (one value in [1e-100, 1e100] per remaining axis), to the nearest nonzero
  * element of `features` in the same image; +inf if that image has none. `num_threads` <= 0 uses the OpenMP
  * default.
+ *
+ * Exactness is guaranteed only inside the range its proof assumes, and the kernel enforces it
+ * before writing anything: every axis other than the batch axes has at most 2^40 samples, and for
+ * each pass, along an axis of spacing h and n samples, (B + (h n)^2) / h <= 1e300, where B is the
+ * sum over the previous axes of (h' (n' - 1))^2. Otherwise it returns EXACTA_OUT_OF_RANGE (the
+ * Python wrapper rejects such grids with a ValueError before calling). Shapes with a zero
+ * extent are checked the same way. Invalid shapes or spacings give EXACTA_INVALID_ARGUMENT.
  */
 int exacta_edt_sq_f64(const uint8_t *features, double *out, const int64_t *shape, int ndim,
                       int batch_ndim, const double *spacing, int num_threads);
 
 /* One pass of that transform over `lines` independent lines of `n` values each, for testing:
- * out[q] = min over p with finite f[p] of (h*(q - p))^2 + f[p], rounded as written. Finite
- * inputs must lie in [0, bound]; +inf marks samples without a parabola.
+ * out[q] = min over p with finite f[p] of (h*(q - p))^2 + f[p], rounded as written. The proof of
+ * exactness needs every f[p] in [0, bound] or +inf (a sample without a parabola), h in
+ * [1e-100, 1e100], n <= 2^40 and (bound + (h n)^2) / h <= 1e300; the kernel checks them all
+ * before writing anything. It returns EXACTA_INVALID_ARGUMENT for a NaN, negative or -inf f[p],
+ * an f[p] above `bound`, an h outside its range or a `bound` that is not finite and nonnegative,
+ * and EXACTA_OUT_OF_RANGE for n > 2^40 or (bound + (h n)^2) / h > 1e300.
  */
 int exacta_edt_lines_f64(const double *f, double *out, int64_t lines, int64_t n, double h,
                          double bound);
@@ -237,7 +251,9 @@ int exacta_sort_pairs_f64(double *keys, double *values, int64_t n, int num_threa
  * rounded once; w = NULL means 1) over the i with select[i] != 0 (select = NULL selects all),
  * rounded once to the nearest double, ties to even, as Python's math.fsum. The result does not
  * depend on the order of the terms. Non-finite terms give their IEEE sum (inf, -inf or NaN);
- * a partial sum that overflows gives +-inf.
+ * a partial sum that overflows gives +-inf, even if the exact sum is finite (math.fsum raises
+ * OverflowError there), and the order of the terms then matters. The sum runs serially on the
+ * calling thread.
  */
 int exacta_exact_sum_f64(const double *x, const double *w, const uint8_t *select, int64_t n,
                          double *sum);

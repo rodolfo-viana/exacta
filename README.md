@@ -32,6 +32,9 @@ python -m pip install exacta==0.1.2
 Binary wheels target Linux x86-64 with glibc 2.28 or newer: Python 3.10 and 3.11 wheels,
 plus a Python 3.12 stable-ABI wheel for Python 3.12 and newer. Other platforms install
 from source and require a C++17 compiler and Python development headers; OpenMP is optional.
+The kernels must be compiled without fused multiply-adds, so the build accepts only GCC, Clang
+(Apple clang included), Intel icx and MSVC 2022 or later, gives each its flags and stops with an
+error for any other compiler; the CI tests GCC, Clang and Apple clang.
 SciPy is an optional dependency for Hungarian lesion matching.
 
 For distributed CPU evaluation with Gloo, use **PyTorch 2.8+** to avoid an older

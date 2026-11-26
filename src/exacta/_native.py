@@ -41,6 +41,12 @@ def regression_stats(pred: Tensor, target: Tensor, mask: Tensor | None, weight: 
 # the binary64 maximum (about 1.8e308), as the exactness argument assumes.
 EDT_MAX_SCALE = 1e300
 
+# Longest line the exactness proof covers; far beyond any array that fits in memory.
+EDT_MAX_LINE = 2**40
+
+# Spacings for which no quantity of a pass underflows or overflows on its own.
+EDT_SPACING_RANGE = (1e-100, 1e100)
+
 
 def check_edt_extent(shape: Sequence[int], spacing: Sequence[float]) -> None:
     """Raise ``ValueError`` if a grid could overflow the exact squared distance transform.
@@ -50,7 +56,9 @@ def check_edt_extent(shape: Sequence[int], spacing: Sequence[float]) -> None:
     axes before it plus ``(h * n)^2``. Spacings in [1e-100, 1e100] keep ``M`` finite, but an
     extremely anisotropic grid with long lines can still make ``M / h`` overflow, and then the
     result would no longer be the exact minimum. Ordinary images are many orders of magnitude
-    inside the limit.
+    inside the limit. The compiled kernel (``exacta_edt_sq_f64``) enforces the same limits, and
+    lines of more than ``EDT_MAX_LINE`` samples, so that no caller of the C interface can leave
+    the range of the exactness proof.
     """
     valid = all(math.isfinite(float(h)) and float(h) > 0 for h in spacing)
     if len(spacing) != len(shape) or not valid:
@@ -58,6 +66,11 @@ def check_edt_extent(shape: Sequence[int], spacing: Sequence[float]) -> None:
     bound = 0.0
     for n, h in zip(shape, spacing):
         h = float(h)
+        if n > EDT_MAX_LINE:
+            raise ValueError(
+                f"a line of {n} samples is too long for the exact distance transform, "
+                f"which is proved for at most {EDT_MAX_LINE}"
+            )
         xmax = h * float(n)
         scale = (bound + xmax * xmax) / h
         if not scale <= EDT_MAX_SCALE:
@@ -78,7 +91,8 @@ def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> T
     SciPy's ``distance_transform_edt`` evaluates. The first ``batch_ndim`` axes index separate
     images, and ``spacing`` covers the others. CPU only. Returns float64; ``inf`` throughout an
     image without nonzero voxels. Raises ``ValueError`` for grids so anisotropic that the
-    transform could overflow (see :func:`check_edt_extent`).
+    transform could overflow (see :func:`check_edt_extent`); the compiled kernel applies the
+    same check, so calling ``exacta._C.edt_sq`` directly raises the same error.
     """
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
@@ -89,15 +103,45 @@ def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> T
     return out
 
 
+def check_edt_lines(f: Tensor, h: float, bound: float) -> None:
+    """Raise ``ValueError`` unless ``f`` (``(lines, n)``), ``h`` and ``bound`` meet the assumptions
+    of the exactness proof for one pass of :func:`edt_sq`.
+
+    Every entry of ``f`` must be ``inf`` (a sample without a parabola) or lie in ``[0, bound]``, so
+    NaN, negative and ``-inf`` values are rejected; ``h`` must lie in ``[1e-100, 1e100]`` and
+    ``bound`` be finite and nonnegative; and the pass must satisfy the range limit of
+    :func:`check_edt_extent`, ``(bound + (h n)^2) / h <= EDT_MAX_SCALE``, with ``n`` at most
+    ``EDT_MAX_LINE``. The compiled kernel ``exacta_edt_lines_f64`` checks the same conditions.
+    """
+    h, bound = float(h), float(bound)
+    if not EDT_SPACING_RANGE[0] <= h <= EDT_SPACING_RANGE[1] or not 0.0 <= bound < math.inf:
+        raise ValueError("edt_lines: h must lie in [1e-100, 1e100] and bound be finite and >= 0")
+    n = f.shape[-1] if f.ndim else 0
+    if n > EDT_MAX_LINE:
+        raise ValueError(f"edt_lines: {n} samples per line exceed the {EDT_MAX_LINE} of the proof")
+    if not (bound + (h * float(n)) ** 2) / h <= EDT_MAX_SCALE:
+        raise ValueError(
+            f"edt_lines: a pass with spacing {h:g}, bound {bound:g} and {n} samples is too "
+            f"anisotropic for the exact distance transform: (bound + (h n)^2) / h exceeds "
+            f"{EDT_MAX_SCALE:g}"
+        )
+    if f.numel() and not bool(((f == math.inf) | ((f >= 0) & (f <= bound))).all()):
+        raise ValueError("edt_lines: every value of f must be inf or lie in [0, bound]")
+
+
 def edt_lines(f: Tensor, h: float, bound: float) -> Tensor:
     """One pass of :func:`edt_sq` over each row of ``f`` (float64, ``(lines, n)``), for testing.
 
     ``out[q] = min_p fl(fl(fl(h * (q - p))^2) + f[p])`` over ``p`` with finite ``f[p]``; finite
-    values must lie in ``[0, bound]``, and ``inf`` marks samples without a parabola.
+    values must lie in ``[0, bound]``, and ``inf`` marks samples without a parabola. Raises
+    ``ValueError`` if the input leaves the assumptions of the exactness proof (see
+    :func:`check_edt_lines`): a value that is NaN, negative or above ``bound``, or a pass whose
+    ``(bound + (h n)^2) / h`` exceeds ``EDT_MAX_SCALE``.
     """
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
     f = f.to(torch.float64).contiguous()
+    check_edt_lines(f, h, bound)
     out = torch.empty_like(f)
     _C.edt_lines(f, out, float(h), float(bound))
     return out
@@ -266,7 +310,13 @@ def masked_sqrt(values: Tensor, mask: Tensor) -> Tensor:
 def exact_sum(x: Tensor, w: Tensor | None = None, select: Tensor | None = None) -> float:
     """Correctly rounded sum of ``x * w`` (each product rounded once) over ``select``, as
     :func:`math.fsum` would return it: the same bits for any order of the terms, number of
-    threads or device. Tensors are copied to the CPU as float64."""
+    threads or device. Tensors are copied to the CPU as float64.
+
+    The sum is computed serially on the host, so a GPU input pays for the copy and nothing else
+    can make the result depend on the device. If a partial sum overflows, the result is ``inf``
+    (or ``-inf``) even when the exact sum is finite, whereas :func:`math.fsum` raises
+    ``OverflowError``; the order of the terms matters only in that case.
+    """
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
     flat = x.detach().to("cpu", torch.float64).contiguous().reshape(-1)

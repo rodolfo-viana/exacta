@@ -8,6 +8,17 @@
 // them exactly with two-sum, and the partials are rounded to one double at the end.
 // J. R. Shewchuk, "Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric
 // Predicates", Discrete & Computational Geometry 18 (1997).
+//
+// Two properties are design choices, not consequences of the algorithm:
+//  - Intermediate overflow. When a partial sum overflows, the function returns +-inf even if the
+//    exact sum is finite, where math.fsum raises OverflowError: the terms DBL_MAX, DBL_MAX,
+//    -DBL_MAX give inf, and in the order DBL_MAX, -DBL_MAX, DBL_MAX they give DBL_MAX. The result
+//    is therefore independent of the order of the terms only while no partial sum overflows.
+//    A product x[i] * w[i] that overflows is a non-finite term, added as IEEE adds inf.
+//  - Serial host code. The sum runs on one host thread, in index order, so it cannot depend on a
+//    thread count or a device; a GPU input is copied to the host first (exact_sum in _native.py)
+//    at the cost of that transfer. The agreement between devices is therefore by construction,
+//    not a property of a parallel algorithm.
 
 #include <cmath>
 #include <cstdint>
