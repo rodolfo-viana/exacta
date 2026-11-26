@@ -2,7 +2,9 @@
 
 Release notes for Exacta.
 
-## Unreleased
+## 0.1.2 — 2026-11-26
+
+Version 0.1.2 makes every surface-distance score bit-reproducible across machines.
 
 - **Fix:** ASSD and NSD with surfel or mesh weights could differ in the last bits with the number
   of PyTorch threads and between CPU and GPU, because PyTorch's parallel sums split the terms

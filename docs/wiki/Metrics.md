@@ -111,7 +111,7 @@ version, in one string to report next to the number:
 from exacta.conventions import parse_signature, signature
 
 text = signature("nsd", tolerance=2.0)
-# 'nsd[both_empty=nan;one_empty=0.0;surface=voxels;tie_rtol=1e-06;tolerance=2.0]@exacta-0.1.1'
+# 'nsd[both_empty=nan;one_empty=0.0;surface=voxels;tie_rtol=1e-06;tolerance=2.0]@exacta-0.1.2'
 name, options, version = parse_signature(text)  # options for functional.evaluate
 ```
 
