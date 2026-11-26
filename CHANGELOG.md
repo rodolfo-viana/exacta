@@ -11,8 +11,9 @@ Release notes for Exacta.
   arithmetic, which `tie_rtol=0` decides by the last bit of the distance. On 24 test cases (spacings
   1 and 0.5, tolerances 1 and 2), 13 differed from MeshMetrics by up to 0.004 in NSD before and all
   agree to 1e-12 on x86-64 now. The agreement is not general: MeshMetrics computes a coordinate as
-  `origin + index * spacing` and exacta as `index * spacing`, which differ in the last bit when the
-  product is inexact (NSD differs by up to 0.004 at spacing 0.3 and tolerances 0.6 and 0.9); the
+  `origin + index * spacing` and exacta as `index * spacing`, which can differ in the last bit when
+  the product is inexact (at spacing 0.3 with tolerances 0.6 and 0.9, NSD differed by several
+  thousandths, up to 0.008 in the cases tried); the
   closest point of a triangle comes from different algorithms; SimpleITK inputs and
   `compute_metrics_multilabel` use other grids; and MeshMetrics' VTK rounds ties differently on
   Linux aarch64 and macOS arm64 than on x86-64 (its NSD differed from exacta's in 22 of 32 test

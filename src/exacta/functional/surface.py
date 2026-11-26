@@ -58,16 +58,17 @@ masks (the bounding box of both, starting one voxel before it), so that vertex c
 measured from the same voxel; this removes many of those differences, but not all of them:
 
     * MeshMetrics computes a coordinate as ``origin + index * spacing`` and exacta as
-      ``index * spacing``, which differ in the last bit unless the product is exact (spacing 1 or
-      0.5, for instance).
+      ``index * spacing``, which can differ in the last bit unless the product is exact (spacing 1
+      or 0.5, for instance).
     * The two tools find the closest point of a triangle by different algorithms.
     * MeshMetrics' result depends on the platform: the VTK 9.7.1 wheel for Linux aarch64 fuses
       multiplications and additions and the x86-64 wheel does not, and on Linux aarch64 and macOS
       arm64 MeshMetrics decides ties differently from x86-64 (exacta does not fuse them).
     * MeshMetrics meshes SimpleITK images and ``compute_metrics_multilabel`` on other grids.
 
-Bit-for-bit agreement at ties was therefore observed only with exact coordinates, NumPy masks and
-x86-64. Elsewhere only ties differ: in the tests, MeshMetrics' NSD lies between exacta's at
+Bit-for-bit agreement at ties was therefore observed only with exact coordinates, NumPy masks,
+x86-64 and the tolerances of the tests (1 and 2); with exact coordinates and a tolerance of
+sqrt(3), the closest-point algorithms still split some ties. Elsewhere only ties differ: in the tests, MeshMetrics' NSD lies between exacta's at
 ``tolerance * (1 - 1e-9)`` and with ``tie_rtol=1e-9``. The default margin counts every tie as
 within, whichever tool and platform; use it for results that must not depend on either.
 
