@@ -12,6 +12,10 @@ Release notes for Exacta.
 - **Tests:** a GPU test checks that the Triton kernels' binary64 arithmetic is what the exactness
   argument assumes: every add, subtract, multiply and divide rounded once, and no fused
   multiply-add. The C++ and Triton passes now point to the lines of the published pseudo-code.
+- **Tests:** a Portability CI workflow builds the source distribution and runs the test suite on
+  Linux x86-64 with Clang and OpenMP, Linux aarch64 and macOS arm64 (Apple clang, without OpenMP),
+  and checks that a fixed set of results (`scripts/portability_digest.py`) is bit-identical on all
+  of them.
 
 ## 0.1.2 — 2026-11-26
 

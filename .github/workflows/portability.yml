@@ -1,0 +1,232 @@
+name: Portability CI
+
+# Builds the source distribution from scratch and runs the test suite on platforms and compilers
+# other than the Linux x86-64 GCC job of Development CI, then compares a bit-level digest of
+# fixed results across all of them. Used as portability evidence for the TOMS submission.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portability-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  platform:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Reference for the digest comparison only: Development CI already runs the tests here.
+          - id: linux-x86-64-gcc
+            name: Linux x86-64, GCC (digest only)
+            runner: ubuntu-24.04
+            python: "3.10"
+            torch: "torch==2.4.1"
+            numpy: "numpy<2"
+            tests: false
+            cc: gcc
+            cxx: g++
+          - id: linux-x86-64-clang
+            name: Linux x86-64, Clang 18 with OpenMP
+            runner: ubuntu-24.04
+            python: "3.10"
+            torch: "torch==2.4.1"
+            numpy: "numpy<2"
+            tests: true
+            apt: "clang-18 libomp-18-dev"
+            cc: clang-18
+            cxx: clang++-18
+          - id: linux-aarch64-gcc
+            name: Linux aarch64 (Arm), GCC
+            runner: ubuntu-24.04-arm
+            python: "3.10"
+            torch: "torch==2.4.1"
+            numpy: "numpy<2"
+            tests: true
+            cc: gcc
+            cxx: g++
+          - id: macos-15-arm64-appleclang
+            name: macOS 15 arm64 (Apple silicon), Apple clang, no OpenMP
+            runner: macos-15
+            python: "3.10"
+            torch: "torch==2.4.1"
+            numpy: "numpy<2"
+            tests: true
+            cc: clang
+            cxx: clang++
+          - id: macos-26-arm64-appleclang-latest
+            name: macOS 26 arm64 (Apple silicon), Apple clang, latest PyTorch and NumPy 2
+            runner: macos-26
+            python: "3.12"
+            torch: "torch"
+            numpy: "numpy"
+            tests: true
+            cc: clang
+            cxx: clang++
+          # The same suite with the reference tools the tests compare against (otherwise skipped),
+          # pinned to the versions of the paper's experiments, on the latest PyTorch and NumPy 2.
+          - id: linux-x86-64-gcc-references
+            name: Linux x86-64, GCC, with reference tools
+            runner: ubuntu-24.04
+            python: "3.12"
+            torch: "torch"
+            numpy: "numpy"
+            tests: true
+            references: true
+            cc: gcc
+            cxx: g++
+          - id: linux-aarch64-gcc-references
+            name: Linux aarch64 (Arm), GCC, with reference tools
+            runner: ubuntu-24.04-arm
+            python: "3.12"
+            torch: "torch"
+            numpy: "numpy"
+            tests: true
+            references: true
+            cc: gcc
+            cxx: g++
+          - id: macos-26-arm64-appleclang-references
+            name: macOS 26 arm64 (Apple silicon), Apple clang, with reference tools
+            runner: macos-26
+            python: "3.12"
+            torch: "torch"
+            numpy: "numpy"
+            tests: true
+            references: true
+            cc: clang
+            cxx: clang++
+    defaults:
+      run:
+        shell: bash
+    env:
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
+      # Torch 2.4's compiler enables an internal decomposition assertion whenever
+      # CI is nonempty. It fails on valid NLL operations; fullgraph tests stay on.
+      CI: ""
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the compiler packages
+        if: matrix.apt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+      - name: Record the machine and the toolchain
+        run: |
+          echo "== system"
+          uname -a
+          if [ "$(uname -s)" = Darwin ]; then
+            sw_vers
+            sysctl -n machdep.cpu.brand_string
+            sysctl hw.ncpu hw.memsize
+            xcode-select -p
+          else
+            lscpu | grep -E 'Architecture|Model name|^CPU\(s\)|Thread|Flags' | cut -c1-120
+          fi
+          echo "== compiler (CC=${{ matrix.cc }} CXX=${{ matrix.cxx }})"
+          ${{ matrix.cxx }} --version
+          cmake --version | head -1
+          python --version
+      - name: Build the source distribution
+        timeout-minutes: 5
+        run: |
+          python -m pip install build==1.6.1
+          python -m build --sdist
+      - name: Install PyTorch, the test dependencies and the source distribution
+        timeout-minutes: 15
+        # The compiler choice applies to building the extension only; PyTorch's own JIT keeps
+        # its default compiler.
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "${{ matrix.torch }}"
+          if ! python -m pip install -v -C build.verbose=true "${{ matrix.numpy }}" dist/*.tar.gz \
+              pytest hypothesis scipy 'setuptools>=70' > install.log 2>&1; then
+            tail -n 120 install.log
+            exit 1
+          fi
+          echo "== build log excerpts"
+          grep -E 'The CXX compiler identification|Found OpenMP|OpenMP_CXX|Could NOT find OpenMP' install.log || true
+          echo "compiler invocations with -ffp-contract=off: $(grep -c -- '-ffp-contract=off' install.log || true)"
+          echo "warnings in csrc: $(grep -c 'csrc/.*warning:' install.log || true)"
+          python - <<'PY'
+          import exacta, exacta._C, numpy, platform, scipy, torch
+          print("exacta", exacta.__version__, exacta.__file__)
+          print("extension", exacta._C.__file__)
+          print("python", platform.python_version(), platform.machine())
+          print("torch", torch.__version__, "numpy", numpy.__version__, "scipy", scipy.__version__)
+          print("torch threads", torch.get_num_threads())
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-log-${{ matrix.id }}
+          path: install.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Install the reference tools
+        if: matrix.references
+        timeout-minutes: 10
+        run: |
+          python -m pip install monai==1.6.1 MedPy==0.5.2 pymeshmetrics==1.4.1 \
+            scikit-image==0.26.0 scikit-learn==1.9.1 simpleitk==2.5.6 vtk==9.7.1 \
+            "git+https://github.com/google-deepmind/surface-distance.git@1f805cea446805e559badc80dd27f34175e4173d"
+          python -m pip list 2>/dev/null | grep -i -E '^(monai|medpy|pymeshmetrics|scikit-image|scikit-learn|simpleitk|vtk|surface|torch|numpy|scipy) '
+      - name: Show the libraries the compiled extension links against
+        run: |
+          ext="$(python -c 'import exacta._C as c; print(c.__file__)')"
+          if [ "$(uname -s)" = Darwin ]; then otool -L "$ext"; else ldd "$ext"; fi
+      - name: Test the installed source distribution
+        if: matrix.tests
+        timeout-minutes: 30
+        run: |
+          # Gloo on macOS runners otherwise loses about 70 s per distributed test resolving
+          # the host name; the interface is the only change.
+          if [ "$(uname -s)" = Darwin ]; then export GLOO_SOCKET_IFNAME=lo0; fi
+          python -m pytest -v -ra --durations=10 -o faulthandler_timeout=300
+      - name: Digest fixed results bit for bit
+        run: python scripts/portability_digest.py run --out digest/digest.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.id }}
+          path: digest/digest.json
+          if-no-files-found: error
+          retention-days: 7
+
+  compare:
+    name: Compare digests across platforms
+    needs: platform
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          path: digests
+      - name: Compare
+        run: python scripts/portability_digest.py compare digests/*/digest.json
