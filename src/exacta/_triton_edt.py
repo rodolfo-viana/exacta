@@ -68,20 +68,40 @@ def _transform(features: Tensor, spacing: Sequence[float], batch_ndim: int) -> T
         n = out.shape[axis]
         tol = _tolerance(spacing, out.shape[batch_ndim:], axis - batch_ndim)
         stride = math.prod(out.shape[axis + 1 :])
-        lines = total // n
-        programs = min(triton.cdiv(lines, _BLOCK), max(1, _SCRATCH_BYTES // (_BLOCK * (n + 1) * 20)))
-        # Scratch only for lanes that have a line: a few very long lines would otherwise get a full
-        # block of stacks each. Lanes past the last line never touch their (absent) column.
-        lanes = min(programs * _BLOCK, lines)
-        v = torch.empty((n + 1) * lanes, dtype=torch.int32, device=out.device)
-        z = torch.empty((n + 1) * lanes, dtype=torch.float64, device=out.device)
-        g = torch.empty((n + 1) * lanes, dtype=torch.float64, device=out.device)
-        consts = torch.tensor([float(h), tol], dtype=torch.float64, device=out.device)
-        _edt_pass[(programs,)](
-            out, buf, v, z, g, consts, n, stride, lines, lanes,
-            BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False,
-        )
+        _pass(out, buf, float(h), tol, n, stride, total // n)
         out, buf = buf, out
+    return out
+
+
+def _pass(src: Tensor, dst: Tensor, h: float, tol: float, n: int, stride: int, lines: int) -> None:
+    programs = min(triton.cdiv(lines, _BLOCK), max(1, _SCRATCH_BYTES // (_BLOCK * (n + 1) * 28)))
+    # Scratch only for lanes that have a line: a few very long lines would otherwise get a full
+    # block of stacks each. Lanes past the last line never touch their (absent) column.
+    lanes = min(programs * _BLOCK, lines)
+    v = torch.empty((n + 1) * lanes, dtype=torch.int32, device=src.device)
+    z = torch.empty((n + 1) * lanes, dtype=torch.float64, device=src.device)
+    b = torch.empty((n + 1) * lanes, dtype=torch.float64, device=src.device)
+    g = torch.empty((n + 1) * lanes, dtype=torch.float64, device=src.device)
+    consts = torch.tensor([h, tol], dtype=torch.float64, device=src.device)
+    _edt_pass[(programs,)](
+        src, dst, v, z, b, g, consts, n, stride, lines, lanes,
+        BLOCK=_BLOCK, num_warps=1, enable_fp_fusion=False,
+    )
+
+
+def edt_lines(f: Tensor, h: float, bound: float) -> Tensor:
+    """One pass over each row of ``f`` (CUDA float64, ``(lines, n)``, ``inf`` where there is no
+    parabola, finite values in ``[0, bound]``), as ``exacta._native.edt_lines``. For testing."""
+    if triton is None:
+        raise RuntimeError("Triton is not installed")
+    f = f.contiguous()
+    out = torch.empty_like(f)
+    lines, n = f.shape
+    if out.numel():
+        xmax = float(h) * float(n)
+        tol = 64.0 * torch.finfo(torch.float64).eps * (float(bound) + xmax * xmax) / float(h)
+        with torch.cuda.device(f.device):
+            _pass(f, out, float(h), tol, n, 1, lines)
     return out
 
 
@@ -141,7 +161,7 @@ if triton is not None:
 
     # Sizes stay runtime values: Triton would otherwise turn those equal to 1 into constants.
     @triton.jit(do_not_specialize=["n", "stride", "lines", "lanes"])
-    def _edt_pass(src, dst, v_buf, z_buf, g_buf, consts, n, stride, lines, lanes, BLOCK: tl.constexpr):
+    def _edt_pass(src, dst, v_buf, z_buf, b_buf, g_buf, consts, n, stride, lines, lanes, BLOCK: tl.constexpr):
         pid = tl.program_id(0)
         lane = tl.arange(0, BLOCK)
         slot = (pid * BLOCK + lane).to(tl.int64)  # this lane's column in the scratch stacks
@@ -156,7 +176,8 @@ if triton is not None:
             valid = line < lines
             base = (line // stride) * n * stride + line % stride
 
-            # Lower envelope; k is the top of each lane's stack (-1: empty).
+            # Lower envelope; k is the top of each lane's stack (-1: empty). b holds each entry's
+            # breakpoint with the entry below it, z their running maximum (see csrc/cpu/edt.cpp).
             k = tl.full([BLOCK], -1, dtype=tl.int32)
             for q in range(0, n):
                 fq = tl.load(src + base + q * stride, mask=valid, other=inf)
@@ -164,19 +185,19 @@ if triton is not None:
                 xq = h * q.to(tl.float64)
                 gq = fq + xq * xq
                 # Breakpoint num / den with the top of the stack; pops compare num with
-                # (z - tol) * den (den > 0), so only the breakpoint that is kept is divided.
+                # (b - tol) * den (den > 0), so only the breakpoint that is kept is divided.
                 num = tl.zeros([BLOCK], dtype=tl.float64)
                 den = tl.full([BLOCK], 1.0, dtype=tl.float64)
                 active = finite & (k >= 0)
                 while tl.max(active.to(tl.int32), axis=0) > 0:
                     at = _slot(k, lanes, slot)
                     vk = tl.load(v_buf + at, mask=active, other=0)
-                    zk = tl.load(z_buf + at, mask=active, other=0.0)
+                    bk = tl.load(b_buf + at, mask=active, other=0.0)
                     gv = tl.load(g_buf + at, mask=active, other=0.0)  # f[v] + xv * xv
                     xv = h * vk.to(tl.float64)
                     num = tl.where(active, gq - gv, num)
                     den = tl.where(active, 2.0 * (xq - xv), den)
-                    pop = active & (num <= (zk - tol) * den)  # v[k] neither lowest anywhere nor tied
+                    pop = active & (num <= (bk - tol) * den)  # v[k] neither lowest anywhere nor tied
                     k = tl.where(pop, k - 1, k)
                     active = pop & (k >= 0)
                 s = tl.where(k >= 0, num / den, -inf)  # an empty stack stays empty only before the first push
@@ -185,8 +206,17 @@ if triton is not None:
                 z_prev = tl.load(z_buf + at - lanes, mask=finite & (k > 0), other=-inf)
                 tl.store(v_buf + at, q + tl.zeros([BLOCK], dtype=tl.int32), mask=finite)
                 tl.store(g_buf + at, gq, mask=finite)
+                tl.store(b_buf + at, s, mask=finite)
                 tl.store(z_buf + at, tl.where(k == 0, s, tl.maximum(s, z_prev)), mask=finite)
                 tl.store(z_buf + at + lanes, tl.full([BLOCK], inf, dtype=tl.float64), mask=finite)
+
+            # Suffix minimum of b, stored back into b, bounds where entries above j can be lowest.
+            for r in range(1, n):
+                i = n - 1 - r
+                inner = valid & (i < k)
+                b_up = tl.load(b_buf + _slot(i + 1 + tl.zeros([BLOCK], dtype=tl.int32), lanes, slot), mask=inner, other=0.0)
+                b_i = tl.load(b_buf + _slot(i + tl.zeros([BLOCK], dtype=tl.int32), lanes, slot), mask=inner, other=0.0)
+                tl.store(b_buf + _slot(i + tl.zeros([BLOCK], dtype=tl.int32), lanes, slot), tl.minimum(b_i, b_up), mask=inner)
 
             # Evaluate: the envelope's parabola and every parabola tied with it near xq.
             has = valid & (k >= 0)
@@ -212,13 +242,13 @@ if triton is not None:
                     scan = scan & (i >= 0) & (z_end >= xq - tol)
 
                 i = j + 1
-                z_start = tl.load(z_buf + _slot(i, lanes, slot), mask=has & (i <= k), other=inf)
-                scan = has & (i <= k) & (z_start <= xq + tol)
+                b_min = tl.load(b_buf + _slot(i, lanes, slot), mask=has & (i <= k), other=inf)
+                scan = has & (i <= k) & (b_min <= xq + tol)
                 while tl.max(scan.to(tl.int32), axis=0) > 0:
                     vi = tl.load(v_buf + _slot(i, lanes, slot), mask=scan, other=0)
                     best = tl.where(scan, tl.minimum(best, _parabola(src, base, stride, h, q, vi, scan)), best)
                     i = tl.where(scan, i + 1, i)
-                    z_start = tl.load(z_buf + _slot(i, lanes, slot), mask=scan & (i <= k), other=inf)
-                    scan = scan & (i <= k) & (z_start <= xq + tol)
+                    b_min = tl.load(b_buf + _slot(i, lanes, slot), mask=scan & (i <= k), other=inf)
+                    scan = scan & (i <= k) & (b_min <= xq + tol)
 
                 tl.store(dst + base + q * stride, tl.where(has, best, inf), mask=valid)

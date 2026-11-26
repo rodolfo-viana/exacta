@@ -46,6 +46,24 @@ void edt_sq(nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig> featu
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }
 
+void edt_lines(nb::ndarray<const double, nb::ndim<2>, nb::device::cpu, nb::c_contig> f,
+               nb::ndarray<double, nb::ndim<2>, nb::device::cpu, nb::c_contig> out, double h,
+               double bound) {
+  if (out.shape(0) != f.shape(0) || out.shape(1) != f.shape(1)) {
+    throw std::invalid_argument("f and out must have the same shape");
+  }
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_edt_lines_f64(f.data(), out.data(), static_cast<std::int64_t>(f.shape(0)),
+                                  static_cast<std::int64_t>(f.shape(1)), h, bound);
+  }
+  if (status == EXACTA_INVALID_ARGUMENT) {
+    throw std::invalid_argument("edt_lines: h must lie in [1e-100, 1e100], bound be finite >= 0");
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+}
+
 std::int64_t label(nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig> mask,
                   nb::ndarray<std::int32_t, nb::device::cpu, nb::c_contig> out, int connectivity) {
   const int ndim = static_cast<int>(mask.ndim());
@@ -583,6 +601,9 @@ NB_MODULE(_C, m) {
         "Write into `out` (float64, same shape) the squared Euclidean distance from every element "
         "to the nearest nonzero element of `features` (uint8) in the same image, with `spacing` "
         "for each axis after the first `batch_ndim` (which index images).");
+  m.def("edt_lines", &edt_lines, nb::arg("f"), nb::arg("out"), nb::arg("h"), nb::arg("bound"),
+        "One distance-transform pass over each row of `f` (float64, (lines, n); +inf where there is "
+        "no parabola, finite values in [0, bound]), written to `out`. For testing.");
   const char *extents_doc =
       "Write into `lo` and `hi` (int64, (num_classes, ndim)) the first and last index along each "
       "axis of every class of the label map `labels`; shape and -1 where a class is absent.";
