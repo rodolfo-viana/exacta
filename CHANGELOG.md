@@ -2,6 +2,10 @@
 
 Release notes for Exacta.
 
+## Unreleased
+
+Changes for the next release will be recorded here.
+
 ## 0.1.0 — 2026-11-25
 
 Version 0.1.0 is the first release outside the alpha series. NSD now counts
