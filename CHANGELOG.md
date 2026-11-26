@@ -110,7 +110,7 @@ Release notes for Exacta.
   deterministic synthetic inputs, and `tests/test_example_driver.py` compares its output with
   `examples/driver_expected.txt` (the losses, whose last bits depend on the PyTorch build, to a
   relative `1e-9`; everything else, the mesh scores included, as text).
-  `pytest -m referee` runs 666 of the tests (`tests/referee_subset.txt`; about 1 minute on CPU with the
+  `pytest -m referee` runs 726 of the tests (`tests/referee_subset.txt`; under 2 minutes on CPU with the
   reference tools installed). The LaTeX sources of the user manual are in `docs/manual/`;
   `docs/manual/build.sh` builds the PDF, which is not tracked.
 - **Fixed arithmetic of the scores:** every surface score is now a fixed binary64 expression of the
