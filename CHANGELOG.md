@@ -73,7 +73,8 @@ Release notes for Exacta.
   of them.
 - **Documentation and tests for referees:** `examples/driver.py` runs a short tour of the public API on
   deterministic synthetic inputs, and `tests/test_example_driver.py` compares its output with
-  `examples/driver_expected.txt` (losses to a relative `1e-9`, everything else as text).
+  `examples/driver_expected.txt` (the losses and the mesh ASSD and NSD, whose last bits depend on
+  the PyTorch build, to a relative `1e-9`; everything else as text).
   `pytest -m referee` runs 614 of the tests (`tests/referee_subset.txt`; about 25 s on CPU with the
   reference tools installed). The LaTeX sources of the user manual are in `docs/manual/`;
   `docs/manual/build.sh` builds the PDF, which is not tracked.

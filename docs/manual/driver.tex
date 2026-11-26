@@ -47,8 +47,11 @@ representable in binary, so products such as $3\times0.4$ are inexact in binary6
 Numbers are written with Python's \texttt{repr}, which prints a float64 with the digits needed to
 read it back bit for bit. Lines without a marker come from computations that Exacta rounds or
 counts exactly; they are the same on every platform, thread count and device. Lines that end
-with \texttt{(approx)} are the losses, whose last bits depend on the PyTorch build and the
-device; the test compares them to a relative tolerance of $10^{-9}$ and everything else as text.
+with \texttt{(approx)} are the losses, which run on PyTorch operations or fused Triton kernels, and
+ASSD and NSD with mesh weights, which sum triangle areas that PyTorch computes (a cross product
+and a norm). The last bits of both depend on the PyTorch build and the device: the mesh ASSD
+differed by one unit in the last place on Linux aarch64 with PyTorch 2.15, and not with 2.4.1.
+The test compares these lines to a relative tolerance of $10^{-9}$ and everything else as text.
 
 \section{Reading the output}\label{driver:reading}
 

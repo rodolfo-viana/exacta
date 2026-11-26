@@ -47,7 +47,9 @@ triangle centres), not for the continuous shape that the mask samples. &
 \texttt{test\_surface.py}, \texttt{test\_surfels.py}, \texttt{test\_mesh.py} \\
 ASSD, weighted NSD &
 Sums over surface elements are correctly rounded (the exact sum rounded once), so the bits do
-not depend on element order, thread count or device. &
+not depend on element order, thread count or device. The weights are one for voxels and come
+from tables for surfels; for meshes they are triangle areas computed with PyTorch operations,
+whose last bit can depend on the PyTorch build. &
 \texttt{test\_sums.py} \\
 Mesh distances &
 Distances from triangle centres to the other mesh are minima of binary64 point--triangle

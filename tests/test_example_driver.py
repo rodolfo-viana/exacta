@@ -57,17 +57,33 @@ def _differences(actual: str, expected: str) -> list[str]:
             out.append(f"line {number}: {a!r} != {b!r}")
             continue
         (label_a, _, value_a), (label_b, _, value_b) = (x[: -len(APPROX)].partition(": ") for x in (a, b))
-        if label_a != label_b or not math.isclose(float(value_a), float(value_b), rel_tol=RTOL, abs_tol=0.0):
+        close = label_a == label_b and _close(_numbers(value_a), _numbers(value_b))
+        if not close:
             out.append(f"line {number}: {a!r} !~ {b!r}")
     return out
+
+
+def _numbers(text: str) -> list[float]:
+    """The floats of a value written as '1.5' or '[1.5 2.5]'."""
+    return [float(word) for word in text.strip("[]").split()]
+
+
+def _close(a: list[float], b: list[float]) -> bool:
+    return len(a) == len(b) and all(math.isclose(x, y, rel_tol=RTOL, abs_tol=0.0) for x, y in zip(a, b))
 
 
 def test_expected_output_is_complete_and_marks_what_is_approximate():
     lines = EXPECTED.read_text().splitlines()
     approx = [line for line in lines if line.endswith(APPROX)]
     assert lines[-1] == "all checks passed: True"
-    assert len(approx) == 4 and all(line.startswith(("DiceLoss", "DiceCELoss")) for line in approx)
-    assert not any("nan" in line.split(": ", 1)[-1] for line in lines if line.endswith(APPROX))
+    # Only losses and area-weighted mesh scores (PyTorch computes the areas) are approximate; the
+    # distance transform, Hausdorff distances and voxel/surfel scores must stay exact lines.
+    assert len(approx) == 9
+    assert all(
+        line.startswith(("DiceLoss", "DiceCELoss", "assd.mesh", "nsd.mesh", "meshmetrics.assd", "meshmetrics.nsd"))
+        for line in approx
+    )
+    assert not any("nan" in line.split(": ", 1)[-1] for line in approx)
 
 
 def test_driver_prints_the_expected_output():
