@@ -30,6 +30,40 @@ Release notes for Exacta.
   e.g. spacings `1e100` and `1e-100` on long lines), where its result would no longer be the exact
   minimum. Spacings in `[1e-100, 1e100]` were accepted before without this check; ordinary images
   are far inside the limit, and no value changes.
+- **Build:** the native kernels can no longer be built with floating-point contraction on any
+  compiler. CMake used to add `-ffp-contract=off` only for compilers whose ID matched `GNU` or
+  `Clang`; any other compiler built silently, and compilers that fuse multiply-adds by default (Intel
+  icx) would have produced kernels outside the exactness proof. Each supported compiler now gets its
+  flags (GCC, Clang and Apple clang `-ffp-contract=off`; icx `-fp-model=precise -ffp-contract=off`;
+  MSVC `/fp:precise`, and clang-cl or icx on Windows `/fp:precise /clang:-ffp-contract=off`), each
+  flag must be accepted by the compiler, MSVC before 19.30 (Visual Studio 2022), where `/fp:precise`
+  may contract, is refused, and configuration stops with an error for every other compiler. At
+  configuration time a probe (`csrc/fp_contract_probe.cpp`), built with those flags and optimized,
+  must round a product and a sum separately; configuration fails if it does not (it is skipped when
+  cross-compiling and for universal macOS builds). The flags for MSVC, icx and clang-cl follow the
+  vendors' documentation and were not run on those compilers. No change for GCC, Clang and Apple
+  clang, and no numeric change.
+- **Validation:** the range guard of the exact squared distance transform is now also in the
+  compiled kernel. `exacta_edt_sq_f64`, the exported C interface, used to accept any grid inside
+  the spacing range; it now applies the same limit as `check_edt_extent` (squared distance over
+  spacing at most `1e300` in every pass, and lines of at most 2**40 samples, the bound of the proof)
+  before writing anything, and returns the new status `EXACTA_OUT_OF_RANGE`, which the extension
+  raises as the same `ValueError`. The Python check stays and runs first, and `check_edt_extent`
+  also rejects lines of more than 2**40 samples. `exacta_edt_lines_f64` and `edt_lines` (the single
+  pass used by the tests, in C++, Python and Triton) now check the other assumptions of the proof:
+  every input is `inf` or lies in `[0, bound]` (NaN, negative and `-inf` values and values above
+  `bound` are rejected with `ValueError`), and `(bound + (h n)^2) / h` is at most `1e300`. Valid
+  inputs are unaffected.
+- **Validation:** the Triton distance transform indexes the samples of a line and the lines of a
+  pass with 32-bit integers (element offsets were already 64-bit), which the exactness proof does
+  not assume. It now raises a `ValueError` before allocating anything for a line of more than
+  `2**31 - 2` samples or a pass of more than `2**31 - 32` lines (batch axes count as lines), and the
+  docstring states the limit; the CPU kernel has no such limit. Inputs below it are unaffected.
+- **Documentation:** the correctly rounded sum (`exact_sum`, `csrc/cpu/sum.cpp`) now states two
+  properties it already had. It runs serially on the host, so a GPU input is copied there, and its
+  agreement across devices is by construction. If a partial sum overflows it returns `inf` (or
+  `-inf`) even when the exact sum is finite, where `math.fsum` raises `OverflowError`; the order of
+  the terms matters only in that case. A test pins this behaviour.
 - **Tests:** a GPU test checks that the Triton kernels' binary64 arithmetic is what the exactness
   argument assumes: every add, subtract, multiply and divide rounded once, and no fused
   multiply-add. The C++ and Triton passes now point to the lines of the published pseudo-code.
