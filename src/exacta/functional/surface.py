@@ -17,8 +17,9 @@ Voxels outside the image count as background.
       length (2-D) of the marching-cubes surface inside the block. Weights replace counts in every
       statistic below, and percentiles become area-weighted: the smallest distance at which the
       cumulative area reaches q% (no interpolation), as in DeepMind's ``compute_robust_hausdorff``.
-    * ``"mesh"``: MeshMetrics' definition (Podobnik & Vrtovec). Each mask is meshed with VTK's
-      discrete marching cubes (contoured with discrete flying edges in 2-D), and every triangle
+    * ``"mesh"``: MeshMetrics' definition (Podobnik & Vrtovec), as in its releases 1.0 to 1.4.1:
+      each mask is meshed with VTK's discrete marching cubes (contoured with discrete flying edges
+      in 2-D; the 0.2 releases and the MeshMetrics preprint used surface nets), and every triangle
       (segment) is an element located at its centre and weighted by its area (length). Distances
       run from those centres to the nearest point of the other mesh, not to its elements, and are
       computed exactly in float64 on the CPU. Percentiles are area-weighted as for surfels.
@@ -48,7 +49,12 @@ Tools disagree on these choices, so they are arguments rather than fixed definit
     ===========  ========  =======  ==================================
 
 MeshMetrics measures 2-D distances to an extruded contour that VTK stores in float32, so its 2-D
-values differ from exacta's by float32 rounding (about 1e-7 relative); 3-D values agree to 1e-9.
+values differ from exacta's by float32 rounding (about 1e-7 relative). In 3-D, HD, HD95 and ASSD
+agree to about 1e-13 in the units of ``spacing``, and NSD with ``tie_rtol=0`` agrees to rounding:
+distances equal to the tolerance in exact arithmetic fall on either side of it in binary64,
+depending on the rounding of the mesh coordinates, so masks are meshed in the box MeshMetrics uses
+(the bounding box of both masks, from the voxel before it), which makes those coordinates
+coincide. With the default margin, NSD counts every such tie.
 
 NSD at tolerance ``tau`` (Nikolov et al., JMIR 2021) is the fraction of the surface, of both
 masks together, that lies within ``tau`` of the other surface:
@@ -241,7 +247,8 @@ def nsd(
     surface-distance do: each distance is the exact floating-point minimum of the expression
     SciPy's ``distance_transform_edt`` evaluates, so it lands on the same side of the tolerance
     as theirs. (SciPy itself returns a value one ulp above that minimum at a few voxels per
-    million.) MONAI casts distances to float32 before comparing them with the tolerance, which
+    million.) With ``surface="mesh"`` it compares VTK's binary64 distances as MeshMetrics does,
+    ties included. MONAI casts distances to float32 before comparing them with the tolerance, which
     counts exact ties as within and also distances within float32 resolution of the tolerance.
 
     Args:
@@ -325,8 +332,13 @@ def _per_case_many(
             if not (has_p and has_t):
                 out[b, k] = one_empty
                 continue
+            # MeshMetrics meshes the box grown by one voxel, so its vertex coordinates are measured
+            # from the voxel before the box. Distances that tie with an NSD tolerance round to
+            # either side of it depending on those coordinates; measuring from the same voxel
+            # reproduces its decisions. The added background changes nothing else.
+            margin = 1 if surface == "mesh" and seg.ndim == 3 else 0
             box = tuple(
-                slice(min(lo_p, lo_t), max(hi_p, hi_t) + 1)
+                slice(max(min(lo_p, lo_t) - margin, 0), max(hi_p, hi_t) + 1)
                 for lo_p, lo_t, hi_p, hi_t in zip(lo[0][cls], lo[1][cls], hi[0][cls], hi[1][cls])
             )
             jobs.append((k, cls, box))

@@ -4,6 +4,14 @@ Release notes for Exacta.
 
 ## Unreleased
 
+- **MeshMetrics compatibility:** with `surface="mesh"` in 3-D, masks are now meshed in the box
+  MeshMetrics uses (the bounding box of both masks, starting one voxel before it), so mesh
+  coordinates round as in MeshMetrics 1.4.1. NSD with `tie_rtol=0` now reproduces MeshMetrics'
+  decisions for triangle centres lying exactly at the tolerance; before, those ties could fall on
+  the other side and change NSD by up to about 0.005 at tolerances equal to grid distances. Mesh
+  HD, HD95 and ASSD change only in the last bits (about 1e-14); NSD with the default tie margin is
+  unchanged on the cases tested. The documentation now states which MeshMetrics releases use
+  discrete marching cubes (1.0 to 1.4.1) and that the 0.2 releases used surface nets.
 - **Validation:** the exact squared distance transform (CPU and Triton) now rejects grids so
   anisotropic that a pass could overflow binary64 (squared distance over spacing above `1e300`,
   e.g. spacings `1e100` and `1e-100` on long lines), where its result would no longer be the exact

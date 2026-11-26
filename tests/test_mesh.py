@@ -197,6 +197,23 @@ def test_matches_meshmetrics_3d(device, shape, spacing, seed):
         assert float(value[0, 0]) == pytest.approx(expected[name], rel=1e-9), name
 
 
+@pytest.mark.parametrize(
+    ("shape", "spacing"),
+    [((24, 26, 28), (1.0, 1.0, 1.0)), ((20, 22, 24), (1.0, 1.0, 1.0)), ((16, 20, 12), (3.0, 0.8, 0.8)),
+     ((24, 24, 24), (0.5, 0.5, 0.5))],
+)
+@pytest.mark.parametrize("tolerance", [1.0, 2.0])
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_nsd_at_grid_distances_matches_meshmetrics(device, shape, spacing, tolerance, seed):
+    # Tolerances equal to grid distances put many triangle centres exactly on the tolerance;
+    # MeshMetrics decides those ties by the rounding of its coordinates, which the crop reproduces.
+    rng = np.random.default_rng(seed)
+    pred, target = _blobs(shape, rng), _blobs(shape, rng)
+    expected = _meshmetrics(target, pred, spacing, tolerance=tolerance)
+    got = _ours(pred, target, spacing, tolerance, device)
+    assert float(got["nsd"][0, 0]) == pytest.approx(expected["nsd"], abs=1e-12)
+
+
 @pytest.mark.parametrize(("shape", "spacing"), [((30, 34), (0.7, 1.3)), ((40, 36), (1.0, 1.0))])
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_matches_meshmetrics_2d(device, shape, spacing, seed):
