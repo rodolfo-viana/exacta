@@ -20,6 +20,25 @@ namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
+// Limits of the exactness proof (Proposition 1 of the paper): lines of at most 2^40 samples, and
+// (B + (h n)^2) / h at most kMaxScale in every pass, which keeps each intermediate quantity far
+// from overflow (breakpoints reach about M / (2 h), the tie tolerance is 128 u M / h, with
+// M = B + (h n)^2). check_edt_extent in src/exacta/_native.py applies the same limits.
+constexpr std::int64_t kMaxLine = std::int64_t{1} << 40;
+constexpr double kMaxScale = 1e300;
+constexpr double kMinSpacing = 1e-100;
+constexpr double kMaxSpacing = 1e100;
+
+bool spacing_in_range(double h) { return h >= kMinSpacing && h <= kMaxSpacing; }
+
+// True if a pass along an axis of spacing h and n samples, whose finite inputs are at most
+// `bound`, stays inside the range of the proof. The expression is that of check_edt_extent.
+bool pass_in_range(double bound, double h, std::int64_t n) {
+  if (n > kMaxLine) return false;
+  const double xmax = h * static_cast<double>(n);
+  return (bound + xmax * xmax) / h <= kMaxScale;  // false for NaN
+}
+
 // Evaluates, at every sample q, min over samples p with finite f[p] of (h*(q - p))^2 + f[p],
 // exactly as rounded in floating point (the value a brute-force minimum would give).
 // tol is the tie tolerance of the breakpoints (see tolerance()). Scratch: v holds n indices,
@@ -238,6 +257,8 @@ extern "C" const char *exacta_status_string(int status) {
       return "invalid argument";
     case EXACTA_OUT_OF_MEMORY:
       return "out of memory";
+    case EXACTA_OUT_OF_RANGE:
+      return "outside the numeric range in which the result is exact";
     default:
       return "internal error";
   }
@@ -254,10 +275,18 @@ extern "C" int exacta_edt_sq_f64(const uint8_t *features, double *out, const int
     if (shape[axis] < 0) return EXACTA_INVALID_ARGUMENT;
     if (axis >= batch_ndim) {
       // Beyond these, squared distances overflow or turn subnormal and stop being exact.
-      const double h = spacing[axis - batch_ndim];
-      if (!(h >= 1e-100 && h <= 1e100)) return EXACTA_INVALID_ARGUMENT;
+      if (!spacing_in_range(spacing[axis - batch_ndim])) return EXACTA_INVALID_ARGUMENT;
     }
     empty = empty || shape[axis] == 0;
+  }
+  // The range of the exactness proof, pass by pass, from the shape and the spacing alone (the
+  // bound of a pass is the sum of the squared extents of the axes before it).
+  double bound = 0.0;
+  for (int axis = batch_ndim; axis < ndim; ++axis) {
+    const double h = spacing[axis - batch_ndim];
+    if (!pass_in_range(bound, h, shape[axis])) return EXACTA_OUT_OF_RANGE;
+    const double extent = h * static_cast<double>(shape[axis] - 1);
+    bound += extent * extent;
   }
   if (empty) return EXACTA_OK;  // the data pointers of an empty array may be null
   if (features == nullptr || out == nullptr) return EXACTA_INVALID_ARGUMENT;
@@ -272,11 +301,16 @@ extern "C" int exacta_edt_sq_f64(const uint8_t *features, double *out, const int
 
 extern "C" int exacta_edt_lines_f64(const double *f, double *out, int64_t lines, int64_t n,
                                     double h, double bound) {
-  if (lines < 0 || n < 0 || !(h >= 1e-100 && h <= 1e100) || !(bound >= 0.0 && bound < kInf)) {
+  if (lines < 0 || n < 0 || !spacing_in_range(h) || !(bound >= 0.0 && bound < kInf)) {
     return EXACTA_INVALID_ARGUMENT;
   }
+  if (!pass_in_range(bound, h, n)) return EXACTA_OUT_OF_RANGE;
   if (lines == 0 || n == 0) return EXACTA_OK;
   if (f == nullptr || out == nullptr) return EXACTA_INVALID_ARGUMENT;
+  // Proposition 1 takes every input in [0, bound] or +inf; NaN, negative and -inf fail the test.
+  for (std::int64_t i = 0; i < lines * n; ++i) {
+    if (!(f[i] == kInf || (f[i] >= 0.0 && f[i] <= bound))) return EXACTA_INVALID_ARGUMENT;
+  }
   try {
     std::vector<double> z(n + 1), b(n + 1);
     std::vector<std::int64_t> v(n);

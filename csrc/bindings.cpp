@@ -45,6 +45,11 @@ void edt_sq(nb::ndarray<const std::uint8_t, nb::device::cpu, nb::c_contig> featu
   if (status == EXACTA_INVALID_ARGUMENT) {
     throw std::invalid_argument("edt_sq: spacing values must lie in [1e-100, 1e100]");
   }
+  if (status == EXACTA_OUT_OF_RANGE) {  // same condition as check_edt_extent in _native.py
+    throw std::invalid_argument(
+        "edt_sq: the grid is too anisotropic for the exact distance transform (a pass would "
+        "reach squared distance / spacing above 1e300, or a line has more than 2^40 samples)");
+  }
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }
 
@@ -61,7 +66,14 @@ void edt_lines(nb::ndarray<const double, nb::ndim<2>, nb::device::cpu, nb::c_con
                                   static_cast<std::int64_t>(f.shape(1)), h, bound);
   }
   if (status == EXACTA_INVALID_ARGUMENT) {
-    throw std::invalid_argument("edt_lines: h must lie in [1e-100, 1e100], bound be finite >= 0");
+    throw std::invalid_argument(
+        "edt_lines: h must lie in [1e-100, 1e100], bound be finite >= 0, and every value of f "
+        "be +inf or lie in [0, bound]");
+  }
+  if (status == EXACTA_OUT_OF_RANGE) {
+    throw std::invalid_argument(
+        "edt_lines: the pass is too anisotropic for the exact distance transform ((bound + "
+        "(h n)^2) / h above 1e300, or more than 2^40 samples per line)");
   }
   if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
 }

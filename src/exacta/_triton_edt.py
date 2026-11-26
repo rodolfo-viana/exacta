@@ -8,6 +8,12 @@ error so that the result is the exact floating-point minimum over p. Where lanes
 first axis needs no envelope: its input is 0 at features and inf elsewhere, so two sweeps find
 each element's nearest feature on the line.
 
+Size limit: the kernels index the samples of a line, and the lines of a pass, with 32-bit integers
+(element offsets are 64-bit). Each axis may have at most ``2**31 - 2`` samples and the other
+axes together, and the batch axes, at most ``2**31 - 32`` lines per pass; a larger input raises
+``ValueError`` before anything is allocated. The CPU kernel has no such limit; the exactness
+proof covers lines of up to ``2**40`` samples.
+
 Two details keep the results bit-identical to the CPU kernel and to a brute-force minimum:
 kernels are compiled with ``enable_fp_fusion=False``, since a fused multiply-add rounds
 ``dx*dx + f`` once instead of twice, and every float64 parameter is passed in a tensor, since
@@ -33,6 +39,31 @@ except ImportError:  # CPU-only PyTorch builds ship without Triton
 _BLOCK = 32  # lanes (lines) per program, one warp: small blocks wait less on divergent lanes
 _SCRATCH_BYTES = 256 << 20  # budget for the per-lane envelope stacks
 
+# Indices of the samples of a line (the stacks, the loop counters, the offsets into the scratch
+# stacks before they are widened) and the line counter of the program loop are int32 in the
+# kernels. A line may have n <= _MAX_LINE samples, so that the stack slot n and the loop bound
+# n + 1 fit, and a pass may have at most _MAX_LINES lines, so that cdiv(lines, _BLOCK) * _BLOCK
+# does too.
+_MAX_LINE = 2**31 - 2
+_MAX_LINES = 2**31 - _BLOCK
+
+
+def check_index_range(shape: Sequence[int], batch_ndim: int = 0) -> None:
+    """Raise ``ValueError`` if a pass over a grid of ``shape`` would overflow the kernels' int32
+    indices: an axis of more than ``2**31 - 2`` samples, or more than ``2**31 - 32`` lines in a
+    pass (all the other axes, batch axes included, make the lines of an axis)."""
+    total = math.prod(shape)
+    if total == 0:
+        return  # nothing is indexed
+    for n in shape[batch_ndim:]:
+        if n > _MAX_LINE or total // n > _MAX_LINES:
+            raise ValueError(
+                f"the Triton distance transform indexes the samples of a line and the lines of "
+                f"a pass with 32-bit integers, so it cannot process shape {tuple(shape)} "
+                f"(at most {_MAX_LINE} samples per line and {_MAX_LINES} lines per pass); "
+                f"use the CPU kernel (exacta._native.edt_sq) instead"
+            )
+
 
 def available() -> bool:
     return triton is not None
@@ -42,11 +73,15 @@ def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> T
     """Squared distance from every voxel to the nearest nonzero voxel of ``features`` (CUDA).
 
     Same contract and same values, bit for bit, as :func:`exacta._native.edt_sq`, including
-    ``batch_ndim`` leading axes that index separate images.
+    ``batch_ndim`` leading axes that index separate images. The kernels index lines and samples
+    with 32-bit integers, so the input is limited to ``2**31 - 2`` samples per line and
+    ``2**31 - 32`` lines per pass; :func:`check_index_range` raises ``ValueError`` above that
+    before anything is allocated. The CPU kernel has no such limit.
     """
     if triton is None:
         raise RuntimeError("Triton is not installed")
     _native.check_edt_extent(features.shape[batch_ndim:], spacing)
+    check_index_range(features.shape, batch_ndim)
     with torch.cuda.device(features.device):  # Triton launches on the current device
         return _transform(features, spacing, batch_ndim)
 
@@ -94,10 +129,14 @@ def _pass(src: Tensor, dst: Tensor, h: float, tol: float, n: int, stride: int, l
 
 def edt_lines(f: Tensor, h: float, bound: float) -> Tensor:
     """One pass over each row of ``f`` (CUDA float64, ``(lines, n)``, ``inf`` where there is no
-    parabola, finite values in ``[0, bound]``), as ``exacta._native.edt_lines``. For testing."""
+    parabola, finite values in ``[0, bound]``), as ``exacta._native.edt_lines``, including its
+    checks of the assumptions of the exactness proof and the int32 limit of this module. For
+    testing."""
     if triton is None:
         raise RuntimeError("Triton is not installed")
+    check_index_range(f.shape, 1)
     f = f.contiguous()
+    _native.check_edt_lines(f, h, bound)
     out = torch.empty_like(f)
     lines, n = f.shape
     if out.numel():

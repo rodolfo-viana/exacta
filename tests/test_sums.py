@@ -1,4 +1,5 @@
 import math
+import sys
 
 import numpy as np
 import pytest
@@ -38,6 +39,34 @@ def test_exact_sum_cancellation_and_special_values():
     assert _native.exact_sum(torch.zeros(0, dtype=torch.float64)) == 0.0
     assert _native.exact_sum(torch.tensor([1.0, math.inf], dtype=torch.float64)) == math.inf
     assert math.isnan(_native.exact_sum(torch.tensor([math.inf, -math.inf], dtype=torch.float64)))
+
+
+def test_intermediate_overflow_gives_inf_where_fsum_raises():
+    # Documented limit: a partial sum that overflows returns inf even if the exact sum is finite,
+    # where math.fsum raises, and the order of the terms then decides.
+    big = sys.float_info.max
+
+    def total(terms):
+        return _native.exact_sum(torch.tensor(terms, dtype=torch.float64))
+
+    with pytest.raises(OverflowError):
+        math.fsum([big, big, -big])
+    assert total([big, big, -big]) == math.inf
+    assert total([-big, -big, big]) == -math.inf
+    # the same terms, ordered so that no partial sum overflows: the exact sum, as math.fsum's
+    assert total([big, -big, big]) == math.fsum([big, -big, big]) == big
+    # a sum whose exact value rounds beyond the largest double is inf for both
+    assert total([big, 2.0**970]) == math.inf
+    with pytest.raises(OverflowError):
+        math.fsum([big, 2.0**970])
+
+
+@pytest.mark.skipif(not GPU, reason="needs CUDA and Triton")
+def test_exact_sum_of_a_gpu_tensor_is_the_host_sum():
+    # The sum runs serially on the host; a GPU input is copied there first.
+    rng = np.random.default_rng(5)
+    x = torch.from_numpy(rng.normal(size=10_001) * 10.0 ** rng.integers(-9, 9, 10_001))
+    assert _native.exact_sum(x.cuda()) == _native.exact_sum(x) == math.fsum(x.tolist())
 
 
 def _spheres(h=0.25):

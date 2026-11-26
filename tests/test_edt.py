@@ -161,6 +161,104 @@ def test_edt_lines_rejects_bad_arguments():
         _native.edt_lines(f, 1.0, math.inf)
 
 
+def _edt_lines_checkers():
+    """The Python wrapper, the bare extension function (no Python-side check) and, on a GPU, Triton."""
+    def bare(f, h, bound):
+        out = torch.empty_like(f)
+        _C.edt_lines(f, out, h, bound)
+        return out
+
+    checkers = [_native.edt_lines, bare]
+    if GPU:
+        checkers.append(lambda f, h, bound: _triton_edt.edt_lines(f.cuda(), h, bound).cpu())
+    return checkers
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [math.nan, -1.0, -1e-300, -math.inf, 5.0000000001],
+    ids=["nan", "negative", "tiny-negative", "-inf", "above-bound"],
+)
+def test_edt_lines_rejects_inputs_outside_the_proof(bad):
+    # The proof takes every finite input in [0, bound]; +inf marks samples without a parabola.
+    f = torch.tensor([[0.0, math.inf, bad, 5.0]], dtype=torch.float64)
+    for edt_lines in _edt_lines_checkers():
+        with pytest.raises(ValueError):
+            edt_lines(f, 1.0, 5.0)
+
+
+def test_edt_lines_accepts_the_whole_closed_range():
+    f = torch.tensor([[0.0, math.inf, 5.0, 2.5, -0.0], [math.inf] * 5], dtype=torch.float64)
+    expected = _line_minimum(f.numpy(), 1.0)
+    for edt_lines in _edt_lines_checkers():
+        torch.testing.assert_close(edt_lines(f, 1.0, 5.0), torch.from_numpy(expected), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(("h", "bound", "n"), [(1e-100, 1e250, 3), (1e-50, 1e260, 3), (1.0, 2e300, 3)])
+def test_edt_lines_rejects_passes_beyond_the_guarded_range(h, bound, n):
+    # (bound + (h n)^2) / h above 1e300: the breakpoints and the tolerance could overflow.
+    f = torch.zeros(1, n, dtype=torch.float64)
+    for edt_lines in _edt_lines_checkers():
+        with pytest.raises(ValueError, match="too anisotropic"):
+            edt_lines(f, h, bound)
+
+
+def test_the_extension_enforces_the_range_guard_without_the_python_check():
+    # exacta_edt_sq_f64 is the exported C interface: it must not rely on the Python wrapper.
+    features = torch.zeros(3, 20_000, dtype=torch.uint8)
+    out = torch.full(features.shape, 7.0, dtype=torch.float64)
+    with pytest.raises(ValueError, match="too anisotropic"):
+        _C.edt_sq(features, out, [1e100, 1e-100])
+    assert (out == 7.0).all()  # rejected before anything is written
+    with pytest.raises(ValueError, match="too anisotropic"):
+        _C.edt_sq(features.expand(2, 3, 20_000).contiguous(), torch.empty((2, 3, 20_000), dtype=torch.float64),
+                  [1e100, 1e-100], batch_ndim=1)
+    # a grid inside the limit is accepted: its last pass reaches squared distance / spacing = 4e280
+    _C.edt_sq(features[:, :2000].contiguous(), torch.empty(3, 2000, dtype=torch.float64), [1e90, 1e-100])
+
+
+def test_the_extension_and_the_python_check_agree_on_the_guarded_range():
+    rng = np.random.default_rng(3)
+    rejected = accepted = 0
+    for _ in range(600):
+        ndim = int(rng.integers(2, 4))
+        shape = [int(n) for n in rng.integers(0, 9, ndim)]  # zeros give empty arrays: no work
+        # A large first spacing and a second chosen near the limit: the squared extent of the
+        # first axis over the second spacing is about 1e300, on either side of it.
+        first = rng.uniform(97, 100)
+        second = np.clip(2 * first + 2 * np.log10(max(shape[0] - 1, 1)) - 300 + rng.uniform(-0.5, 0.5), -100, 100)
+        spacing = [float(10.0**first), float(10.0**second)] + [float(10.0 ** rng.uniform(-1, 1))] * (ndim - 2)
+        features = torch.zeros(shape, dtype=torch.uint8)
+        out = torch.empty(shape, dtype=torch.float64)
+        try:
+            _native.check_edt_extent(shape, spacing)
+            python = "ok"
+        except ValueError:
+            python = "rejected"
+        try:
+            _C.edt_sq(features, out, spacing)
+            kernel = "ok"
+        except ValueError as error:
+            assert "too anisotropic" in str(error)
+            kernel = "rejected"
+        assert kernel == python, (shape, spacing)
+        rejected += python == "rejected"
+        accepted += python == "ok"
+    assert rejected > 20 and accepted > 20  # both sides of the limit were exercised
+
+
+def test_lines_longer_than_the_proof_covers_are_rejected():
+    limit = _native.EDT_MAX_LINE
+    assert limit == 2**40
+    # An array of this shape is empty, so nothing is allocated or computed.
+    features = torch.zeros(limit + 1, 0, dtype=torch.uint8)
+    with pytest.raises(ValueError, match="too anisotropic"):
+        _C.edt_sq(features, torch.empty(features.shape, dtype=torch.float64), [1.0, 1.0])
+    with pytest.raises(ValueError, match="too long"):
+        _native.check_edt_extent(features.shape, (1.0, 1.0))
+    _native.check_edt_extent((limit, 3), (1.0, 1.0))  # the limit itself is allowed
+
+
 @needs_gpu
 @pytest.mark.parametrize(
     ("shape", "spacing"), CASES + [((1, 1, 7), (1.0, 2.0, 0.5)), ((300, 7, 1), (0.5, 1.5, 2.0))]
@@ -249,6 +347,50 @@ def test_triton_scratch_scales_with_lines_not_blocks():
     peak = torch.cuda.max_memory_allocated() - base
     assert torch.equal(got, _native.edt_sq(features, (1.0, 0.5)))
     assert peak < 64 << 20, f"{peak / 2**20:.0f} MiB"
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(1000, 1000, 1000), (2**31 - 2,), (2**31 - 32, 1), (2**40, 0), (0, 2**33), (3, 3)],
+)
+def test_triton_index_limit_accepts_what_int32_indices_cover(shape):
+    _triton_edt.check_index_range(shape)
+
+
+@pytest.mark.parametrize(
+    ("shape", "batch_ndim"),
+    [
+        ((2**31 - 1,), 0),  # a line with more samples than int32 can index
+        ((2**31 - 31, 1), 0),  # 2**31 - 31 lines in the pass along the last axis
+        ((2, 2**31), 0),
+        ((2**20, 2**12, 2**12), 1),  # batch axes count as lines: 2**32 of them
+        ((2**31, 1, 5), 1),
+    ],
+)
+def test_triton_index_limit_rejects_what_would_overflow_int32(shape, batch_ndim):
+    with pytest.raises(ValueError, match="32-bit integers"):
+        _triton_edt.check_index_range(shape, batch_ndim)
+
+
+def test_triton_limit_is_checked_before_anything_is_allocated():
+    # A zero-stride view of one byte: the check sees the shape only, so this costs no memory.
+    features = torch.zeros(1, dtype=torch.uint8).expand(2**31 - 1, 1)
+    if _triton_edt.available():
+        with pytest.raises(ValueError, match="32-bit integers"):
+            _triton_edt.edt_sq(features, (1.0, 1.0))
+    else:
+        with pytest.raises(RuntimeError, match="Triton is not installed"):
+            _triton_edt.edt_sq(features, (1.0, 1.0))
+    assert "32-bit" in (_triton_edt.edt_sq.__doc__ or "")  # the limit is documented
+
+
+@needs_gpu
+def test_triton_limit_is_checked_on_the_device_tensor():
+    features = torch.zeros(1, dtype=torch.uint8, device="cuda").expand(2**31 - 1, 1)
+    with pytest.raises(ValueError, match="32-bit integers"):
+        _triton_edt.edt_sq(features, (1.0, 1.0))
+    with pytest.raises(ValueError, match="32-bit integers"):
+        _triton_edt.edt_lines(torch.zeros(1, dtype=torch.float64, device="cuda").expand(2, 2**31 - 1), 1.0, 1.0)
 
 
 @pytest.mark.parametrize("edt_sq", [_native.edt_sq, pytest.param(_triton, marks=needs_gpu)])
