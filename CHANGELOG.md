@@ -2,7 +2,10 @@
 
 Release notes for Exacta.
 
-## Unreleased
+## 0.1.1 — 2026-11-25
+
+Version 0.1.1 fixes a rare rounding defect in the exact squared Euclidean distance transform
+used by every voxel surface metric.
 
 - **Fix:** the squared Euclidean distance transform (CPU and Triton) could return a value one or
   two ulps above the exact floating-point minimum when several parabolas of a pass tie within
