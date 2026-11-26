@@ -1,0 +1,72 @@
+
+# 1. Inputs (no random numbers: integer arithmetic only)
+prediction, target shape: [2 22 26 24]
+foreground voxels, prediction: [1452 2109]
+foreground voxels, target: [1419 1419]
+
+# 2. Exact Euclidean distance transform (losses.distance_maps)
+spacing: [1.3 0.3 0.7]
+dtype: 'torch.float64'
+shape: [1 1 5 6 7]
+maximum: 2.0024984394500787
+sum (math.fsum): 183.80153494649943
+distances along the first axis, column (3, 3): [0.3 0.6 0.8999999999999999 0.6 0.3]
+equal to the brute-force oracle, bit for bit: True
+
+# 3. Surface metrics, one value per case (voxels, surfels, mesh)
+spacing: [1.2 0.4 0.4]
+hd.voxels: [5.1536394906900505 1.2]
+hd95.voxels: [3.224242976460798 1.2]
+assd.voxels: [0.7523140489783967 0.5165854753287513]
+hd.surfels: [5.1536394906900505 1.2]
+hd95.surfels: [3.124099870362662 0.8]
+assd.surfels: [0.6687406833262094 0.33477385715071967]
+hd.mesh: [4.954010720842479 1.2000000000000064]
+hd95.mesh: [3.3691410049315405 0.8055363982396389]
+assd.mesh: [0.7939324064400606 0.4564668944160934] (approx)
+dice: [0.6826889585510275 0.8044217687074829]
+iou: [0.518244315177155 0.6728307254623044]
+true positives per case: [980 1419]
+
+# 4. NSD where distances tie with the tolerance
+3 * 0.4: 1.2000000000000002
+tolerance: 1.2
+nsd.voxels, default tie_rtol=1e-06: [0.971677559912854 1.0]
+nsd.voxels, tie_rtol=0 (strict binary64): [0.7777777777777778 1.0]
+nsd.surfels, default tie_rtol=1e-06: [0.9615027875446752 1.0]
+nsd.surfels, tie_rtol=0 (strict binary64): [0.8537032285920957 1.0]
+nsd.mesh, default tie_rtol=1e-06: [0.9615027875446753 1.0] (approx)
+nsd.mesh, tie_rtol=0 (strict binary64): [0.9205594277988504 0.997283103802331] (approx)
+
+# 5. Presets that reproduce other tools (case 0)
+monai.hd95: 3.224242976460798
+monai.assd: 0.7523140489783967
+monai.nsd at 1.2: 0.971677559912854
+medpy.hd95: 1.2000000000000002
+medpy.assd: 0.7523140489783967
+deepmind.hd95: 3.124099870362662
+deepmind.assd: 0.6644925832834698
+deepmind.nsd at 1.2: 0.8537032285920957
+meshmetrics.hd95: 3.3691410049315405
+meshmetrics.assd: 0.7939324064400606 (approx)
+meshmetrics.nsd at 1.2: 0.9615027875446753 (approx)
+
+# 6. A stateful metric, and the signature of a result
+HD95.per_case: [3.124099870362662 0.8]
+HD95.per_class: [1.962049935181331]
+HD95.mean: 1.962049935181331
+signature: 'nsd[both_empty=nan;one_empty=0.0;surface=mesh;tie_rtol=1e-06;tolerance=1.2]'
+signature version is the installed version: True
+the signature recomputes the same bits: True
+
+# 7. Losses: value and gradient norm
+logits: [2 3 6 7 8]
+label counts: [224 224 224]
+DiceLoss value: 0.639029114203177 (approx)
+DiceLoss gradient norm: 0.007542228016757693 (approx)
+DiceCELoss value: 2.3402363838264293 (approx)
+DiceCELoss gradient norm: 0.0423006800267094 (approx)
+DiceCELoss is DiceLoss plus torch cross_entropy, to 1e-12: True
+
+# Summary
+all checks passed: True
