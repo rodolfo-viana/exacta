@@ -4,7 +4,11 @@ Release notes for Exacta.
 
 ## Unreleased
 
-Changes for the next release will be recorded here.
+- **Fix:** ASSD and NSD with surfel or mesh weights could differ in the last bits with the number
+  of PyTorch threads and between CPU and GPU, because PyTorch's parallel sums split the terms
+  differently. Means and surface fractions now use correctly rounded sums (the exact sum rounded
+  once, as Python's `math.fsum`), so a score has the same bits on any machine. Values change by
+  at most a few ulps.
 
 ## 0.1.1 — 2026-11-25
 

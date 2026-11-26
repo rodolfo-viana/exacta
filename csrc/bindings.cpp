@@ -3,9 +3,11 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/vector.h>
 
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -373,6 +375,24 @@ bool binary_mask(Flat<T> values, nb::ndarray<std::uint8_t, nb::ndim<1>, nb::devi
     throw std::runtime_error(exacta_status_string(status));
   }
   return status == EXACTA_OK;
+}
+
+double exact_sum(nb::ndarray<const double, nb::ndim<1>, nb::device::cpu, nb::c_contig> x,
+                 std::optional<nb::ndarray<const double, nb::ndim<1>, nb::device::cpu, nb::c_contig>> w,
+                 std::optional<nb::ndarray<const std::uint8_t, nb::ndim<1>, nb::device::cpu, nb::c_contig>> select) {
+  const std::size_t n = x.shape(0);
+  if ((w && w->shape(0) != n) || (select && select->shape(0) != n)) {
+    throw std::invalid_argument("x, w and select must have the same length");
+  }
+  double sum = 0.0;
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_exact_sum_f64(x.data(), w ? w->data() : nullptr, select ? select->data() : nullptr,
+                                  static_cast<std::int64_t>(n), &sum);
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+  return sum;
 }
 
 // Returns false when a key or value is NaN.
@@ -751,6 +771,10 @@ NB_MODULE(_C, m) {
         nb::arg("num_threads") = 0,
         "Write into `out` the square roots of the float64 `values` where the uint8 `mask` is "
         "nonzero, in order; `out` must have one entry per such element.");
+  m.def("exact_sum", &exact_sum, nb::arg("x"), nb::arg("w").none() = nb::none(),
+        nb::arg("select").none() = nb::none(),
+        "Correctly rounded sum of x * w (float64, (N,); products rounded once) over the nonzero "
+        "entries of select (uint8), as math.fsum: independent of the order of the terms.");
   m.def("sort_pairs", &sort_pairs, nb::arg("keys"), nb::arg("values"), nb::arg("num_threads") = 0,
         "Sort the float64 pairs (keys[i], values[i]) in place by key, then value; returns False "
         "(arrays untouched) if one is NaN.");

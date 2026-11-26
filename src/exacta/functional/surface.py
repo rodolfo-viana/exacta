@@ -422,10 +422,24 @@ def _weighted_percentile(d: np.ndarray, w: np.ndarray, q: float) -> float:
     return float(d[min(int(np.searchsorted(cum, q / 100.0)), d.size - 1)])
 
 
+def _sum(x: Tensor, w: Tensor | None = None, select: Tensor | None = None) -> float:
+    """Correctly rounded sum of ``x * w`` over ``select``. A parallel sum depends on the number of
+    threads and on the device in its last bits; this one depends only on the terms."""
+    if _native.available():
+        return _native.exact_sum(x, w, select)
+    t = x.detach().to("cpu", torch.float64)
+    if w is not None:
+        t = t * w.detach().to("cpu", torch.float64)
+    if select is not None:
+        t = t[select.detach().cpu()]
+    return math.fsum(t.reshape(-1).tolist())
+
+
 def _mean(x: _Distances) -> float:
+    """Mean distance (area-weighted for surfels and meshes), from correctly rounded sums."""
     if x.w is None:
-        return x.d.mean().item()
-    return ((x.d * x.w).sum() / x.w.sum()).item()
+        return _sum(x.d) / x.d.numel()
+    return _sum(x.d, x.w) / _sum(x.w)
 
 
 def _within(x: _Distances, bound: float) -> tuple[float, float]:
@@ -433,7 +447,7 @@ def _within(x: _Distances, bound: float) -> tuple[float, float]:
     inside = x.d <= bound
     if x.w is None:
         return torch.count_nonzero(inside).item(), x.d.numel()
-    return x.w[inside].sum().item(), x.w.sum().item()
+    return _sum(x.w, select=inside), _sum(x.w)
 
 
 def _tolerances(tolerance: Any, classes: range) -> list[float]:

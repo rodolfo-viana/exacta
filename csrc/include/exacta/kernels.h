@@ -233,6 +233,15 @@ int exacta_class_extents_i64(const int64_t *labels, const int64_t *shape, int nd
  */
 int exacta_sort_pairs_f64(double *keys, double *values, int64_t n, int num_threads);
 
+/* Correctly rounded sum: writes to `sum` the exact value of sum_i x[i] * w[i] (each product
+ * rounded once; w = NULL means 1) over the i with select[i] != 0 (select = NULL selects all),
+ * rounded once to the nearest double, ties to even, as Python's math.fsum. The result does not
+ * depend on the order of the terms. Non-finite terms give their IEEE sum (inf, -inf or NaN);
+ * a partial sum that overflows gives +-inf.
+ */
+int exacta_exact_sum_f64(const double *x, const double *w, const uint8_t *select, int64_t n,
+                         double *sum);
+
 /* DeepMind's neighbour code at every corner of the voxels of a 2-D or 3-D mask (`shape`; nonzero
  * is inside): `code` has shape + 1 along each axis, and the code of corner c has one bit per
  * voxel c - 1 + o of the block around it, o in {0, 1}^ndim, set when the voxel is inside (outside

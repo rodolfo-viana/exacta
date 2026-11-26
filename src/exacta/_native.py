@@ -226,6 +226,18 @@ def masked_sqrt(values: Tensor, mask: Tensor) -> Tensor:
     return out
 
 
+def exact_sum(x: Tensor, w: Tensor | None = None, select: Tensor | None = None) -> float:
+    """Correctly rounded sum of ``x * w`` (each product rounded once) over ``select``, as
+    :func:`math.fsum` would return it: the same bits for any order of the terms, number of
+    threads or device. Tensors are copied to the CPU as float64."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    flat = x.detach().to("cpu", torch.float64).contiguous().reshape(-1)
+    weights = None if w is None else w.detach().to("cpu", torch.float64).contiguous().reshape(-1)
+    chosen = None if select is None else _as_bytes(select.detach().cpu()).reshape(-1)
+    return float(_C.exact_sum(flat, weights, chosen))
+
+
 def sort_pairs(keys: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
     """Copies of two float64 arrays with their (key, value) pairs sorted by key, then by value, as
     ``np.lexsort((values, keys))`` orders them; parallel. None if one is NaN."""
