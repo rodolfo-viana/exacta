@@ -17,8 +17,9 @@ Voxels outside the image count as background.
       length (2-D) of the marching-cubes surface inside the block. Weights replace counts in every
       statistic below, and percentiles become area-weighted: the smallest distance at which the
       cumulative area reaches q% (no interpolation), as in DeepMind's ``compute_robust_hausdorff``.
-    * ``"mesh"``: MeshMetrics' definition (Podobnik & Vrtovec). Each mask is meshed with VTK's
-      discrete marching cubes (contoured with discrete flying edges in 2-D), and every triangle
+    * ``"mesh"``: MeshMetrics' definition (Podobnik & Vrtovec), as in its releases 1.0 to 1.4.1:
+      each mask is meshed with VTK's discrete marching cubes (contoured with discrete flying edges
+      in 2-D; the 0.2 releases and the MeshMetrics preprint used surface nets), and every triangle
       (segment) is an element located at its centre and weighted by its area (length). Distances
       run from those centres to the nearest point of the other mesh, not to its elements, and are
       computed exactly in float64 on the CPU. Percentiles are area-weighted as for surfels.
@@ -48,7 +49,28 @@ Tools disagree on these choices, so they are arguments rather than fixed definit
     ===========  ========  =======  ==================================
 
 MeshMetrics measures 2-D distances to an extruded contour that VTK stores in float32, so its 2-D
-values differ from exacta's by float32 rounding (about 1e-7 relative); 3-D values agree to 1e-9.
+values differ from exacta's by float32 rounding (about 1e-7 relative). In 3-D, HD, HD95 and ASSD
+agree to about 1e-13 in the units of ``spacing``. NSD agrees except at ties, triangle centres whose
+distance to the other mesh equals the tolerance in exact arithmetic: binary64 puts such a distance
+on either side of the tolerance by its last bit, and ``tie_rtol=0`` follows that bit, which can
+differ between the tools. Masks are meshed in the box that MeshMetrics 1.2 to 1.4.1 use for NumPy
+masks (the bounding box of both, starting one voxel before it), so that vertex coordinates are
+measured from the same voxel; this removes many of those differences, but not all of them:
+
+    * MeshMetrics computes a coordinate as ``origin + index * spacing`` and exacta as
+      ``index * spacing``, which can differ in the last bit unless the product is exact (spacing 1
+      or 0.5, for instance).
+    * The two tools find the closest point of a triangle by different algorithms.
+    * MeshMetrics' result depends on the platform: the VTK 9.7.1 wheel for Linux aarch64 fuses
+      multiplications and additions and the x86-64 wheel does not, and on Linux aarch64 and macOS
+      arm64 MeshMetrics decides ties differently from x86-64 (exacta does not fuse them).
+    * MeshMetrics meshes SimpleITK images and ``compute_metrics_multilabel`` on other grids.
+
+Bit-for-bit agreement at ties was therefore observed only with exact coordinates, NumPy masks,
+x86-64 and the tolerances of the tests (1 and 2); with exact coordinates and a tolerance of
+sqrt(3), the closest-point algorithms still split some ties. Elsewhere only ties differ: in the tests, MeshMetrics' NSD lies between exacta's at
+``tolerance * (1 - 1e-9)`` and with ``tie_rtol=1e-9``. The default margin counts every tie as
+within, whichever tool and platform; use it for results that must not depend on either.
 
 NSD at tolerance ``tau`` (Nikolov et al., JMIR 2021) is the fraction of the surface, of both
 masks together, that lies within ``tau`` of the other surface:
@@ -233,16 +255,22 @@ def nsd(
     float32 image header is off by up to 6e-8 relative. A strict comparison would then exclude
     every boundary element lying exactly on the tolerance, which can move NSD by several
     percentage points. A distance ``d`` therefore counts as within when
-    ``d <= tolerance * (1 + tie_rtol)``. The default 1e-6 exceeds both errors and stays below the
-    relative gap between distinct distances on an isotropic grid (about ``1 / (2 n)`` for a
-    squared distance of ``n`` voxels) for tolerances up to about 700 voxels.
+    ``d <= tolerance * (1 + tie_rtol)``. The default 1e-6 exceeds both errors, so a tolerance typed
+    from the decimal spacing counts the voxels that lie on it at that spacing. It also counts any
+    distinct grid distance up to 1e-6 above the tolerance. When all squared spacings are integer
+    multiples of a common g**2 (isotropic grids: g = spacing) that cannot happen below about
+    707 g, so the limit falls with g: for spacings of 0.703125, 0.703125 and 2 mm, g is 1/64 mm and
+    a distinct distance lies 8.5e-7 (relative) above a tolerance of 12 mm.
 
     ``tie_rtol=0`` compares in binary64, as SciPy-based tools such as MedPy and DeepMind's
     surface-distance do: each distance is the exact floating-point minimum of the expression
     SciPy's ``distance_transform_edt`` evaluates, so it lands on the same side of the tolerance
     as theirs. (SciPy itself returns a value one ulp above that minimum at a few voxels per
-    million.) MONAI casts distances to float32 before comparing them with the tolerance, which
-    counts exact ties as within and also distances within float32 resolution of the tolerance.
+    million.) With ``surface="mesh"`` it compares exacta's binary64 distances, so a tie follows the
+    last bit of the distance, which need not be MeshMetrics' (see the module docstring); the default
+    margin does not depend on it. MONAI casts distances to float32 before comparing them with the
+    tolerance, which counts exact ties as within and also distances within float32 resolution of
+    the tolerance.
 
     Args:
         tolerance: Accepted boundary deviation, in the units of ``spacing``. A scalar, or one
@@ -313,6 +341,11 @@ def _per_case_many(
 
     out = torch.tensor([s[1] for s in scores], dtype=torch.float64).expand(seg.batch, len(seg.classes), -1).clone()
     one_empty = torch.tensor([s[2] for s in scores], dtype=torch.float64)
+    # MeshMetrics 1.2 to 1.4.1 mesh NumPy masks in the box grown by one voxel, so their vertex
+    # coordinates are measured from the voxel before the box. Measuring from the same voxel makes
+    # the rounding of the coordinates, and with it many NSD ties, agree more often (see the module
+    # docstring). The added background changes nothing else.
+    margin = 1 if surface == "mesh" and seg.ndim == 3 else 0
     for b in range(seg.batch):
         # Bounding boxes of every class at once, read back in one sync. Working inside the box of
         # both masks is exact: outside it both are background, as outside the image.
@@ -326,7 +359,7 @@ def _per_case_many(
                 out[b, k] = one_empty
                 continue
             box = tuple(
-                slice(min(lo_p, lo_t), max(hi_p, hi_t) + 1)
+                slice(max(min(lo_p, lo_t) - margin, 0), max(hi_p, hi_t) + 1)
                 for lo_p, lo_t, hi_p, hi_t in zip(lo[0][cls], lo[1][cls], hi[0][cls], hi[1][cls])
             )
             jobs.append((k, cls, box))

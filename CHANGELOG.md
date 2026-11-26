@@ -4,6 +4,27 @@ Release notes for Exacta.
 
 ## Unreleased
 
+- **MeshMetrics compatibility:** with `surface="mesh"` in 3-D, masks are now meshed in the box
+  MeshMetrics 1.2 to 1.4.1 use for NumPy masks (the bounding box of both masks, starting one voxel
+  before it), so vertex coordinates are measured from the same voxel. This removes many differences
+  at NSD ties, the triangle centres whose distance to the other mesh equals the tolerance in exact
+  arithmetic, which `tie_rtol=0` decides by the last bit of the distance. On 24 test cases (spacings
+  1 and 0.5, tolerances 1 and 2), 13 differed from MeshMetrics by up to 0.004 in NSD before and all
+  agree to 1e-12 on x86-64 now. The agreement is not general: MeshMetrics computes a coordinate as
+  `origin + index * spacing` and exacta as `index * spacing`, which can differ in the last bit when
+  the product is inexact (at spacing 0.3 with tolerances 0.6 and 0.9, NSD differed by several
+  thousandths, up to 0.008 in the cases tried); the
+  closest point of a triangle comes from different algorithms; SimpleITK inputs and
+  `compute_metrics_multilabel` use other grids; and MeshMetrics' VTK rounds ties differently on
+  Linux aarch64 and macOS arm64 than on x86-64 (its NSD differed from exacta's in 22 of 32 test
+  cases there, where exacta's values equal those on x86-64). Where they differ, only ties do:
+  in the tests MeshMetrics' NSD lies between exacta's with every tie outside and with every tie
+  within the tolerance. The default tie margin counts every tie as within and does not depend on the
+  tool or the platform. Mesh HD, HD95 and ASSD change only in the last bits (about 1e-14); NSD with
+  the default tie margin is unchanged on the cases tested. The documentation now states which
+  MeshMetrics releases use discrete marching cubes (1.0 to 1.4.1) and that the 0.2 releases used
+  surface nets, and gives the range in which the default tie margin cannot count a distinct
+  distance in terms of the grid unit.
 - **Validation:** the exact squared distance transform (CPU and Triton) now rejects grids so
   anisotropic that a pass could overflow binary64 (squared distance over spacing above `1e300`,
   e.g. spacings `1e100` and `1e-100` on long lines), where its result would no longer be the exact
