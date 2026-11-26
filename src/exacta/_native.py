@@ -35,6 +35,41 @@ def regression_stats(pred: Tensor, target: Tensor, mask: Tensor | None, weight: 
     return out
 
 
+# Largest value of M / h that a pass of the exact distance transform may reach, where h is the
+# spacing of the pass and M bounds the squared distances along it. Breakpoints are about
+# M / (2 h) and tie tolerances 128 u M / h, so this keeps every intermediate quantity far below
+# the binary64 maximum (about 1.8e308), as the exactness argument assumes.
+EDT_MAX_SCALE = 1e300
+
+
+def check_edt_extent(shape: Sequence[int], spacing: Sequence[float]) -> None:
+    """Raise ``ValueError`` if a grid could overflow the exact squared distance transform.
+
+    ``shape`` and ``spacing`` describe the transformed axes, in order. The pass along an axis of
+    spacing ``h`` and ``n`` samples has squared distances up to ``M``, the squared extents of the
+    axes before it plus ``(h * n)^2``. Spacings in [1e-100, 1e100] keep ``M`` finite, but an
+    extremely anisotropic grid with long lines can still make ``M / h`` overflow, and then the
+    result would no longer be the exact minimum. Ordinary images are many orders of magnitude
+    inside the limit.
+    """
+    valid = all(math.isfinite(float(h)) and float(h) > 0 for h in spacing)
+    if len(spacing) != len(shape) or not valid:
+        return  # invalid spacings are reported by the kernels' own validation
+    bound = 0.0
+    for n, h in zip(shape, spacing):
+        h = float(h)
+        xmax = h * float(n)
+        scale = (bound + xmax * xmax) / h
+        if not scale <= EDT_MAX_SCALE:
+            raise ValueError(
+                f"spacing {tuple(float(s) for s in spacing)} on a grid of shape {tuple(shape)} "
+                f"is too anisotropic for the exact distance transform: a pass would reach "
+                f"squared distance / spacing = {scale:.3g}, above {EDT_MAX_SCALE:g}"
+            )
+        extent = h * float(n - 1)
+        bound += extent * extent
+
+
 def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> Tensor:
     """Squared Euclidean distance from every voxel to the nearest nonzero voxel of ``features``.
 
@@ -42,10 +77,12 @@ def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> T
     ``sum_i ((p_i - q_i) * h_i)^2`` rounded and summed in axis order, which is the expression
     SciPy's ``distance_transform_edt`` evaluates. The first ``batch_ndim`` axes index separate
     images, and ``spacing`` covers the others. CPU only. Returns float64; ``inf`` throughout an
-    image without nonzero voxels.
+    image without nonzero voxels. Raises ``ValueError`` for grids so anisotropic that the
+    transform could overflow (see :func:`check_edt_extent`).
     """
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
+    check_edt_extent(features.shape[batch_ndim:], spacing)
     features = _as_bytes(features)
     out = torch.empty(features.shape, dtype=torch.float64)
     _C.edt_sq(features, out, [float(s) for s in spacing], batch_ndim)

@@ -4,7 +4,14 @@ Release notes for Exacta.
 
 ## Unreleased
 
-Changes for the next release will be recorded here.
+- **Validation:** the exact squared distance transform (CPU and Triton) now rejects grids so
+  anisotropic that a pass could overflow binary64 (squared distance over spacing above `1e300`,
+  e.g. spacings `1e100` and `1e-100` on long lines), where its result would no longer be the exact
+  minimum. Spacings in `[1e-100, 1e100]` were accepted before without this check; ordinary images
+  are far inside the limit, and no value changes.
+- **Tests:** a GPU test checks that the Triton kernels' binary64 arithmetic is what the exactness
+  argument assumes: every add, subtract, multiply and divide rounded once, and no fused
+  multiply-add. The C++ and Triton passes now point to the lines of the published pseudo-code.
 
 ## 0.1.2 — 2026-11-26
 

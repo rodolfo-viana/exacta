@@ -249,3 +249,54 @@ def test_triton_scratch_scales_with_lines_not_blocks():
     peak = torch.cuda.max_memory_allocated() - base
     assert torch.equal(got, _native.edt_sq(features, (1.0, 0.5)))
     assert peak < 64 << 20, f"{peak / 2**20:.0f} MiB"
+
+
+@pytest.mark.parametrize("edt_sq", [_native.edt_sq, pytest.param(_triton, marks=needs_gpu)])
+def test_rejects_grids_anisotropic_enough_to_overflow(edt_sq):
+    # The first axis contributes (2e100)^2 = 4e200 to the bound of the second pass, whose spacing
+    # is 1e-100: squared distance / spacing would reach 4e300, past the guarded range.
+    features = torch.zeros(3, 20_000, dtype=torch.bool)
+    features[0, 0] = True
+    with pytest.raises(ValueError, match="too anisotropic"):
+        edt_sq(features, (1e100, 1e-100))
+
+
+@pytest.mark.parametrize("spacing", [(1e100, 1e100), (1e-100, 1e-100), (1e100, 1.0), (1.0, 1e-100)])
+def test_extreme_but_safe_spacings_are_exact(spacing):
+    features = torch.from_numpy(_features((7, 9), 0.2))
+    features[0, 0] = True
+    expected = _edt_sq_torch(features, spacing)
+    assert torch.equal(_native.edt_sq(features, spacing), expected)
+    if GPU:
+        assert torch.equal(_triton(features, spacing), expected)
+
+
+def _compiled_kernels(jit):
+    """Compiled variants of a Triton JIT function, or [] if this Triton keeps them elsewhere."""
+    kernels = []
+    for entry in getattr(jit, "device_caches", {}).values():
+        cache = entry[0] if isinstance(entry, tuple) else entry
+        if isinstance(cache, dict):
+            kernels += [k for k in cache.values() if hasattr(k, "asm")]
+    return kernels
+
+
+@needs_gpu
+def test_triton_arithmetic_is_what_the_proof_assumes():
+    # The exactness argument assumes binary64 operations rounded once each: no fused
+    # multiply-add and IEEE division. In PTX, add/sub/mul with an explicit rounding modifier
+    # (.rn) are never contracted into an fma by ptxas, and div.rn.f64 is correctly rounded.
+    import re
+
+    features = torch.from_numpy(_features((9, 11, 13), 0.05))
+    _triton(features, (1.1, 0.7, 1.3))
+    jits = (_triton_edt._first_pass, _triton_edt._edt_pass)
+    kernels = [k for jit in jits for k in _compiled_kernels(jit)]
+    if not kernels:
+        pytest.skip("this Triton version does not expose compiled kernels")
+    for kernel in kernels:
+        ops = re.findall(r"\b(add|sub|mul|div|fma|mad)((?:\.[a-z0-9]+)*)\.f64\b", kernel.asm["ptx"])
+        assert ops, "no binary64 arithmetic found in the PTX"
+        for op, modifiers in ops:
+            assert op not in ("fma", "mad"), f"fused {op}{modifiers}.f64 in the EDT kernel"
+            assert "rn" in modifiers.split("."), f"{op}{modifiers}.f64 without .rn"
