@@ -1,6 +1,7 @@
 """The ``surface="mesh"`` representation, checked against VTK and MeshMetrics."""
 
 import math
+import platform
 import warnings
 
 import numpy as np
@@ -197,18 +198,48 @@ def test_matches_meshmetrics_3d(device, shape, spacing, seed):
         assert float(value[0, 0]) == pytest.approx(expected[name], rel=1e-9), name
 
 
-@pytest.mark.parametrize(
-    ("shape", "spacing"),
-    [((24, 26, 28), (1.0, 1.0, 1.0)), ((20, 22, 24), (1.0, 1.0, 1.0)), ((16, 20, 12), (3.0, 0.8, 0.8)),
-     ((24, 24, 24), (0.5, 0.5, 0.5))],
-)
+# Tolerances equal to grid distances put many triangle centres exactly on the tolerance (ties). A
+# tie is decided by the last bit of the distance, which depends on the tool and on the VTK build.
+_EXACT_TIE_GRIDS = [((24, 26, 28), (1.0, 1.0, 1.0)), ((20, 22, 24), (1.0, 1.0, 1.0)),
+                    ((24, 24, 24), (0.5, 0.5, 0.5))]
+_TIE_GRIDS = [*_EXACT_TIE_GRIDS, ((16, 20, 12), (3.0, 0.8, 0.8))]
+
+
+def _tie_case(shape, seed):
+    rng = np.random.default_rng(seed)
+    return _blobs(shape, rng), _blobs(shape, rng)
+
+
+@pytest.mark.parametrize(("shape", "spacing"), _TIE_GRIDS)
 @pytest.mark.parametrize("tolerance", [1.0, 2.0])
 @pytest.mark.parametrize("seed", [0, 1, 2, 3])
-def test_nsd_at_grid_distances_matches_meshmetrics(device, shape, spacing, tolerance, seed):
-    # Tolerances equal to grid distances put many triangle centres exactly on the tolerance;
-    # MeshMetrics decides those ties by the rounding of its coordinates, which the crop reproduces.
-    rng = np.random.default_rng(seed)
-    pred, target = _blobs(shape, rng), _blobs(shape, rng)
+def test_nsd_at_grid_distances_lies_between_the_tie_decisions(device, shape, spacing, tolerance, seed):
+    # Wherever the tools decide ties differently, only ties differ: MeshMetrics' NSD lies between
+    # exacta's with every tie outside the tolerance and with every tie within it. This holds on every
+    # platform, including arm64, where MeshMetrics' VTK rounds the ties differently.
+    pred, target = _tie_case(shape, seed)
+    expected = _meshmetrics(target, pred, spacing, tolerance=tolerance)["nsd"]
+    P, T = (torch.from_numpy(x)[None, None].to(device) for x in (pred, target))
+    kw = dict(spacing=spacing, surface="mesh", input_format="one-hot")
+    outside = float(EF.nsd(P, T, tolerance=tolerance * (1 - 1e-9), tie_rtol=0, **kw)[0, 0])
+    within = float(EF.nsd(P, T, tolerance=tolerance, tie_rtol=1e-9, **kw)[0, 0])
+    assert outside - 1e-12 <= expected <= within + 1e-12
+
+
+@pytest.mark.skipif(
+    platform.machine().lower() not in ("x86_64", "amd64"),
+    reason="the VTK wheels for arm64 fuse multiply-add (14 such instructions in vtkTriangle::EvaluatePosition "
+    "of the 9.7.1 aarch64 wheel, none in the x86-64 one), so MeshMetrics rounds distances at ties "
+    "differently from exacta there",
+)
+@pytest.mark.parametrize(("shape", "spacing"), _EXACT_TIE_GRIDS)
+@pytest.mark.parametrize("tolerance", [1.0, 2.0])
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_nsd_ties_match_meshmetrics_with_exact_coordinates(device, shape, spacing, tolerance, seed):
+    # Only for spacings 1 and 0.5, whose vertex coordinates are exact: MeshMetrics computes them as
+    # origin + index * spacing and exacta as index * spacing, which differ in the last bit for other
+    # spacings. The crop from the voxel before the box makes the offsets the same (NumPy masks).
+    pred, target = _tie_case(shape, seed)
     expected = _meshmetrics(target, pred, spacing, tolerance=tolerance)
     got = _ours(pred, target, spacing, tolerance, device)
     assert float(got["nsd"][0, 0]) == pytest.approx(expected["nsd"], abs=1e-12)
