@@ -81,7 +81,10 @@ turning excluded regions into background would create artificial boundaries or a
 
 Distance metrics require spacing in the tensor's spatial-axis order. Supply one spatial
 tuple for the batch or a `(B, ndim)` array for per-case spacing. The distance unit is the
-spacing unit. NSD requires `tolerance`, which may be scalar or per selected class.
+spacing unit. NSD requires `tolerance`, which may be scalar or per selected class. Distances
+equal to the tolerance count as within it even after rounding, through the relative margin
+`tie_rtol` (default `1e-6`, since 0.1.0); see
+[Conventions](https://github.com/rodolfo-viana/exacta/wiki/Conventions).
 
 For an example using synthetic hard labels:
 
@@ -96,6 +99,27 @@ scores = EF.nsd(prediction, target, num_classes=2, include_background=False,
                 spacing=(1.5, 0.8, 0.8), tolerance=1.0, surface="surfels")
 assert scores.shape == (1, 1)
 ```
+
+## Reporting signatures (since 0.1.0)
+
+A metric's name does not fix its value: HD95 depends on the surface representation and on how
+the two directions are joined, and NSD on how distances equal to the tolerance are compared.
+`exacta.conventions.signature` writes every such choice, with defaults filled in, and the Exacta
+version, in one string to report next to the number:
+
+```python
+from exacta.conventions import parse_signature, signature
+
+text = signature("nsd", tolerance=2.0)
+# 'nsd[both_empty=nan;one_empty=0.0;surface=voxels;tie_rtol=1e-06;tolerance=2.0]@exacta-0.1.0'
+name, options, version = parse_signature(text)  # options for functional.evaluate
+```
+
+`parse_signature` returns options that make `functional.evaluate` recompute the same score bit
+for bit. Floats are written as Python's `repr`, so `nan`, `inf` and values such as `1e-06` read
+back exactly. `signatures(selection)` covers a selection, and `MetricCollection.signatures()`
+adds `aggregate=cases` or `aggregate=pooled`, which `parse_signature` returns in the options and
+`evaluate` does not accept; pop it before calling `evaluate`.
 
 ## Aggregation and distributed evaluation
 
