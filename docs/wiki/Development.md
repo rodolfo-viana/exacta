@@ -21,7 +21,7 @@ establish GPU correctness.
 Optional reference packages can be installed with:
 
 ```bash
-python -m pip install monai medpy scikit-image vtk SimpleITK \
+python -m pip install monai kornia medpy scikit-image vtk SimpleITK \
   "git+https://github.com/google-deepmind/surface-distance.git" \
   "git+https://github.com/gasperpodobnik/MeshMetrics.git"
 ```
