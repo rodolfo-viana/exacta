@@ -15,4 +15,4 @@
 - [Performance](https://github.com/rodolfo-viana/exacta/wiki/Performance)
 - [Development](https://github.com/rodolfo-viana/exacta/wiki/Development)
 
-Version: **0.1.0**.
+Version: **0.1.1**.
