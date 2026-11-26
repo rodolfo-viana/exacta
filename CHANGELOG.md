@@ -2,6 +2,10 @@
 
 Release notes for Exacta.
 
+## Unreleased
+
+Changes for the next release will be recorded here.
+
 ## 0.1.2 — 2026-11-26
 
 Version 0.1.2 makes every surface-distance score bit-reproducible across machines.
