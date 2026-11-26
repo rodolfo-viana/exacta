@@ -352,6 +352,10 @@ $$
 \mathcal{L}_{\mathrm{Lovasz\ hinge}}=\sum_j\max(e_{(j)},0)\,\Delta J_j.
 $$
 
+Both Lovasz losses compute $\Delta J_j$ from integer counts of the sorted prefixes, with one
+binary64 division per increment, instead of subtracting rounded Jaccard values, so the error of
+a gradient component does not grow with the number of voxels.
+
 Binary input has shape `(B,1,*spatial)` with target `(B,*spatial)`. Independent overlapping
 labels use `multilabel=True` and a same-shaped binary target. No sigmoid is applied and
 soft targets are rejected. Masks can be shared or per-label; `ignore_index` applies only
