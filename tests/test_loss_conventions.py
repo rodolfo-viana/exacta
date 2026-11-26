@@ -6,9 +6,14 @@ transcriptions of Kornia's documented definitions, in binary64, so the compositi
 without Kornia installed; the same compositions are also compared with the installed Kornia.
 """
 
+from datetime import timedelta
+
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn.functional as F
+from _process import destroy_process_group
 
 from exacta import _triton_losses
 from exacta.losses import DiceCELoss, DiceLoss, FocalTverskyLoss, GeneralizedDiceLoss, TverskyLoss
@@ -495,3 +500,35 @@ def test_auto_backend_leaves_the_fused_kernels_for_the_new_conventions(cls, kwar
     assert not cls(**kwargs)._fusable(logits_gpu, target_gpu)
     assert cls()._fusable(logits_gpu, target_gpu)  # the default still fuses
     torch.testing.assert_close(cls(**kwargs)(logits_gpu, target_gpu).cpu(), cpu, rtol=1e-12, atol=1e-14)
+
+
+# --- global distributed reduction ------------------------------------------------------------------------
+
+
+def _distributed_worker(rank, rendezvous):
+    dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2,
+                            timeout=timedelta(seconds=120))
+    try:
+        torch.set_num_threads(1)
+        logits, target = _inputs((3, 4, 5, 6), seed=27)
+        target[target == 3] = 2  # class 3 is absent from the global batch
+        target[2, :2] = IGNORE
+        shard = slice(0, 1) if rank == 0 else slice(1, 3)
+        options = dict(batch_dice=True, smooth=1e-3, ignore_index=IGNORE)
+        for cls, extra in ((DiceLoss, {}), (TverskyLoss, dict(alpha=0.3, beta=0.7))):
+            for convention in (dict(average="micro"), dict(skip_absent=True), dict(smooth_numerator=False)):
+                x = logits.clone().requires_grad_(True)
+                expected = cls(**extra, **options, **convention)(x, target)
+                (expected_grad,) = torch.autograd.grad(expected, x)
+                local = logits[shard].clone().requires_grad_(True)
+                actual = cls(**extra, **options, **convention, distributed=True)(local, target[shard])
+                (local_grad,) = torch.autograd.grad(actual, local)
+                torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-14)
+                # Before DDP's averaging, logit gradients carry the documented world-size factor.
+                torch.testing.assert_close(local_grad / 2, expected_grad[shard], rtol=1e-10, atol=1e-13)
+    finally:
+        destroy_process_group()
+
+
+def test_new_conventions_pool_across_two_ranks(tmp_path):
+    mp.spawn(_distributed_worker, args=(str(tmp_path / "gloo"),), nprocs=2, join=True)
