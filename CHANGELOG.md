@@ -2,6 +2,10 @@
 
 Release notes for Exacta.
 
+## Unreleased
+
+Changes for the next release will be recorded here.
+
 ## 0.1.1 — 2026-11-25
 
 Version 0.1.1 fixes a rare rounding defect in the exact squared Euclidean distance transform
