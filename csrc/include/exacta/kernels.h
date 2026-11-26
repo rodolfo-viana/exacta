@@ -258,6 +258,25 @@ int exacta_sort_pairs_f64(double *keys, double *values, int64_t n, int num_threa
 int exacta_exact_sum_f64(const double *x, const double *w, const uint8_t *select, int64_t n,
                          double *sum);
 
+/* NumPy's pairwise sum of `n` doubles, as np.sum evaluates a float64 vector since NumPy 2.3
+ * (numpy/_core/src/umath/loops_utils.h.src): vectors of fewer than 8 terms are added from the left;
+ * up to 128 terms go to 8 accumulators (term i to accumulator i mod 8), combined as
+ * ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7)), with the n mod 8 last terms added from the
+ * left; longer vectors are split at n / 2 rounded down to a multiple of 8 and the two sums added.
+ * The reduction starts from 0.0. The result depends only on the terms, in this order, and not on the
+ * NumPy version, the instruction set or the number of threads. Runs serially.
+ */
+int exacta_pairwise_sum_f64(const double *x, int64_t n, double *sum);
+
+/* Nearest rank of a weighted sample whose weights `w` (n >= 1) are in sorted order of their
+ * values: writes to `index` the smallest i with c[i] / W >= level, or n - 1 if there is none,
+ * where c is the running sum of the weights from the left (c[0] = w[0], c[i] = c[i - 1] + w[i],
+ * as np.cumsum) and W the pairwise sum of all of them (exacta_pairwise_sum_f64). This is
+ * DeepMind's surface-distance rule np.searchsorted(np.cumsum(w) / np.sum(w), level), with the
+ * order of every addition fixed. Returns EXACTA_INVALID_ARGUMENT for n < 1.
+ */
+int exacta_nearest_rank_f64(const double *w, int64_t n, double level, int64_t *index);
+
 /* DeepMind's neighbour code at every corner of the voxels of a 2-D or 3-D mask (`shape`; nonzero
  * is inside): `code` has shape + 1 along each axis, and the code of corner c has one bit per
  * voxel c - 1 + o of the block around it, o in {0, 1}^ndim, set when the voxel is inside (outside
@@ -272,14 +291,22 @@ int exacta_neighbour_codes_u8(const uint8_t *mask, const int64_t *shape, int ndi
  * neither 0 nor all ones, in C order, the counts[code] elements of `table` (codes x max_per_code
  * x ndim x ndim offsets in half-voxels from the block's first voxel), as vertices in physical
  * units, (h / 2) * spacing for half-voxel coordinate h; with their centres (VTK's parametric
- * centre of a triangle, the midpoint of a segment), blocks (flat index into `code`), codes and
- * slots among their code's elements. `num_elements` must be the total.
+ * centre of a triangle, the midpoint of a segment), sizes (area of a triangle, length of a
+ * segment), blocks (flat index into `code`), codes and slots among their code's elements.
+ * `num_elements` must be the total.
+ *
+ * Vertices, centres and sizes are fixed binary64 expressions of the table and the spacing: every
+ * product, sum, difference, quotient and square root is rounded once, in the order of the source
+ * (meshing.cpp), whatever the compiler, the instruction set or the number of threads. A
+ * triangle's area is 0.5 * sqrt((c0 * c0 + c1 * c1) + c2 * c2) for the cross product c of its two
+ * edges from the first vertex, c0 = e1[1] * e2[2] - e1[2] * e2[1] and so on; a segment's length is
+ * sqrt(x * x + y * y).
  */
 int exacta_mesh_elements_f64(const uint8_t *code, const int64_t *shape, int ndim,
                              const int64_t *table, const int64_t *counts, int64_t max_per_code,
                              const double *spacing, int64_t num_elements, double *elements,
-                             double *centres, int64_t *block, int64_t *element_code,
-                             int64_t *slot, int num_threads);
+                             double *centres, double *sizes, int64_t *block,
+                             int64_t *element_code, int64_t *slot, int num_threads);
 
 /* out[i] = values[i] != 0 for `n` values, as bytes. Returns EXACTA_INVALID_ARGUMENT if a value
  * is neither 0 nor 1 (NaN included); `out` is then still written.

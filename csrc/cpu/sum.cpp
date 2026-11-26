@@ -1,4 +1,5 @@
-// Correctly rounded sums, for statistics over surface elements (ASSD, weighted NSD).
+// Correctly rounded sums, for statistics over surface elements (ASSD, weighted NSD), and NumPy's
+// pairwise sum with its grouping fixed, for the nearest-rank percentile of weighted surfaces.
 //
 // A plain or parallel sum depends on the order of the terms, and so on the number of threads and
 // on the device; the last bits of a mean then change from one machine to another. The sum
@@ -8,6 +9,13 @@
 // them exactly with two-sum, and the partials are rounded to one double at the end.
 // J. R. Shewchuk, "Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric
 // Predicates", Discrete & Computational Geometry 18 (1997).
+//
+// The nearest-rank rule of weighted percentiles (DeepMind's surface-distance) needs a total and a
+// running sum whose rounding is part of the rule, because it compares a rounded quotient with a
+// rounded level. DeepMind forms the total with np.sum, a pairwise sum whose grouping NumPy changed
+// in 2.3 (release notes, "Changes to the main iterator and potential numerical changes"); here the
+// grouping NumPy 2.3 and later use is fixed in the source, so the rule does not depend on the
+// NumPy version (exacta_pairwise_sum_f64, exacta_nearest_rank_f64).
 //
 // Two properties are design choices, not consequences of the algorithm:
 //  - Intermediate overflow. When a partial sum overflows, the function returns +-inf even if the
@@ -80,7 +88,52 @@ double exact_sum(const double *x, const double *w, const std::uint8_t *select, s
   return hi;
 }
 
+// NumPy's DOUBLE_pairwise_sum (numpy/_core/src/umath/loops_utils.h.src). Only additions, in the
+// order written, so no compiler flag changes the result.
+double pairwise_sum(const double *a, std::int64_t n) {
+  if (n < 8) {
+    double res = 0.0;
+    for (std::int64_t i = 0; i < n; ++i) res += a[i];
+    return res;
+  }
+  if (n <= 128) {  // 8 accumulators: term i goes to accumulator i mod 8
+    double r[8];
+    for (int j = 0; j < 8; ++j) r[j] = a[j];
+    std::int64_t i = 8;
+    for (; i < n - (n % 8); i += 8) {
+      for (int j = 0; j < 8; ++j) r[j] += a[i + j];
+    }
+    double res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+    for (; i < n; ++i) res += a[i];
+    return res;
+  }
+  std::int64_t n2 = n / 2;  // split at a multiple of 8
+  n2 -= n2 % 8;
+  return pairwise_sum(a, n2) + pairwise_sum(a + n2, n - n2);
+}
+
 }  // namespace
+
+extern "C" int exacta_pairwise_sum_f64(const double *x, int64_t n, double *sum) {
+  if (n < 0 || sum == nullptr || (n > 0 && x == nullptr)) return EXACTA_INVALID_ARGUMENT;
+  *sum = 0.0 + pairwise_sum(x, n);  // np.sum starts from the identity of the addition
+  return EXACTA_OK;
+}
+
+extern "C" int exacta_nearest_rank_f64(const double *w, int64_t n, double level, int64_t *index) {
+  if (n < 1 || w == nullptr || index == nullptr) return EXACTA_INVALID_ARGUMENT;
+  const double total = 0.0 + pairwise_sum(w, n);
+  double cumulative = 0.0;
+  for (std::int64_t i = 0; i < n; ++i) {
+    cumulative = i == 0 ? w[0] : cumulative + w[i];  // np.cumsum: left to right
+    if (cumulative / total >= level) {
+      *index = i;
+      return EXACTA_OK;
+    }
+  }
+  *index = n - 1;
+  return EXACTA_OK;
+}
 
 extern "C" int exacta_exact_sum_f64(const double *x, const double *w, const uint8_t *select,
                                     int64_t n, double *sum) {

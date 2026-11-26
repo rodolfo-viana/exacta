@@ -287,10 +287,15 @@ NORMALS_3D: tuple[tuple[tuple[float, float, float], ...], ...] = (
 def surfel_measures(spacing: tuple[float, ...]) -> np.ndarray:
     """Area (3-D) or length (2-D) of the surface in a block, indexed by its neighbour code.
 
-    The arithmetic follows DeepMind's ``create_table_neighbour_code_to_surface_area`` and
-    ``create_table_neighbour_code_to_contour_length`` operation for operation, so the values
-    agree to the last bit.
+    The expressions are DeepMind's ``create_table_neighbour_code_to_surface_area`` and
+    ``create_table_neighbour_code_to_contour_length``, with every operation written out and
+    rounded once, left to right, on Python floats (which round each operation separately on every
+    platform): nothing here depends on a BLAS library, on the C library's ``pow`` or on the CPU's
+    fused multiply-add. DeepMind's own code evaluates a 3-D norm with BLAS (``np.linalg.norm``)
+    and a 2-D square with ``**``, so its values can differ in the last bit between machines; where
+    they use the same roundings, as with OpenBLAS on x86-64 here, the values agree to the last bit.
     """
+    spacing = tuple(float(h) for h in spacing)
     if len(spacing) == 2:
         return _contour_lengths(spacing)
     if len(spacing) == 3:
@@ -299,22 +304,25 @@ def surfel_measures(spacing: tuple[float, ...]) -> np.ndarray:
 
 
 def _surface_areas(spacing: tuple[float, ...]) -> np.ndarray:
-    # A triangle's normal scales by the cofactors of diag(spacing) when the grid is stretched.
+    """Per code, the sum over the code's normals ``n``, from the left starting at 0.0, of
+    ``sqrt((v0 * v0 + v1 * v1) + v2 * v2)`` for ``v = (n0 * s1 * s2, n1 * s0 * s2, n2 * s0 * s1)``:
+    a triangle's normal scales by the cofactors of ``diag(spacing)`` when the grid is stretched."""
+    s0, s1, s2 = spacing
     out = np.zeros(256)
     for code, normals in enumerate(NORMALS_3D):
         total = 0.0
         for n in normals:
-            scaled = np.array(
-                [n[0] * spacing[1] * spacing[2], n[1] * spacing[0] * spacing[2], n[2] * spacing[0] * spacing[1]]
-            )
-            total += float(np.linalg.norm(scaled))
+            v0, v1, v2 = n[0] * s1 * s2, n[1] * s0 * s2, n[2] * s0 * s1
+            total += math.sqrt((v0 * v0 + v1 * v1) + v2 * v2)
         out[code] = total
     return out
 
 
 def _contour_lengths(spacing: tuple[float, ...]) -> np.ndarray:
     """Marching squares. Bits 8, 4, 2, 1 are the block's voxels (0, 0), (0, 1), (1, 0), (1, 1)."""
-    diag = 0.5 * math.sqrt(spacing[0] ** 2 + spacing[1] ** 2)  # cuts one corner off the block
+    # a corner cut off the block: half the diagonal, sqrt(s0 * s0 + s1 * s1) / 2 (the square is the
+    # correctly rounded product, not the C library's pow(s, 2))
+    diag = 0.5 * math.sqrt(spacing[0] * spacing[0] + spacing[1] * spacing[1])
     out = np.zeros(16)
     for code in range(1, 15):
         inside = bin(code).count("1")

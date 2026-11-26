@@ -46,6 +46,64 @@ def _inputs() -> tuple[Any, Any]:
     return torch.from_numpy(prediction.astype(np.int64)), torch.from_numpy(target.astype(np.int64))
 
 
+def _random_masks(shape: tuple[int, ...], seed: int) -> tuple[Any, Any]:
+    """Two masks of independent noise (density 1/2): a surface of many small triangles whose areas
+    are sensitive to fused multiply-adds (PCG64 draws the same numbers on every machine)."""
+    import numpy as np
+    import torch
+
+    rng = np.random.default_rng(seed)
+    return torch.from_numpy(rng.random(shape) < 0.5), torch.from_numpy(rng.random(shape) < 0.5)
+
+
+def _percentile_vectors(seed: int) -> list[tuple[Any, float]]:
+    """Sorted vectors of grid-like distances (square roots of small integers times a spacing
+    factor, so that many are equal) and the levels at which their percentile is taken."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    out = []
+    for i in range(400):
+        small = (1, 2, 3, 8, 20, 99, 100, 101)
+        n = int(rng.integers(1, 3000)) if i % 4 else small[int(rng.integers(0, len(small)))]
+        factor = (1.0, 0.64, 1.8769, 0.5917779, 0.09)[int(rng.integers(0, 5))]
+        d = np.sort(np.sqrt(rng.integers(0, 400, n) * factor))
+        levels = (95.0, 50.0, 99.0, 90.0, 0.0, 1.0, 37.5, 99.9, 5.0)
+        q = levels[int(rng.integers(0, len(levels)))] if i % 2 else 100.0 * float(rng.random())
+        out.append((d, q))
+    return out
+
+
+def _surfel_tables() -> Any:
+    """Surfel area/length tables of many spacings; the 2-D ones include spacings at which the C
+    library's pow(s, 2) and the correctly rounded square differ."""
+    import numpy as np
+
+    from exacta.functional._surfel_tables import surfel_measures
+
+    rng = np.random.default_rng(SEED + 5)
+    tables = [surfel_measures(s) for s in ((0.7, 1.37, 0.3), (2.5, 0.7, 0.9), (1.0, 1.0, 1.0), (0.7, 1.3), (1.5, 0.8))]
+    tables += [surfel_measures(tuple(float(x) for x in 0.1 + 4.9 * rng.random(3))) for _ in range(40)]
+    tables += [surfel_measures(tuple(float(x) for x in 0.1 + 4.9 * rng.random(2))) for _ in range(4000)]
+    return np.concatenate(tables)
+
+
+def _weights_summary() -> Any:
+    """Pairwise sums and nearest-rank indices of seeded weight vectors of many lengths."""
+    import numpy as np
+
+    from exacta import _native
+
+    rng = np.random.default_rng(SEED + 6)
+    out = []
+    for n in (1, 2, 7, 8, 20, 127, 128, 129, 1000, 4097, 8191, 8192, 8193, 20000, 100001):
+        for kind in range(3):
+            w = (rng.random(n) + 0.1, np.full(n, 0.1), np.array([0.125, 0.25, 0.5])[rng.integers(0, 3, n)])[kind]
+            out.append(_native.pairwise_sum(w))
+            out += [float(_native.nearest_rank(w, q / 100.0)) for q in (5.0, 50.0, 90.0, 95.0, 99.0, 100.0)]
+    return np.array(out)
+
+
 def _digest(value: Any) -> dict[str, Any]:
     import numpy as np
 
@@ -61,6 +119,7 @@ def _digest(value: Any) -> dict[str, Any]:
 
 
 def _cases() -> dict[str, Callable[[], Any]]:
+    import numpy as np
     import torch
 
     import exacta.components as components
@@ -79,6 +138,34 @@ def _cases() -> dict[str, Callable[[], Any]]:
         cases[f"hd95_{surface}"] = partial(F.hd95, pred, target, **kw)
         cases[f"assd_{surface}"] = partial(F.assd, pred, target, **kw)
         cases[f"nsd_{surface}"] = partial(F.nsd, pred, target, tolerance=1.5, **kw)
+    # Arithmetic between the exact squared distances and the scores: each is a fixed binary64
+    # expression, so these are the same bits whatever the CPU's vector instructions, the BLAS, the
+    # C library, the PyTorch build or the NumPy version.
+    from exacta.functional import surface as S
+
+    spacing_3d, spacing_2d = (0.7, 1.37, 0.3), (0.7, 1.3)
+    noise_3d, noise_2d = _random_masks((24, 24, 24), SEED + 1), _random_masks((40, 36), SEED + 2)
+    cases["mesh_sizes_3d"] = lambda: S._mesh(noise_3d[0], spacing_3d).sizes.numpy()
+    cases["mesh_centres_3d"] = lambda: S._mesh(noise_3d[0], spacing_3d).centres.numpy()
+    cases["mesh_sizes_2d"] = lambda: S._mesh(noise_2d[0], spacing_2d).sizes.numpy()
+    rng = np.random.default_rng(SEED + 4)
+    blobs_3d = tuple(torch.from_numpy(_blobs(rng, (1, 26, 24, 22), threshold=3 * 256 + 40)[0]) for _ in range(2))
+    blobs_2d = tuple(torch.from_numpy(_blobs(rng, (1, 44, 40), threshold=2 * 256 + 20)[0]) for _ in range(2))
+    for label, (p, t), spacing in (
+        ("noise_3d", noise_3d, spacing_3d), ("noise_2d", noise_2d, spacing_2d),
+        ("blobs_3d", blobs_3d, spacing_3d), ("blobs_2d", blobs_2d, spacing_2d),
+    ):
+        kw = {"spacing": spacing, "input_format": "one-hot"}
+        for surface in ("surfels", "mesh"):
+            sk = {**kw, "surface": surface}
+            cases[f"{label}_hd95_{surface}"] = partial(F.hd95, p[None, None], t[None, None], **sk)
+            cases[f"{label}_assd_{surface}"] = partial(F.assd, p[None, None], t[None, None], **sk)
+            cases[f"{label}_nsd_{surface}"] = partial(F.nsd, p[None, None], t[None, None], tolerance=1.0, **sk)
+        cases[f"{label}_hd95_voxels_pooled"] = partial(F.hd95, p[None, None], t[None, None], combine="pooled", **kw)
+    vectors = _percentile_vectors(SEED + 3)
+    cases["percentile_linear"] = lambda: [S._linear_percentile(d, q) for d, q in vectors]
+    cases["surfel_tables"] = _surfel_tables
+    cases["pairwise_sum_nearest_rank"] = _weights_summary
     cases["hd95_voxels_torch_edt"] = lambda: F.hd95(pred, target, spacing=SPACING, num_classes=2, backend="torch")
     cases["label_6"] = lambda: components.label(target[0].bool(), connectivity=1)[0]
     cases["label_26"] = lambda: components.label(target[0].bool(), connectivity=3)[0]

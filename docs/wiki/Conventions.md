@@ -70,6 +70,23 @@ widens a tolerance of zero. `tie_rtol=0` reproduces SciPy-based tools (MedPy, De
 surface-distance), which compare in binary64; MONAI compares float32 distances, which counts
 exact ties as the default does.
 
+**Fixed arithmetic (since 0.1.3).** After the exact squared distances, each score is a fixed
+sequence of binary64 operations, every one rounded once, so the bits of a score do not depend on
+the CPU's vector instructions, the BLAS or C library, the PyTorch or NumPy version, the number of
+threads or the device. A distance is the correctly rounded square root of the squared distance.
+For voxels, $Q_q$ with $q<100$ is `numpy.percentile(d, q)` (method `"linear"`) bit for bit: with
+$p=\mathrm{fl}((n-1)\,\mathrm{fl}(q/100))$, $k=\lfloor p\rfloor$ and $t=p-k$ it is
+$d_k+(d_{k+1}-d_k)\,t$ for $t<0.5$ and $d_{k+1}-(d_{k+1}-d_k)(1-t)$ otherwise. A surfel's area is
+DeepMind's table with each operation written out, $\sum_n\sqrt{(v_0^2+v_1^2)+v_2^2}$ with
+$v=(n_0s_1s_2,\,n_1s_0s_2,\,n_2s_0s_1)$ (in 2D the corner cut is $\tfrac12\sqrt{s_0s_0+s_1s_1}$),
+and a mesh triangle's area is $\tfrac12\sqrt{(c_0^2+c_1^2)+c_2^2}$ for the cross product $c$ of two
+edges ($c_0=e_{1,1}e_{2,2}-e_{1,2}e_{2,1}$ and so on), computed in the compiled kernels. The
+area-weighted percentile takes the first sorted element with
+$\mathrm{fl}(c_i/W)\geq\mathrm{fl}(q/100)$, where $c_i$ is the running sum of the weights from the
+left and $W$ their pairwise sum, grouped as `np.sum` groups it since NumPy 2.3. Means and the
+weight within the tolerance are correctly rounded sums, and the NSD bound is
+$\mathrm{fl}(\tau\,\mathrm{fl}(1+\rho))$.
+
 Empty surfaces use the explicit policies in the table rather than these ratios.
 
 ## Loss conventions

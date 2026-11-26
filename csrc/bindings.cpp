@@ -407,6 +407,32 @@ double exact_sum(nb::ndarray<const double, nb::ndim<1>, nb::device::cpu, nb::c_c
   return sum;
 }
 
+// NumPy's pairwise sum with its grouping fixed (see exacta_pairwise_sum_f64).
+double pairwise_sum(nb::ndarray<const double, nb::ndim<1>, nb::device::cpu, nb::c_contig> x) {
+  double sum = 0.0;
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_pairwise_sum_f64(x.data(), static_cast<std::int64_t>(x.shape(0)), &sum);
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+  return sum;
+}
+
+// Index of the nearest rank of a weighted sample (see exacta_nearest_rank_f64).
+std::int64_t nearest_rank(nb::ndarray<const double, nb::ndim<1>, nb::device::cpu, nb::c_contig> w,
+                          double level) {
+  if (w.shape(0) == 0) throw std::invalid_argument("nearest_rank: w must not be empty");
+  std::int64_t index = 0;
+  int status;
+  {
+    nb::gil_scoped_release release;
+    status = exacta_nearest_rank_f64(w.data(), static_cast<std::int64_t>(w.shape(0)), level, &index);
+  }
+  if (status != EXACTA_OK) throw std::runtime_error(exacta_status_string(status));
+  return index;
+}
+
 // Returns false when a key or value is NaN.
 bool sort_pairs(nb::ndarray<double, nb::ndim<1>, nb::device::cpu, nb::c_contig> keys,
                 nb::ndarray<double, nb::ndim<1>, nb::device::cpu, nb::c_contig> values,
@@ -548,6 +574,7 @@ std::int64_t neighbour_codes(Bytes mask, Codes code, Table<1> counts, int num_th
 void mesh_elements(Codes code, Table<4> table, Table<1> counts, std::vector<double> spacing,
                    nb::ndarray<double, nb::ndim<3>, nb::device::cpu, nb::c_contig> elements,
                    nb::ndarray<double, nb::ndim<2>, nb::device::cpu, nb::c_contig> centres,
+                   nb::ndarray<double, nb::ndim<1>, nb::device::cpu, nb::c_contig> sizes,
                    Counts block, Counts element_code, Counts slot, int num_threads) {
   const std::vector<std::int64_t> shape = mask_shape_of(code);
   const auto ndim = static_cast<std::size_t>(shape.size());
@@ -555,8 +582,8 @@ void mesh_elements(Codes code, Table<4> table, Table<1> counts, std::vector<doub
   if (spacing.size() != ndim || table.shape(0) != counts.shape(0) ||
       counts.shape(0) != (std::size_t(1) << (1 << ndim)) || table.shape(2) != ndim ||
       table.shape(3) != ndim || elements.shape(1) != ndim || elements.shape(2) != ndim ||
-      centres.shape(0) != m || centres.shape(1) != ndim || block.shape(0) != m ||
-      element_code.shape(0) != m || slot.shape(0) != m) {
+      centres.shape(0) != m || centres.shape(1) != ndim || sizes.shape(0) != m ||
+      block.shape(0) != m || element_code.shape(0) != m || slot.shape(0) != m) {
     throw std::invalid_argument("mesh_elements: arguments disagree in shape");
   }
   int status;
@@ -565,8 +592,8 @@ void mesh_elements(Codes code, Table<4> table, Table<1> counts, std::vector<doub
     status = exacta_mesh_elements_f64(
         code.data(), shape.data(), static_cast<int>(ndim), table.data(), counts.data(),
         static_cast<std::int64_t>(table.shape(1)), spacing.data(), static_cast<std::int64_t>(m),
-        elements.data(), centres.data(), block.data(), element_code.data(), slot.data(),
-        num_threads);
+        elements.data(), centres.data(), sizes.data(), block.data(), element_code.data(),
+        slot.data(), num_threads);
   }
   if (status == EXACTA_INVALID_ARGUMENT) {
     throw std::invalid_argument("mesh_elements: the codes hold a different number of elements");
@@ -787,6 +814,12 @@ NB_MODULE(_C, m) {
         nb::arg("select").none() = nb::none(),
         "Correctly rounded sum of x * w (float64, (N,); products rounded once) over the nonzero "
         "entries of select (uint8), as math.fsum: independent of the order of the terms.");
+  m.def("pairwise_sum", &pairwise_sum, nb::arg("x"),
+        "NumPy's pairwise sum of the float64 vector x (N,), with the grouping of NumPy 2.3 and "
+        "later fixed in the kernel.");
+  m.def("nearest_rank", &nearest_rank, nb::arg("w"), nb::arg("level"),
+        "Smallest i with cumsum(w)[i] / pairwise_sum(w) >= level, or len(w) - 1 (w float64, "
+        "(N,), N >= 1, in the sorted order of the values it weights).");
   m.def("sort_pairs", &sort_pairs, nb::arg("keys"), nb::arg("values"), nb::arg("num_threads") = 0,
         "Sort the float64 pairs (keys[i], values[i]) in place by key, then value; returns False "
         "(arrays untouched) if one is NaN.");
@@ -813,11 +846,11 @@ NB_MODULE(_C, m) {
         "the 2-D or 3-D `mask`; with `counts` (int64, elements per code; may be empty) return the "
         "number of mesh elements.");
   m.def("mesh_elements", &mesh_elements, nb::arg("code"), nb::arg("table"), nb::arg("counts"),
-        nb::arg("spacing"), nb::arg("elements"), nb::arg("centres"), nb::arg("block"),
-        nb::arg("element_code"), nb::arg("slot"), nb::arg("num_threads") = 0,
+        nb::arg("spacing"), nb::arg("elements"), nb::arg("centres"), nb::arg("sizes"),
+        nb::arg("block"), nb::arg("element_code"), nb::arg("slot"), nb::arg("num_threads") = 0,
         "Write the mesh elements the neighbour codes `code` select from `table` (int64, (codes, "
         "most per code, d, d), half-voxels) into `elements` (M, d, d), with their centres "
-        "(M, d), blocks, codes and slots (M,).");
+        "(M, d), sizes (areas or lengths), blocks, codes and slots (M,).");
   m.def("dilate", &dilate, nb::arg("mask"), nb::arg("out"), nb::arg("connectivity"),
         nb::arg("steps"), nb::arg("num_threads") = 0,
         "Write into `out` (uint8, same shape) the binary dilation of `mask` by `steps` steps of "
