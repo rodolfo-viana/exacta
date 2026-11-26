@@ -1,0 +1,81 @@
+\chapter{The example driver}\label{ch:driver}
+
+\texttt{examples/driver.py} runs a representative set of the public API on small synthetic
+inputs and prints the results. \texttt{examples/driver\_expected.txt} holds its output on a CPU,
+and \texttt{tests/test\_example\_driver.py} compares the two. The driver is the quickest way to
+see that an installation works and to compare it with the expected values.
+
+\section{Running it}\label{driver:running}
+
+From the root of a source checkout, with Exacta installed:
+\begin{lstlisting}[language=bash]
+python examples/driver.py                              # CPU
+python examples/driver.py --device cuda                # the same on a CUDA device
+python examples/driver.py 2> /dev/null | diff - examples/driver_expected.txt
+\end{lstlisting}
+It takes a few seconds, most of it spent importing PyTorch. The standard output is the result;
+a line with the versions of Exacta, PyTorch, NumPy and Python, the platform, the device and the
+number of threads goes to standard error, so that the standard output does not depend on the
+machine. The exit status is zero when every check at the end of the output passes.
+
+\section{What it does}\label{driver:what}
+
+The driver draws no random numbers. Every input is built from integer arithmetic: two cases of
+$22\times26\times24$ voxels whose target is a discrete ball and whose predictions are the ball
+moved by three voxels along the last axis (plus a small separate ball), and a larger ball. The
+spacing is $(1.2, 0.4, 0.4)$ millimetres: anisotropic, and none of its values is exactly
+representable in binary, so products such as $3\times0.4$ are inexact in binary64. The sections are:
+
+\begin{enumerate}[nosep]
+\item the inputs;
+\item the exact distance transform of \texttt{exacta.losses.distance\_maps} on a
+  $5\times6\times7$ grid with spacing $(1.3,0.3,0.7)$, compared bit for bit with a brute-force
+  search written in the driver;
+\item HD, HD95 and ASSD with the three surface models (\texttt{voxels}, \texttt{surfels},
+  \texttt{mesh}), and the overlap scores and counts;
+\item NSD at a tolerance of 1.2 mm, where distances tie with the tolerance, with the default tie
+  margin and with \texttt{tie\_rtol=0};
+\item the presets that reproduce MONAI, MedPy, DeepMind's \texttt{surface-distance} and
+  MeshMetrics (Chapter~\ref{ch:tools});
+\item a stateful metric (\texttt{HD95}) and its \texttt{per\_case}, \texttt{per\_class} and
+  \texttt{mean}, and the reporting signature of a score, parsed back and recomputed to the
+  same bits;
+\item \texttt{DiceLoss} and \texttt{DiceCELoss} with value and gradient norm, and the check that
+  the second is the first plus PyTorch's cross-entropy.
+\end{enumerate}
+
+Numbers are written with Python's \texttt{repr}, which prints a float64 with the digits needed to
+read it back bit for bit. Lines without a marker come from computations that Exacta rounds or
+counts exactly; they are the same on every platform, thread count and device. Lines that end
+with \texttt{(approx)} are the losses, whose last bits depend on the PyTorch build and the
+device; the test compares them to a relative tolerance of $10^{-9}$ and everything else as text.
+
+\section{Reading the output}\label{driver:reading}
+
+The output below was produced on x86-64 Linux with PyTorch 2.14.1 on the CPU.
+Three lines show what the conventions of Chapter~\ref{ch:conventions} do:
+\begin{itemize}[nosep]
+\item \texttt{3 * 0.4} is \texttt{1.2000000000000002}, so the 1.2 mm distance of three voxels
+  lies above a tolerance of 1.2 in binary64.
+\item The voxel NSD of case 0 is \texttt{0.9717} with the default margin and \texttt{0.7778} with
+  \texttt{tie\_rtol=0}: the surface elements that lie exactly on the tolerance are counted in
+  the first and left out in the second. The surfel and mesh values move in the same way.
+\item HD95 of case 0 is \texttt{3.2242} with \texttt{combine="max"} (MONAI), but with
+  \texttt{combine="pooled"} (MedPy) it is \texttt{1.2000000000000002}: one name, two quantities.
+\end{itemize}
+
+\lstinputlisting[language=output,basicstyle=\ttfamily\scriptsize,caption={Output of
+\texttt{python examples/driver.py} on the CPU (\texttt{examples/driver\_expected.txt}).}]{../../examples/driver_expected.txt}
+
+\section{How it was checked}\label{driver:checked}
+
+The output was identical in two runs, and with \texttt{OMP\_NUM\_THREADS} set to 1 and to 8,
+including the loss lines. On a CUDA device (\texttt{--device cuda}) every line without the
+marker was identical to the file, and the two gradient norms differed from it in the last
+digit. The test file checks the same properties: the output equals the expected file, it does
+not depend on the thread count, and, when a GPU is present, the exact lines are the same on it.
+After a deliberate change of the driver, regenerate the expected file with
+\begin{lstlisting}[language=bash]
+python examples/driver.py 2> /dev/null > examples/driver_expected.txt
+\end{lstlisting}
+and review the difference.

@@ -1,0 +1,55 @@
+% Adapted from docs/wiki/Installation.md; edit this file, not the wiki page, for the manual.
+\chapter{Installation}\label{ch:installation}
+
+Exacta requires Python 3.10 or newer, PyTorch 2.4 or newer and NumPy 1.22 or newer.
+Install PyTorch for your hardware using its \href{https://pytorch.org/get-started/locally/}{installation guide},
+then install Exacta. Pin the release you evaluated, so that results can be traced to it:
+
+\begin{lstlisting}[language=bash]
+python -m pip install exacta==X.Y.Z   # X.Y.Z: the release you use
+python -c "import exacta; print(exacta.__version__)"
+\end{lstlisting}
+
+The wheels are for Linux x86-64 with glibc 2.28 or newer. Python 3.10 and 3.11
+have dedicated wheels; the Python 3.12 stable-ABI wheel supports Python 3.12 and newer.
+
+Other platforms install from source, which builds the CPU extension and requires a C++17
+compiler and Python development headers; OpenMP is optional. On Debian/Ubuntu, install
+\texttt{build-essential} and development headers matching your Python interpreter.
+
+\section{CPU and GPU}\label{installation:cpu-and-gpu}
+
+CPU kernels are precompiled in wheels and compile during source installation. CUDA loss and
+metric kernels use Triton at runtime; their first invocation can include compilation. The CPU extension does not link against a
+specific PyTorch binary. Local validation covers Linux x86-64 CPU and NVIDIA CUDA execution;
+other hardware/platform combinations should be verified before use.
+
+\section{Distributed CPU execution}\label{installation:distributed-cpu-execution}
+
+For Gloo distributed runs, use PyTorch 2.8 or newer. PyTorch 2.4.1 can deadlock during
+process-group destruction after collecting metric scores: a Gloo worker needs the Python
+GIL while the outer destructor holds it. PyTorch's \href{https://github.com/pytorch/pytorch/releases/tag/v2.8.0}{2.8 release notes}
+include the destructor fix (\#154976). Ordinary non-distributed CPU evaluation still supports
+PyTorch 2.4.
+
+\section{Optional references}\label{installation:optional-references}
+
+SciPy is needed for Hungarian lesion matching. MONAI, MedPy, VTK, SimpleITK and other reference
+libraries are used by optional validation tests; they are not needed for ordinary Dice or
+HD95 evaluation. Chapter~\ref{ch:tests} lists the packages and how to install them.
+
+\section{Development checkout}\label{installation:development-checkout}
+
+Use \texttt{main} to evaluate merged changes beyond the published release. Create a feature branch
+from it when contributing. This manual describes the version printed on its title page; a newer
+checkout may expose additional APIs or changed behavior. To keep your own Python environment
+untouched, create a virtual environment first (Section~\ref{tests:referee}).
+
+\begin{lstlisting}[language=bash]
+git clone --branch main https://github.com/rodolfo-viana/exacta.git
+cd exacta
+python -m pip install -e ".[test]"
+\end{lstlisting}
+
+Record the commit SHA and environment alongside experiment results. Reinstall after changing
+C++ sources so the compiled extension matches the checkout.
