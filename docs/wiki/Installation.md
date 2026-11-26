@@ -5,11 +5,11 @@ Install PyTorch for your hardware using its [installation guide](https://pytorch
 then install the pinned Exacta release:
 
 ```bash
-python -m pip install exacta==0.1.1
+python -m pip install exacta==0.1.2
 python -c "import exacta; print(exacta.__version__)"
 ```
 
-Version 0.1.1 includes Linux x86-64 wheels for glibc 2.28 or newer. Python 3.10 and 3.11
+Version 0.1.2 includes Linux x86-64 wheels for glibc 2.28 or newer. Python 3.10 and 3.11
 have dedicated wheels; the Python 3.12 stable-ABI wheel supports Python 3.12 and newer.
 
 Other platforms install from source, which builds the CPU extension and requires a C++17
@@ -41,7 +41,7 @@ describes test environments.
 ## Development checkout
 
 Use `main` to evaluate merged changes beyond the published release. Create a feature branch
-from it when contributing. These pages describe version 0.1.1; a newer checkout may expose
+from it when contributing. These pages describe version 0.1.2; a newer checkout may expose
 additional APIs or changed behavior.
 
 ```bash

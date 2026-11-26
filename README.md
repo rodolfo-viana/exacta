@@ -3,7 +3,8 @@
 Metrics and differentiable losses for **2D and 3D medical-image segmentation**, on CPU and GPU.
 Exacta provides reusable implementations of Dice, HD95, surface distances, lesion scores,
 probability metrics and training objectives, with explicit mathematical conventions.
-Version 0.1.1 fixes a rare one-ulp error of the exact distance transform on adversarial inputs.
+Version 0.1.2 makes ASSD and NSD bit-reproducible across thread counts and devices, and 0.1.1
+fixed a rare one-ulp error of the exact distance transform on adversarial inputs.
 Version 0.1.0 made NSD count distances equal to the tolerance as its definition intends, added
 **reporting signatures** that encode a score's full definition, and let Dice and Tversky losses
 reproduce segmentation_models_pytorch's treatment of absent classes. Version 0.0.1a6 added
@@ -14,7 +15,7 @@ Definitions are checked against independent references such as SciPy, MONAI, Med
 DeepMind's surface-distance, MeshMetrics, SimpleITK, Panoptica and the BraTS 2023 evaluation
 code. Where conventions differ, parameters select the intended definition.
 
-**Published version: 0.1.1.**
+**Published version: 0.1.2.**
 [Documentation](https://github.com/rodolfo-viana/exacta/wiki) ·
 [Source](https://github.com/rodolfo-viana/exacta) ·
 [Issues](https://github.com/rodolfo-viana/exacta/issues)
@@ -25,7 +26,7 @@ Exacta requires **Python 3.10+**, **PyTorch 2.4+** and **NumPy 1.22+**. Install 
 your CPU or CUDA environment, then install Exacta:
 
 ```bash
-python -m pip install exacta==0.1.1
+python -m pip install exacta==0.1.2
 ```
 
 Binary wheels target Linux x86-64 with glibc 2.28 or newer: Python 3.10 and 3.11 wheels,
@@ -264,7 +265,7 @@ to the number; `parse_signature` reads it back into options that recompute the s
 from exacta.conventions import parse_signature, signature
 
 text = signature("hd95", combine="pooled")
-# 'hd95[both_empty=nan;combine=pooled;one_empty=inf;surface=voxels]@exacta-0.1.1'
+# 'hd95[both_empty=nan;combine=pooled;one_empty=inf;surface=voxels]@exacta-0.1.2'
 name, options, version = parse_signature(text)
 again = EF.evaluate(prediction, target, metrics={name: options}, num_classes=3,
                     include_background=False, spacing=(1.5, 0.8, 0.8))
