@@ -110,7 +110,10 @@ Release notes for Exacta.
     equal the previous ones where the BLAS rounds like the expression (OpenBLAS on x86-64 here: 0
     of 220200 differences); in 2-D they differ from the previous ones, and from DeepMind's on
     glibc, for spacings where `pow(s, 2)` is not the correctly rounded square (89 of 200000 random
-    pairs change the half diagonal).
+    pairs change the half diagonal). DeepMind's own table is machine-dependent: on a GitHub x86-64
+    runner its 3-D norm is fused, and 34 of the 256 entries for spacing (0.7, 0.9, 1.3) differ in
+    the last bit from the unfused expression. The test against DeepMind's tables is therefore bit
+    for bit where its library rounds like Exacta's expressions, and to a relative `1e-15` elsewhere.
   - **Audited and unchanged:** square roots (correctly rounded: the compiled kernel, NumPy's and
     CUDA's), the distance transform, sums (correctly rounded), the NSD bound `fl(tau * fl(1 + rho))`,
     comparisons, sorting, the point-to-mesh distances (compiled without contraction) and the means

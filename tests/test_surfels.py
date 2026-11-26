@@ -14,7 +14,7 @@ from scipy import ndimage
 
 import exacta.functional as EF
 from _data import pair
-from exacta.functional._surfel_tables import surfel_measures
+from exacta.functional._surfel_tables import NORMALS_3D, surfel_measures
 from exacta.functional.surface import _neighbour_code
 from exacta.metrics import NSD
 
@@ -42,14 +42,37 @@ def _mirror(axis):
 # --- Tables -------------------------------------------------------------------------------------
 
 
+def _deepmind_rounds_like_exacta(spacing):
+    """Whether this machine's NumPy and C library evaluate DeepMind's table with the operations
+    exacta writes out: ``np.linalg.norm`` (a BLAS dot product, fused on some CPUs) of a 3-vector as
+    ``sqrt((v0 * v0 + v1 * v1) + v2 * v2)``, and ``s ** 2`` (the C library's pow) as ``s * s``."""
+    if len(spacing) == 2:
+        return all(h**2 == h * h for h in spacing)
+    s0, s1, s2 = spacing
+    for normals in NORMALS_3D:
+        for n in normals:
+            v = (n[0] * s1 * s2, n[1] * s0 * s2, n[2] * s0 * s1)
+            if float(np.linalg.norm(np.array(v))) != math.sqrt((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]):
+                return False
+    return True
+
+
 @pytest.mark.parametrize("spacing", SPACINGS_3D + [(1.0, 1.0), (1.5, 0.8), (0.7, 1.3)])
 def test_tables_match_deepmind_bit_for_bit(spacing):
+    # DeepMind's own table depends on the machine: its 3-D norm is a BLAS dot product, which some
+    # CPUs fuse (on a GitHub x86-64 runner 34 of the 256 entries for (0.7, 0.9, 1.3) differ in the
+    # last bit from the unfused expression), and its 2-D square is the C library's pow. Exacta writes
+    # the operations out, so its table is the same everywhere, and equals DeepMind's wherever
+    # DeepMind's library rounds like those operations; elsewhere they differ by rounding only.
     lookup = pytest.importorskip("surface_distance.lookup_tables")
     if len(spacing) == 3:
         expected = lookup.create_table_neighbour_code_to_surface_area(spacing)
     else:
         expected = lookup.create_table_neighbour_code_to_contour_length(spacing)
-    np.testing.assert_array_equal(surfel_measures(spacing), expected)
+    if _deepmind_rounds_like_exacta(spacing):
+        np.testing.assert_array_equal(surfel_measures(spacing), expected)
+    else:
+        np.testing.assert_allclose(surfel_measures(spacing), expected, rtol=1e-15, atol=0)
 
 
 @pytest.mark.parametrize("spacing", SPACINGS_3D)
