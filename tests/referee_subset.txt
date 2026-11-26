@@ -24,6 +24,7 @@ tests/test_surface.py
 tests/test_surfels.py
 tests/test_mesh.py
 tests/test_conventions.py
+tests/test_fixed_arithmetic.py  # the fixed binary64 expressions of the weights, percentiles and scores
 tests/test_properties.py::test_hd_matches_reference_and_backends_agree
 tests/test_properties.py::test_assd_matches_reference_and_backends_agree
 tests/test_properties.py::test_nsd_matches_reference_and_backends_agree

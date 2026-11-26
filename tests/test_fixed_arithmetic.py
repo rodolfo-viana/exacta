@@ -325,7 +325,8 @@ _PROGRAM = textwrap.dedent(
     import exacta.functional as EF
     from exacta.functional import surface as S
 
-    out = {"capability": torch.backends.cpu.get_cpu_capability(), "threads": torch.get_num_threads()}
+    capability = getattr(torch.backends.cpu, "get_cpu_capability", lambda: "unknown")
+    out = {"capability": capability(), "threads": torch.get_num_threads()}
     cases = (("3d", (22, 22, 22), (0.7, 1.37, 0.3), 11), ("3d_b", (16, 18, 14), (0.769531, 0.769531, 4.0), 12),
              ("2d", (48, 44), (0.7, 1.3), 13))
     for name, shape, spacing, seed in cases:

@@ -73,11 +73,52 @@ Release notes for Exacta.
   of them.
 - **Documentation and tests for referees:** `examples/driver.py` runs a short tour of the public API on
   deterministic synthetic inputs, and `tests/test_example_driver.py` compares its output with
-  `examples/driver_expected.txt` (the losses and the mesh ASSD and NSD, whose last bits depend on
-  the PyTorch build, to a relative `1e-9`; everything else as text).
+  `examples/driver_expected.txt` (the losses, whose last bits depend on the PyTorch build, to a
+  relative `1e-9`; everything else, the mesh scores included, as text).
   `pytest -m referee` runs 614 of the tests (`tests/referee_subset.txt`; about 25 s on CPU with the
   reference tools installed). The LaTeX sources of the user manual are in `docs/manual/`;
   `docs/manual/build.sh` builds the PDF, which is not tracked.
+- **Fixed arithmetic of the scores:** every surface score is now a fixed binary64 expression of the
+  exact squared distances, independent of the CPU's vector instructions, the BLAS, the C library,
+  the PyTorch and NumPy versions and the number of threads. Four steps were not, and a fifth is
+  documented (see the `surface` module docstring for every expression):
+  - **Mesh element sizes** (triangle areas, segment lengths) were computed with
+    `torch.linalg.cross(...).norm(...)`, which fuses multiply-adds under PyTorch's AVX2 kernels and
+    not under its default ones (`ATEN_CPU_CAPABILITY=default`) or other builds (the `aarch64` CI
+    job): on random 3-D masks 2 of 100 mesh ASSD and 19 of 579 mesh NSD values changed with the kernel
+    set, and 20 of 4.8 million element areas of 346 Medical Segmentation Decathlon predictions
+    differed. They now come from the compiled kernel together with the vertices and centres
+    (`exacta_mesh_elements_f64` has a new `sizes` output, and a changed signature), each operation
+    rounded once in the documented order. The values equal those of PyTorch's default kernels, so
+    results that used to differ between machines now equal the unfused ones; on the 346 predictions
+    no mesh score changed, and the driver's mesh ASSD changed in its last digit.
+  - **Interpolated percentile** (voxel HD95, `percentile` other than 100): Exacta evaluated
+    `a + (b - a) * t` for every `t`; `numpy.percentile` (MedPy's HD95) uses
+    `b - (b - a) * (1 - t)` for `t >= 0.5`. The two differ in the last bit for about 1 in 4000 random
+    vectors at `q = 95` (5 of 20000 in the test). Exacta now evaluates NumPy's expression, bit for
+    bit, on Python floats, so the MedPy preset reproduces MedPy exactly wherever the distances
+    agree; no change on the 346 predictions.
+  - **Weighted nearest-rank percentile** (surfels and meshes): the total weight came from `np.sum`,
+    whose grouping depends on the NumPy version beyond 8192 terms (NumPy 2.3 release notes). The
+    compiled kernels `exacta_pairwise_sum_f64` and `exacta_nearest_rank_f64` fix the grouping of
+    NumPy 2.3 and later and the left-to-right running sums, so the rule is DeepMind's with those
+    NumPy versions and the same everywhere. No change on the 346 predictions or on 25200 further
+    percentiles of cubes, spheres and noise (a correctly rounded total gave the same values).
+  - **Surfel areas and lengths** used `np.linalg.norm` (a BLAS dot product) in 3-D and `s ** 2` (the
+    C library's `pow`) in 2-D. They now use explicit products and sums in the order of DeepMind's
+    code (`sqrt((v0 * v0 + v1 * v1) + v2 * v2)`, `0.5 * sqrt(s0 * s0 + s1 * s1)`). In 3-D the values
+    equal the previous ones where the BLAS rounds like the expression (OpenBLAS on x86-64 here: 0
+    of 220200 differences); in 2-D they differ from the previous ones, and from DeepMind's on
+    glibc, for spacings where `pow(s, 2)` is not the correctly rounded square (89 of 200000 random
+    pairs change the half diagonal).
+  - **Audited and unchanged:** square roots (correctly rounded: the compiled kernel, NumPy's and
+    CUDA's), the distance transform, sums (correctly rounded), the NSD bound `fl(tau * fl(1 + rho))`,
+    comparisons, sorting, the point-to-mesh distances (compiled without contraction) and the means
+    of two directions. `tests/test_fixed_arithmetic.py` checks the expressions against independent
+    evaluations and that scores are identical with PyTorch's default kernels and with 1 and 8
+    threads; `scripts/portability_digest.py` adds mesh sizes and centres, percentiles, weighted
+    ranks, surfel tables and the scores of random masks to what the Portability CI compares across
+    its platforms.
 
 ## 0.1.2 — 2026-11-26
 

@@ -11,14 +11,14 @@ to standard error. Its standard output on CPU is stored in ``examples/driver_exp
 What is compared, and how:
 
 * Lines without a marker come from computations that Exacta rounds exactly or counts exactly
-  (distance transform, Hausdorff distances, ASSD and NSD with voxel and surfel weights, overlap
-  counts). They are the same bits on every platform, thread count and device; the test compares
-  them as text.
+  (distance transform, Hausdorff distances, ASSD and NSD with voxel, surfel and mesh weights,
+  overlap counts). Each score is a fixed binary64 expression of the exact squared distances (the
+  mesh areas and the surfel areas are formed in Exacta's own kernels, with every operation rounded
+  once in a fixed order), so they are the same bits on every platform, PyTorch build, thread count
+  and device; the test compares them as text.
 * Lines that end with ``(approx)`` come from the losses, which run on PyTorch operations (CPU) or
-  fused Triton kernels (GPU), and from ASSD and NSD with mesh weights, which sum triangle areas
-  that PyTorch computes (cross product and norm). The last bits of both depend on the PyTorch
-  build and on the device (the mesh ASSD differed by one unit in the last place on Linux aarch64
-  with PyTorch 2.15 and not with 2.4.1), so the test compares them to a relative tolerance of 1e-9.
+  fused Triton kernels (GPU). The last bits of the losses depend on the PyTorch build and on the
+  device, so the test compares them to a relative tolerance of 1e-9.
 
 Sections: (1) inputs, (2) exact distance transform against a brute-force oracle, (3) surface
 metrics with the three surface models, (4) a tie-sensitive NSD tolerance, (5) presets that
@@ -157,7 +157,7 @@ def section_surface_metrics(pred: torch.Tensor, target: torch.Tensor) -> None:
         kw: dict[str, Any] = dict(spacing=SPACING, num_classes=2, include_background=False, surface=surface)
         emit(f"hd.{surface}", EF.hausdorff_distance(pred, target, **kw)[:, 0])
         emit(f"hd95.{surface}", EF.hd95(pred, target, **kw)[:, 0])
-        emit(f"assd.{surface}", EF.assd(pred, target, **kw)[:, 0], approx=surface == "mesh")
+        emit(f"assd.{surface}", EF.assd(pred, target, **kw)[:, 0])
     counts = EF.confusion_counts(pred, target, num_classes=2, include_background=False)
     emit("dice", EF.dice(pred, target, num_classes=2, include_background=False)[:, 0])
     emit("iou", EF.iou(pred, target, num_classes=2, include_background=False)[:, 0])
@@ -173,8 +173,8 @@ def section_ties(pred: torch.Tensor, target: torch.Tensor) -> None:
                                   tolerance=TOLERANCE, surface=surface)
         default = EF.nsd(pred, target, **kw)[:, 0]
         strict = EF.nsd(pred, target, tie_rtol=0.0, **kw)[:, 0]
-        emit(f"nsd.{surface}, default tie_rtol=1e-06", default, approx=surface == "mesh")
-        emit(f"nsd.{surface}, tie_rtol=0 (strict binary64)", strict, approx=surface == "mesh")
+        emit(f"nsd.{surface}, default tie_rtol=1e-06", default)
+        emit(f"nsd.{surface}, tie_rtol=0 (strict binary64)", strict)
 
 
 def section_presets(pred: torch.Tensor, target: torch.Tensor) -> None:
@@ -184,10 +184,10 @@ def section_presets(pred: torch.Tensor, target: torch.Tensor) -> None:
         hd95 = EF.hd95(pred, target, **kw, **options["hd95"])[0, 0]
         assd = EF.assd(pred, target, **kw, **options["assd"])[0, 0]
         emit(f"{tool}.hd95", float(hd95))
-        emit(f"{tool}.assd", float(assd), approx=tool == "meshmetrics")
+        emit(f"{tool}.assd", float(assd))
         if "nsd" in options:
             nsd = EF.nsd(pred, target, tolerance=TOLERANCE, **kw, **options["nsd"])[0, 0]
-            emit(f"{tool}.nsd at {TOLERANCE}", float(nsd), approx=tool == "meshmetrics")
+            emit(f"{tool}.nsd at {TOLERANCE}", float(nsd))
 
 
 def section_result_and_signature(pred: torch.Tensor, target: torch.Tensor) -> bool:

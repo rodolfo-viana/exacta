@@ -79,6 +79,39 @@ voxels or summing surfel areas. This is MONAI's ``compute_surface_dice`` (``use_
 the representation) and, for surfels, DeepMind's ``compute_surface_dice_at_tolerance``. A distance
 counts as within ``tau`` when ``d <= tau * (1 + tie_rtol)``, so that distances equal to ``tau`` in
 exact arithmetic are within it despite rounding; see :func:`nsd`.
+
+Fixed arithmetic. After the exact squared distances, every score is a fixed sequence of binary64
+operations, each rounded once, that does not depend on the CPU's vector instructions (PyTorch's
+CPU kernels fuse multiply-adds under AVX2 and not under their default kernels), on a BLAS library,
+on the C library's ``pow``, on the number of threads, on the device or on the NumPy or PyTorch
+version:
+
+    * A distance is the correctly rounded square root of the exact squared distance.
+    * Voxels: HD at ``percentile=100`` is the maximum. For other percentiles it is
+      ``numpy.percentile(d, q)`` with ``method="linear"``, bit for bit: the virtual index
+      ``fl((n - 1) * fl(q / 100))``, its fractional part ``t``, and
+      ``d[lo] + (d[lo + 1] - d[lo]) * t`` for ``t < 0.5``, ``d[lo + 1] - (d[lo + 1] - d[lo]) *
+      (1 - t)`` otherwise (MedPy's HD95 is this, on pooled distances).
+    * Surfels: the area of a block is DeepMind's table with every operation written out: the sum,
+      from the left, over the block's normals ``n`` of ``sqrt((v0 * v0 + v1 * v1) + v2 * v2)`` with
+      ``v = (n0 * s1 * s2, n1 * s0 * s2, n2 * s0 * s1)``; in 2-D the half diagonal is
+      ``0.5 * sqrt(s0 * s0 + s1 * s1)``.
+    * Meshes: the area of a triangle is ``0.5 * sqrt((c0 * c0 + c1 * c1) + c2 * c2)`` for the cross
+      product ``c`` of its edges from the first vertex (``c0 = e1[1] * e2[2] - e1[2] * e2[1]``,
+      and so on), the length of a segment ``sqrt(x * x + y * y)``, evaluated in the compiled
+      kernel (``exacta_mesh_elements_f64``) together with the vertices and centres.
+    * Weighted percentiles (surfels, meshes) are DeepMind's nearest rank: the distance at the first
+      element, in sorted order, where ``fl(c / W) >= fl(q / 100)``, with ``c`` the running sum of
+      the weights from the left and ``W`` their pairwise sum, grouped as ``np.sum`` groups a vector
+      since NumPy 2.3 (its release notes say the grouping of larger sums changed there; here it is
+      fixed in the kernel, so the rule is the same whatever NumPy is installed).
+    * Means, and the amount of surface within the tolerance, are sums of the products ``d * w``
+      (``w = 1`` for voxels) over the elements of one set (the two sets concatenated for pooled
+      statistics), correctly rounded as ``math.fsum`` rounds them. A mean divides by the correctly
+      rounded total weight; NSD divides the sum of the two directions' within-amounts by the sum
+      of their totals. Voxel counts are exact integers.
+    * The NSD bound is ``fl(tau * fl(1 + tie_rtol))``, and a distance is within when
+      ``d <= bound``; ``combine`` is ``max(a, b)`` or ``fl(fl(a + b) / 2)``.
 """
 
 from __future__ import annotations
