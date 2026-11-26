@@ -1,8 +1,13 @@
 # Changelog
 
-Release notes for Exacta's alpha versions.
+Release notes for Exacta.
 
-## Unreleased
+## 0.1.0 — 2026-11-25
+
+Version 0.1.0 is the first release outside the alpha series. NSD now counts
+distances that equal the tolerance in exact arithmetic, reporting signatures name the full
+definition behind a score, and Dice and Tversky losses can reproduce
+segmentation_models_pytorch's treatment of absent classes.
 
 - Add `zero_absent=True` to `DiceLoss`, `TverskyLoss` and `FocalTverskyLoss`: classes whose target
   is empty within the reduction get zero loss and gradient but still count in the mean, as in
