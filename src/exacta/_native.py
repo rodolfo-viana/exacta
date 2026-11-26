@@ -211,20 +211,25 @@ def neighbour_codes(mask: Tensor, counts: Tensor | None = None) -> tuple[Tensor,
 
 def mesh_elements(
     code: Tensor, table: Tensor, counts: Tensor, spacing: Sequence[float], num_elements: int
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """Elements (M, d, d), centres (M, d), blocks, codes and slots (M,) of the mesh that the
-    neighbour codes select from ``table``; see ``exacta_mesh_elements_f64`` in ``kernels.h``."""
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Elements (M, d, d), centres (M, d), sizes, blocks, codes and slots (M,) of the mesh that the
+    neighbour codes select from ``table``; see ``exacta_mesh_elements_f64`` in ``kernels.h``.
+
+    The sizes (triangle areas in 3-D, segment lengths in 2-D) are computed there, with every
+    operation rounded once in a fixed order, so that they do not depend on the CPU's vector
+    instructions or on PyTorch's kernels."""
     if _C is None:
         raise RuntimeError("exacta was installed without its compiled extension")
     ndim = code.ndim
     elements = torch.empty((num_elements, ndim, ndim), dtype=torch.float64)
     centres = torch.empty((num_elements, ndim), dtype=torch.float64)
+    sizes = torch.empty(num_elements, dtype=torch.float64)
     block, element_code, slot = (torch.empty(num_elements, dtype=torch.int64) for _ in range(3))
     _C.mesh_elements(
         code.contiguous(), table.contiguous(), counts.contiguous(), [float(s) for s in spacing],
-        elements, centres, block, element_code, slot,
+        elements, centres, sizes, block, element_code, slot,
     )
-    return elements, centres, block, element_code, slot
+    return elements, centres, sizes, block, element_code, slot
 
 
 def mask_extents(masks: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -323,6 +328,24 @@ def exact_sum(x: Tensor, w: Tensor | None = None, select: Tensor | None = None) 
     weights = None if w is None else w.detach().to("cpu", torch.float64).contiguous().reshape(-1)
     chosen = None if select is None else _as_bytes(select.detach().cpu()).reshape(-1)
     return float(_C.exact_sum(flat, weights, chosen))
+
+
+def pairwise_sum(x: np.ndarray) -> float:
+    """NumPy's pairwise sum of a float64 vector, with the grouping of NumPy 2.3 and later fixed in
+    the kernel (``exacta_pairwise_sum_f64``): the same bits as ``np.sum(x)`` for those versions,
+    whatever the installed one."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    return float(_C.pairwise_sum(np.ascontiguousarray(x, dtype=np.float64).reshape(-1)))
+
+
+def nearest_rank(w: np.ndarray, level: float) -> int:
+    """Index of the nearest rank of weights ``w`` (float64, in the sorted order of the values they
+    weight): the smallest ``i`` with ``cumsum(w)[i] / pairwise_sum(w) >= level``, or the last index
+    (``exacta_nearest_rank_f64``)."""
+    if _C is None:
+        raise RuntimeError("exacta was installed without its compiled extension")
+    return int(_C.nearest_rank(np.ascontiguousarray(w, dtype=np.float64).reshape(-1), float(level)))
 
 
 def sort_pairs(keys: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:

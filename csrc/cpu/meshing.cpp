@@ -3,8 +3,13 @@
 // neighbour_codes: DeepMind's neighbour code at every voxel corner, one bit per voxel of the block
 // around the corner (voxels outside the image count as outside).
 // mesh_elements: the elements (triangles or segments) a table assigns to each code, placed at
-// their blocks, as exacta.functional.surface._mesh lays them out.
+// their blocks, as exacta.functional.surface._mesh lays them out, with their vertices, centres and
+// sizes (areas or lengths). Every quantity is a fixed binary64 expression of the table and the
+// spacing: each product, sum, difference, quotient and square root is rounded once, in the order
+// written below (the build forbids fused multiply-adds), so the result does not depend on the
+// compiler, the instruction set or a numerical library.
 
+#include <cmath>
 #include <cstdint>
 #include <new>
 #include <vector>
@@ -83,6 +88,30 @@ std::int64_t row_elements(const std::uint8_t *code, std::int64_t width, unsigned
   return total;
 }
 
+// Area of the triangle with vertices v[0..2] (three coordinates each): half the norm of the cross
+// product of the edges from the first vertex. With e1 = v1 - v0 and e2 = v2 - v0 (componentwise),
+// c0 = e1[1] * e2[2] - e1[2] * e2[1], c1 = e1[2] * e2[0] - e1[0] * e2[2],
+// c2 = e1[0] * e2[1] - e1[1] * e2[0] (two products rounded, then their difference), the area is
+// 0.5 * sqrt((c0 * c0 + c1 * c1) + c2 * c2).
+double triangle_area(const double *v) {
+  double e1[3], e2[3];
+  for (int i = 0; i < 3; ++i) {
+    e1[i] = v[3 + i] - v[i];
+    e2[i] = v[6 + i] - v[i];
+  }
+  const double c0 = e1[1] * e2[2] - e1[2] * e2[1];
+  const double c1 = e1[2] * e2[0] - e1[0] * e2[2];
+  const double c2 = e1[0] * e2[1] - e1[1] * e2[0];
+  return 0.5 * std::sqrt((c0 * c0 + c1 * c1) + c2 * c2);
+}
+
+// Length of the segment v[0] v[1] (two coordinates each): sqrt(x * x + y * y) for the difference
+// (x, y) = v1 - v0.
+double segment_length(const double *v) {
+  const double x = v[2] - v[0], y = v[3] - v[1];
+  return std::sqrt(x * x + y * y);
+}
+
 }  // namespace
 
 extern "C" int exacta_neighbour_codes_u8(const uint8_t *mask, const int64_t *shape, int ndim,
@@ -112,14 +141,14 @@ extern "C" int exacta_mesh_elements_f64(const uint8_t *code, const int64_t *shap
                                         const int64_t *table, const int64_t *counts,
                                         int64_t max_per_code, const double *spacing,
                                         int64_t num_elements, double *elements, double *centres,
-                                        int64_t *block, int64_t *element_code, int64_t *slot,
-                                        int num_threads) {
+                                        double *sizes, int64_t *block, int64_t *element_code,
+                                        int64_t *slot, int num_threads) {
   if (code == nullptr || shape == nullptr || table == nullptr || counts == nullptr ||
       spacing == nullptr || (ndim != 2 && ndim != 3) || max_per_code < 0 || num_elements < 0) {
     return EXACTA_INVALID_ARGUMENT;
   }
-  if (num_elements > 0 && (elements == nullptr || centres == nullptr || block == nullptr ||
-                           element_code == nullptr || slot == nullptr)) {
+  if (num_elements > 0 && (elements == nullptr || centres == nullptr || sizes == nullptr ||
+                           block == nullptr || element_code == nullptr || slot == nullptr)) {
     return EXACTA_INVALID_ARGUMENT;
   }
   for (int axis = 0; axis < ndim; ++axis) {
@@ -172,6 +201,7 @@ extern "C" int exacta_mesh_elements_f64(const uint8_t *code, const int64_t *shap
           centre[i] = d == 3 ? v[i] * first_weight + v[d + i] * third + v[2 * d + i] * third
                              : (v[i] + v[d + i]) / 2.0;
         }
+        sizes[e] = d == 3 ? triangle_area(v) : segment_length(v);
         block[e] = r * g.c[2] + x;
         element_code[e] = value;
         slot[e] = k;

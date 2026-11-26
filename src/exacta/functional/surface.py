@@ -432,18 +432,46 @@ def _percentile(x: _Distances, q: float) -> float:
     if q == 100:
         return x.d.max().item()
     # NumPy's CPU sort is vectorised and many times faster than PyTorch's; same order, NaN last.
-    d = torch.from_numpy(np.sort(x.d.numpy())) if x.d.device.type == "cpu" else x.d.sort().values
-    pos = q / 100 * (d.numel() - 1)
-    lo = math.floor(pos)
-    hi = min(lo + 1, d.numel() - 1)
-    return (d[lo] + (d[hi] - d[lo]) * (pos - lo)).item()
+    d = np.sort(x.d.numpy()) if x.d.device.type == "cpu" else x.d.sort().values.cpu().numpy()
+    return _linear_percentile(d, q)
+
+
+def _linear_percentile(d: np.ndarray, q: float) -> float:
+    """The ``q``-th percentile of the sorted float64 vector ``d`` by linear interpolation, with the
+    arithmetic of ``numpy.percentile(d, q)`` (``method="linear"``; MedPy's HD95) bit for bit.
+
+    ``numpy.quantile`` takes the virtual index ``fl((n - 1) * fl(q / 100))``, its integer part
+    ``lo`` and fractional part ``t = index - lo`` (exact), and interpolates ``d[lo]`` and
+    ``d[lo + 1]`` from the nearer end: ``a + (b - a) * t`` for ``t < 0.5`` and
+    ``b - (b - a) * (1 - t)`` otherwise, every product and sum rounded once. An index at or
+    beyond the last element gives the last element, and a vector with NaN gives NaN. The
+    arithmetic is on Python floats, which round every operation separately on every platform,
+    so it does not depend on the NumPy or PyTorch version or on the CPU's vector instructions.
+    """
+    n = d.size
+    index = (n - 1) * (float(q) / 100)
+    if index >= n - 1:
+        return float(d[n - 1])
+    if np.isnan(d[n - 1]):  # NaN sorts last; any NaN makes the percentile NaN
+        return math.nan
+    lo = math.floor(index)
+    t = index - lo
+    a, b = float(d[lo]), float(d[lo + 1])
+    difference = b - a
+    return b - difference * (1 - t) if t >= 0.5 else a + difference * t
 
 
 def _weighted_percentile(d: np.ndarray, w: np.ndarray, q: float) -> float:
     """Smallest distance at which the cumulative weight reaches q%, computed as DeepMind does.
 
-    NumPy, not PyTorch, so the cumulative sum and the total round as DeepMind's do: with equal
-    areas the cumulative fraction can hit q% exactly, and a one-ulp difference moves the result.
+    The sorted weights ``w`` give the running sums ``c[i]`` (left to right, ``np.cumsum``) and the
+    total ``W`` (NumPy's pairwise sum); the answer is the distance at the first ``i`` with
+    ``fl(c[i] / W) >= fl(q / 100)``, or the last one. With equal areas the cumulative fraction can
+    hit q% exactly and a one-ulp difference moves the result, so the roundings are part of the
+    rule. DeepMind evaluates them with NumPy, whose ``np.sum`` changed grouping in 2.3 (release
+    notes: "Changes to the main iterator and potential numerical changes"); here the grouping of
+    NumPy 2.3 and later is fixed (``_native.nearest_rank``), so the result does not depend on the
+    installed NumPy, BLAS or CPU, and equals DeepMind's with those NumPy versions.
     """
     # DeepMind sorts (distance, area) pairs; ties have equal values, so any such sort will do.
     pairs = _native.sort_pairs(d, w) if _native.available() else None
@@ -451,8 +479,50 @@ def _weighted_percentile(d: np.ndarray, w: np.ndarray, q: float) -> float:
         order = np.lexsort((w, d))
         pairs = d[order], w[order]
     d, w = pairs
-    cum = np.cumsum(w) / np.sum(w)
-    return float(d[min(int(np.searchsorted(cum, q / 100.0)), d.size - 1)])
+    level = q / 100.0
+    index = _native.nearest_rank(w, level) if _native.available() else _nearest_rank(w.tolist(), level)
+    return float(d[index])
+
+
+def _pairwise_sum(a: Sequence[float]) -> float:
+    """NumPy's pairwise sum of ``a`` with the grouping of NumPy 2.3 and later (see
+    ``exacta_pairwise_sum_f64`` in ``kernels.h``), in Python floats: the reference of the compiled
+    kernel, and its replacement where the extension is missing."""
+
+    def block(start: int, n: int) -> float:
+        if n < 8:
+            res = 0.0
+            for i in range(start, start + n):
+                res += a[i]
+            return res
+        if n <= 128:  # 8 accumulators: term i goes to accumulator i mod 8
+            r = list(a[start : start + 8])
+            i = 8
+            while i < n - n % 8:
+                for j in range(8):
+                    r[j] += a[start + i + j]
+                i += 8
+            res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+            while i < n:
+                res += a[start + i]
+                i += 1
+            return res
+        n2 = n // 2
+        n2 -= n2 % 8
+        return block(start, n2) + block(start + n2, n - n2)
+
+    return 0.0 + block(0, len(a))
+
+
+def _nearest_rank(w: Sequence[float], level: float) -> int:
+    """``exacta_nearest_rank_f64`` in Python floats (``w`` is a list of floats)."""
+    total = _pairwise_sum(w)
+    cumulative = 0.0
+    for i, weight in enumerate(w):
+        cumulative = weight if i == 0 else cumulative + weight
+        if cumulative / total >= level:
+            return i
+    return len(w) - 1
 
 
 def _sum(x: Tensor, w: Tensor | None = None, select: Tensor | None = None) -> float:
@@ -640,14 +710,11 @@ def _mesh(mask: Tensor, spacing: Sequence[float]) -> _Mesh:
     code, total = _native.neighbour_codes(mask.cpu(), counts)
     # Vertices (h / 2) * spacing for half-voxel coordinates h, and VTK's parametric centre of a
     # triangle (the midpoint of a segment), evaluated as VTK does.
-    elements, centres, block, element_code, slot = _native.mesh_elements(
+    # The sizes (areas, lengths) are computed there too, not with PyTorch's cross product and norm,
+    # which use fused multiply-adds under some of its CPU kernels and not under others.
+    elements, centres, sizes, block, element_code, slot = _native.mesh_elements(
         code, table, counts, spacing, total
     )
-    if mask.ndim == 3:
-        edges = elements[:, 1:] - elements[:, :1]
-        sizes = 0.5 * torch.linalg.cross(edges[:, 0], edges[:, 1]).norm(dim=1)
-    else:
-        sizes = (elements[:, 1] - elements[:, 0]).norm(dim=1)
     return _Mesh(elements, centres, sizes, code, block, element_code, slot)
 
 
