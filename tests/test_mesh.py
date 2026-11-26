@@ -179,7 +179,7 @@ def _ours(pred, target, spacing, tolerance, device):
         hd95=EF.hd95(P, T, **kw),
         assd=EF.assd(P, T, **kw),
         masd=EF.assd(P, T, combine="mean", **kw),
-        nsd=EF.nsd(P, T, tolerance=tolerance, **kw),
+        nsd=EF.nsd(P, T, tolerance=tolerance, tie_rtol=0, **kw),  # MeshMetrics is strict
     )
 
 

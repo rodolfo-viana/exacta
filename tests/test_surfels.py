@@ -219,6 +219,7 @@ def test_nsd_matches_deepmind(device, shape, spacing, tolerance):
             torch.from_numpy(target).to(device),
             spacing=spacing,
             tolerance=tolerance,
+            tie_rtol=0,  # DeepMind compares strictly in float64
             surface="surfels",
             num_classes=4,
             one_empty=math.nan,
@@ -315,7 +316,7 @@ def test_random_masks_match_deepmind(masks, spacing, tolerance):
         got = {
             "hd95": EF.hd95(P, T, **kw)[0, 0],
             "assd": EF.assd(P, T, combine="mean", **kw)[0, 0],
-            "nsd": EF.nsd(P, T, tolerance=tolerance, **kw)[0, 0],
+            "nsd": EF.nsd(P, T, tolerance=tolerance, tie_rtol=0, **kw)[0, 0],
         }
         for name in expected:
             assert math.isclose(got[name], expected[name], rel_tol=1e-12), (name, backend)

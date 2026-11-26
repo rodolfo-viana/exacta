@@ -8,7 +8,7 @@ import torch
 import exacta.functional as EF
 import reference
 from _data import blobs, pair
-from exacta.functional.surface import _boundary, _sqrt
+from exacta.functional.surface import DEFAULT_TIE_RTOL, _boundary, _nsd_bounds, _sqrt
 
 
 @pytest.mark.parametrize("shape", [(30, 40), (16, 20, 24)])
@@ -103,7 +103,9 @@ def test_assd_matches_reference(device, shape, spacing, combine):
 def test_nsd_matches_reference(device, shape, spacing, tolerance):
     pred, target = pair(shape, 4, seed=9)
     spacings = [spacing] * pred.shape[0]
-    expected = reference.per_case(reference.nsd, pred, target, 4, spacings=spacings, tolerance=tolerance)
+    expected = reference.per_case(
+        reference.nsd, pred, target, 4, spacings=spacings, tolerance=tolerance, tie_rtol=DEFAULT_TIE_RTOL
+    )
     for backend in _backends(device):
         got = EF.nsd(
             torch.from_numpy(pred).to(device),
@@ -143,17 +145,91 @@ def test_nsd_counts_distances_equal_to_tolerance(device, tolerance):
     spacing = (0.7, 0.9, 1.3)
     expected = reference.per_case(reference.nsd, pred, target, 3, spacings=[spacing] * 2, tolerance=tolerance)
     for backend in _backends(device):
-        nsd = lambda tol: EF.nsd(  # noqa: E731
+        nsd = lambda tol, **kw: EF.nsd(  # noqa: E731
             torch.from_numpy(pred).to(device),
             torch.from_numpy(target).to(device),
             spacing=spacing,
             tolerance=tol,
             num_classes=3,
             backend=backend,
+            **kw,
         ).cpu().numpy()
-        at = nsd(tolerance)
+        # Strict binary64 comparison: the tolerance is the float distance itself, so ties count,
+        # and one ulp less excludes them.
+        at = nsd(tolerance, tie_rtol=0)
         np.testing.assert_array_equal(at, expected, err_msg=backend)
-        assert (at > nsd(math.nextafter(tolerance, 0))).any(), "no boundary voxel tied with the tolerance"
+        assert (at > nsd(math.nextafter(tolerance, 0), tie_rtol=0)).any(), "no voxel tied with the tolerance"
+        # The default margin keeps them one ulp below, and drops them below the margin.
+        np.testing.assert_array_equal(nsd(math.nextafter(tolerance, 0)), at, err_msg=backend)
+        assert (at > nsd(tolerance * (1 - 10 * DEFAULT_TIE_RTOL))).any(), backend
+
+
+def _offset_cubes(shift: int) -> tuple[np.ndarray, np.ndarray]:
+    """A cube and its copy shifted along axis 0: boundary distances of exactly ``shift`` voxels."""
+    target = np.zeros((1, 20, 12, 12), np.int64)
+    target[0, 4:10, 3:9, 3:9] = 1
+    return np.roll(target, shift, axis=1), target
+
+
+@pytest.mark.parametrize("surface", ["voxels", "surfels"])
+@pytest.mark.parametrize(
+    "h", [0.4, float(np.float32(0.4))], ids=["decimal", "float32-header"]
+)
+def test_nsd_counts_grid_distance_written_as_decimal(device, surface, h):
+    # fl(3 * 0.4) = 1.2000000000000002 > 1.2, and a float32 header gives 1.2000000179: both are
+    # 1.2 mm in exact arithmetic (to the header's precision), so they count as within 1.2.
+    pred, target = _offset_cubes(3)
+    kw = dict(spacing=(h, h, h), tolerance=1.2, num_classes=2, include_background=False, surface=surface)
+    p, t = torch.from_numpy(pred).to(device), torch.from_numpy(target).to(device)
+    for backend in _backends(device):
+        got = EF.nsd(p, t, backend=backend, **kw).cpu().numpy()
+        strict = EF.nsd(p, t, backend=backend, tie_rtol=0, **kw).cpu().numpy()
+        assert got[0, 0] == 1.0, backend
+        assert strict[0, 0] < 1.0, backend
+
+
+def test_nsd_ties_match_monai():
+    # MONAI compares float32 distances, which counts exact ties; the default margin agrees.
+    monai = pytest.importorskip("monai.metrics")
+    pred, target = pair((20, 24, 28), 4, seed=12)
+    spacing, tolerances = (0.4, 0.4, 0.4), [1.2, 2.4, 2.0, 2.8]  # 3, 6, 5 and 7 voxels
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = monai.compute_surface_dice(
+            _monai_one_hot(pred), _monai_one_hot(target), class_thresholds=tolerances,
+            include_background=True, spacing=spacing,
+        )
+    got = EF.nsd(pred, target, spacing=spacing, tolerance=tolerances, num_classes=4)
+    np.testing.assert_allclose(got, expected.double().numpy(), rtol=1e-6)
+    strict = EF.nsd(pred, target, spacing=spacing, tolerance=tolerances, num_classes=4, tie_rtol=0)
+    assert (np.abs(strict - expected.double().numpy()) > 1e-6).any(), "no tie to tell them apart"
+
+
+@pytest.mark.parametrize("tie_rtol", [-1e-9, 2e-3, math.nan, math.inf])
+def test_nsd_rejects_bad_tie_rtol(tie_rtol):
+    x = torch.zeros(1, 4, 4, dtype=torch.long)
+    with pytest.raises(ValueError, match="tie_rtol"):
+        EF.nsd(x, x, spacing=1, tolerance=1.0, num_classes=2, tie_rtol=tie_rtol)
+    with pytest.raises(TypeError, match="tie_rtol"):
+        EF.nsd(x, x, spacing=1, tolerance=1.0, num_classes=2, tie_rtol=True)
+
+
+def test_tie_rtol_never_widens_a_zero_tolerance():
+    assert _nsd_bounds([0.0, 1.0], range(2), 1e-3) == [0.0, 1.001]
+
+
+def test_nsd_tie_rtol_in_collection_and_metric():
+    from exacta.metrics import NSD
+
+    pred, target = _offset_cubes(3)
+    kw = dict(spacing=(0.4,) * 3, num_classes=2, include_background=False)
+    strict = EF.nsd(pred, target, tolerance=1.2, tie_rtol=0, **kw)
+    for tie_rtol, expected in ((0, strict), (DEFAULT_TIE_RTOL, np.ones((1, 1)))):
+        got = EF.evaluate(pred, target, metrics={"nsd": {"tolerance": 1.2, "tie_rtol": tie_rtol}}, **kw)
+        np.testing.assert_array_equal(got["nsd"], expected)
+        metric = NSD(tolerance=1.2, tie_rtol=tie_rtol, **kw)
+        metric.update(torch.from_numpy(pred), torch.from_numpy(target))
+        np.testing.assert_array_equal(metric.compute().per_case.numpy(), expected)
 
 
 def test_sqrt_is_correctly_rounded(device):

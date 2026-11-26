@@ -10,7 +10,7 @@ makes these choices arguments; matching a library requires matching all relevant
 | Voxel surfaces | `surface="voxels"`: foreground boundary voxels with equal weights; face-adjacent background identifies the boundary |
 | Surfels | `surface="surfels"`: marching-cubes surface elements weighted by area (contour lengths in 2D); percentiles use these weights |
 | Meshes | `surface="mesh"`: triangle centers to nearest points on the other mesh, weighted by triangle area (contour segments in 2D); evaluated on CPU |
-| NSD threshold | Distances at or below tolerance are included |
+| NSD threshold | Distances at or below tolerance are included, up to a relative margin `tie_rtol` (default `1e-6`, since 0.1.0) that keeps exact ties within despite rounding; `tie_rtol=0` compares strictly |
 | Image exterior | Counts as background |
 | Both masks empty | `both_empty`, default NaN |
 | One mask empty | Dice/IoU: zero; HD/ASSD: `one_empty`, default infinity; NSD: `one_empty`, default zero |
@@ -52,6 +52,19 @@ $$
 +\sum_j w_j^T\mathbf{1}[d_j^T\leq\tau]}
 {\sum_i w_i^P+\sum_j w_j^T}.
 $$
+
+**Ties with the tolerance (since 0.1.0).** A distance and a tolerance that are equal in exact
+arithmetic can differ after rounding. With spacing 0.4 mm, three voxels evaluate to
+$\mathrm{fl}(3\times0.4)=1.2000000000000002$ in binary64, above a tolerance of 1.2 mm, and a
+spacing read from a float32 image header carries a relative error up to $6\times10^{-8}$. A strict
+comparison then excludes every surface element lying exactly on the tolerance, which can move NSD
+by several percentage points. Exacta therefore evaluates $\mathbf{1}[d\leq\tau(1+\rho)]$, where
+$\rho$ is `tie_rtol` (default $10^{-6}$, at most $10^{-3}$). The default exceeds both rounding
+errors and stays below the relative gap between distinct distances on an isotropic grid, about
+$1/(2n)$ for a squared distance of $n$ voxels, for tolerances up to about 700 voxels. It never
+widens a tolerance of zero. `tie_rtol=0` reproduces SciPy-based tools (MedPy, DeepMind's
+surface-distance), which compare in binary64; MONAI compares float32 distances, which counts
+exact ties as the default does.
 
 Empty surfaces use the explicit policies in the table rather than these ratios.
 

@@ -24,8 +24,8 @@ Voxels outside the image count as background.
       computed exactly in float64 on the CPU. Percentiles are area-weighted as for surfels.
       Elements that both meshes share (wherever the masks agree locally) are at distance exactly 0;
       MeshMetrics reports ~1e-16 for them (a centre involves thirds, which binary cannot represent),
-      which matters for an NSD tolerance of exactly 0. Other ties between a distance and the
-      tolerance remain subject to floating-point rounding, as in any implementation.
+      which matters for an NSD tolerance of exactly 0: the relative tie margin of :func:`nsd`
+      does not widen a zero tolerance.
 
 HD and ASSD reduce each direction with a statistic ``s`` (for HD the q-th percentile, with linear
 interpolation for voxels as in NumPy's default; for ASSD the mean) and join the two directions
@@ -54,7 +54,9 @@ NSD at tolerance ``tau`` (Nikolov et al., JMIR 2021) is the fraction of the surf
 masks together, that lies within ``tau`` of the other surface:
 ``(#{d(P -> T) <= tau} + #{d(T -> P) <= tau}) / (#d(P -> T) + #d(T -> P))``, with ``#`` counting
 voxels or summing surfel areas. This is MONAI's ``compute_surface_dice`` (``use_subvoxels`` picks
-the representation) and, for surfels, DeepMind's ``compute_surface_dice_at_tolerance``.
+the representation) and, for surfels, DeepMind's ``compute_surface_dice_at_tolerance``. A distance
+counts as within ``tau`` when ``d <= tau * (1 + tie_rtol)``, so that distances equal to ``tau`` in
+exact arithmetic are within it despite rounding; see :func:`nsd`.
 """
 
 from __future__ import annotations
@@ -79,6 +81,10 @@ Combine = Literal["max", "mean", "pooled"]
 Surface = Literal["voxels", "surfels", "mesh"]
 
 EdtSq = Callable[..., Tensor]  # (features, spacing, batch_ndim=0) -> squared distances
+
+# NSD counts a distance d as within the tolerance tau when d <= tau * (1 + tie_rtol); see nsd.
+DEFAULT_TIE_RTOL = 1e-6
+MAX_TIE_RTOL = 1e-3
 
 # Elements of the (lines, n, n) block evaluated at once by the PyTorch distance transform (128 MiB).
 _CHUNK = 1 << 24
@@ -210,6 +216,7 @@ def nsd(
     *,
     spacing: Any,
     tolerance: Any,
+    tie_rtol: float = DEFAULT_TIE_RTOL,
     surface: Surface = "voxels",
     input_format: InputFormat = "index",
     num_classes: int | None = None,
@@ -220,16 +227,29 @@ def nsd(
 ) -> Any:
     """Normalized surface Dice for every case and class (see the module docstring).
 
-    Distances equal to the tolerance count as within it. Each distance is the exact
-    floating-point minimum of the expression SciPy's ``distance_transform_edt`` evaluates, so a
-    distance that ties with the tolerance lands on the same side as in MedPy and DeepMind, which
-    use SciPy. (SciPy itself returns a value one ulp above that minimum at a few voxels per
+    Distances equal to the tolerance count as within it. In binary64 a distance and a tolerance
+    that are equal in exact arithmetic can differ: with spacing 0.4, three voxels evaluate to
+    ``fl(3 * 0.4) = 1.2000000000000002``, above a tolerance of 1.2, and a spacing read from a
+    float32 image header is off by up to 6e-8 relative. A strict comparison would then exclude
+    every boundary element lying exactly on the tolerance, which can move NSD by several
+    percentage points. A distance ``d`` therefore counts as within when
+    ``d <= tolerance * (1 + tie_rtol)``. The default 1e-6 exceeds both errors and stays below the
+    relative gap between distinct distances on an isotropic grid (about ``1 / (2 n)`` for a
+    squared distance of ``n`` voxels) for tolerances up to about 700 voxels.
+
+    ``tie_rtol=0`` compares in binary64, as SciPy-based tools such as MedPy and DeepMind's
+    surface-distance do: each distance is the exact floating-point minimum of the expression
+    SciPy's ``distance_transform_edt`` evaluates, so it lands on the same side of the tolerance
+    as theirs. (SciPy itself returns a value one ulp above that minimum at a few voxels per
     million.) MONAI casts distances to float32 before comparing them with the tolerance, which
-    agrees on exact ties but also counts distances within float32 resolution of the tolerance.
+    counts exact ties as within and also distances within float32 resolution of the tolerance.
 
     Args:
         tolerance: Accepted boundary deviation, in the units of ``spacing``. A scalar, or one
             value per evaluated class (``num_classes - 1`` values when the background is excluded).
+        tie_rtol: Relative margin within which a distance counts as equal to the tolerance, in
+            ``[0, 1e-3]``. The default 1e-6 absorbs rounding; 0 compares strictly in binary64.
+            It never widens a tolerance of 0.
         one_empty: Value when the class is absent from exactly one of prediction and target.
             The default 0 is the limit of the definition: no surface element has a partner.
         Others: As in :func:`hausdorff_distance`.
@@ -244,11 +264,11 @@ def nsd(
         num_classes=num_classes,
         include_background=include_background,
     )
-    tau = _tolerances(tolerance, seg.classes)
+    bound = _nsd_bounds(tolerance, seg.classes, tie_rtol)
 
     def score(pt: _Distances, tp: _Distances, k: int) -> float:
-        within_p, total_p = _within(pt, tau[k])
-        within_t, total_t = _within(tp, tau[k])
+        within_p, total_p = _within(pt, bound[k])
+        within_t, total_t = _within(tp, bound[k])
         return (within_p + within_t) / (total_p + total_t)
 
     out = _per_case(
@@ -408,9 +428,9 @@ def _mean(x: _Distances) -> float:
     return ((x.d * x.w).sum() / x.w.sum()).item()
 
 
-def _within(x: _Distances, tau: float) -> tuple[float, float]:
-    """Amount of surface (voxel count, or surfel area) within ``tau``, and the total amount."""
-    inside = x.d <= tau
+def _within(x: _Distances, bound: float) -> tuple[float, float]:
+    """Amount of surface (voxel count, or surfel area) at distance ``<= bound``, and the total."""
+    inside = x.d <= bound
     if x.w is None:
         return torch.count_nonzero(inside).item(), x.d.numel()
     return x.w[inside].sum().item(), x.w.sum().item()
@@ -429,6 +449,18 @@ def _tolerances(tolerance: Any, classes: range) -> list[float]:
     if not bool(torch.isfinite(t).all() and (t >= 0).all()):
         raise ValueError("tolerance values must be non-negative and finite")
     return t.tolist()
+
+
+def _nsd_bounds(tolerance: Any, classes: range, tie_rtol: float) -> list[float]:
+    """Per-class upper bounds of the distances NSD counts as within the tolerance."""
+    if isinstance(tie_rtol, bool) or not isinstance(tie_rtol, (int, float)):
+        raise TypeError(f"tie_rtol must be a real number, got {type(tie_rtol).__name__}")
+    if not (math.isfinite(tie_rtol) and 0 <= tie_rtol <= MAX_TIE_RTOL):
+        raise ValueError(
+            f"tie_rtol must be in [0, {MAX_TIE_RTOL:g}] (a relative margin for ties, not a "
+            f"tolerance), got {tie_rtol!r}"
+        )
+    return [tau * (1.0 + tie_rtol) for tau in _tolerances(tolerance, classes)]
 
 
 def _edt_function(backend: Backend, device: torch.device) -> EdtSq:

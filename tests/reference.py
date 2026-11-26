@@ -98,13 +98,15 @@ def assd(p: np.ndarray, t: np.ndarray, spacing, combine: str = "pooled") -> floa
     return _symmetric(np.mean, *surface_distances(p, t, spacing), combine)
 
 
-def nsd(p: np.ndarray, t: np.ndarray, spacing, tolerance: float) -> float:
+def nsd(p: np.ndarray, t: np.ndarray, spacing, tolerance: float, tie_rtol: float = 0.0) -> float:
+    """NSD counting distances up to ``tolerance * (1 + tie_rtol)``; ``tie_rtol=0`` is strict."""
     if not p.any() and not t.any():
         return np.nan
     if not p.any() or not t.any():
         return 0.0
     d_pt, d_tp = surface_distances(p, t, spacing)
-    return ((d_pt <= tolerance).sum() + (d_tp <= tolerance).sum()) / (d_pt.size + d_tp.size)
+    bound = tolerance * (1.0 + tie_rtol)
+    return ((d_pt <= bound).sum() + (d_tp <= bound).sum()) / (d_pt.size + d_tp.size)
 
 
 def per_case(fn, pred: np.ndarray, target: np.ndarray, num_classes: int, spacings=None, **kw) -> np.ndarray:
