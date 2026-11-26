@@ -239,9 +239,12 @@ def nsd(
     float32 image header is off by up to 6e-8 relative. A strict comparison would then exclude
     every boundary element lying exactly on the tolerance, which can move NSD by several
     percentage points. A distance ``d`` therefore counts as within when
-    ``d <= tolerance * (1 + tie_rtol)``. The default 1e-6 exceeds both errors and stays below the
-    relative gap between distinct distances on an isotropic grid (about ``1 / (2 n)`` for a
-    squared distance of ``n`` voxels) for tolerances up to about 700 voxels.
+    ``d <= tolerance * (1 + tie_rtol)``. The default 1e-6 exceeds both errors, so a tolerance typed
+    from the decimal spacing counts the voxels that lie on it at that spacing. It also counts any
+    distinct grid distance up to 1e-6 above the tolerance. When all squared spacings are integer
+    multiples of a common g**2 (isotropic grids: g = spacing) that cannot happen below about
+    707 g; on anisotropic CT grids, whose spacings have no such unit, distinct distances can come
+    that close from about 15 mm on.
 
     ``tie_rtol=0`` compares in binary64, as SciPy-based tools such as MedPy and DeepMind's
     surface-distance do: each distance is the exact floating-point minimum of the expression
