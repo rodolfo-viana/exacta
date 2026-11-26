@@ -30,10 +30,16 @@ from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_te
 Activation = Literal["softmax", "sigmoid", "none"]
 TargetFormat = Literal["index", "one-hot"]
 Backend = Literal["auto", "triton", "torch"]
+Average = Literal["macro", "micro"]
 
 
 class _OverlapLoss(nn.Module):
     """Shared activation, reduction and dispatch for overlap losses."""
+
+    # Class-level defaults, so that a module pickled before these options existed still loads.
+    average: Average = "macro"
+    skip_absent: bool = False
+    smooth_numerator: bool = True
 
     def __init__(
         self,
@@ -48,6 +54,9 @@ class _OverlapLoss(nn.Module):
         backend: Backend = "auto",
         soft_label: bool = False,
         zero_absent: bool = False,
+        average: Average = "macro",
+        skip_absent: bool = False,
+        smooth_numerator: bool = True,
     ) -> None:
         super().__init__()
         if activation not in ("softmax", "sigmoid", "none"):
@@ -73,6 +82,22 @@ class _OverlapLoss(nn.Module):
         if zero_absent and backend == "triton":
             raise NotImplementedError("zero_absent=True runs on backend='torch' (or 'auto')")
         self.zero_absent = zero_absent
+        if average not in ("macro", "micro"):
+            raise ValueError(f"average must be 'macro' or 'micro', got {average!r}")
+        if not isinstance(skip_absent, bool):
+            raise TypeError("skip_absent must be a bool")
+        if not isinstance(smooth_numerator, bool):
+            raise TypeError("smooth_numerator must be a bool")
+        if skip_absent and zero_absent:
+            raise ValueError("zero_absent=True keeps absent classes in the mean and skip_absent=True removes them; "
+                             "use one")
+        if skip_absent and average == "micro":
+            raise ValueError("skip_absent=True averages over classes; average='micro' pools them into one ratio")
+        self.average, self.skip_absent, self.smooth_numerator = average, skip_absent, smooth_numerator
+        if self._custom_reduction() and backend == "triton":
+            raise NotImplementedError(
+                "average='micro', skip_absent=True and smooth_numerator=False run on backend='torch' (or 'auto')"
+            )
         if soft_label and target_format == "one-hot" and backend == "triton":
             raise NotImplementedError("soft_label=True with one-hot targets runs on backend='torch' (or 'auto')")
 
@@ -81,8 +106,13 @@ class _OverlapLoss(nn.Module):
         which may hold soft labels; index targets are hard, where both forms agree exactly."""
         return self.soft_label and self.target_format == "one-hot"
 
+    def _custom_reduction(self) -> bool:
+        """Whether the class reduction or the smoothing differs from what the fused kernels implement."""
+        return self.average != "macro" or self.skip_absent or not self.smooth_numerator
+
     def _fusable(self, input: Tensor, target: Tensor) -> bool:
         return (not self._semimetric() and not getattr(self, "zero_absent", False)
+                and not self._custom_reduction()
                 and _use_triton(self.backend, input, target, allow_empty=self.distributed))
 
     def _tversky_weights(self) -> tuple[float, float] | None:
@@ -141,8 +171,14 @@ class _OverlapLoss(nn.Module):
                 fn = ((1 - probs) * onehot).sum(dims)
             if self.distributed:
                 intersection, fp, fn, valid_counts = _global_overlap(intersection, fp, fn, valid_counts, input)
-            numerator = intersection + self.smooth
+            if self.average == "micro":
+                intersection, fp, fn = (intersection.sum(-1, keepdim=True), fp.sum(-1, keepdim=True),
+                                        fn.sum(-1, keepdim=True))
+            numerator = intersection + self.smooth if self.smooth_numerator else intersection
             denominator = intersection + alpha * fp + beta * fn + self.smooth
+            if self.skip_absent:
+                return _present_mean(numerator, denominator, intersection + fn > 0, valid_counts,
+                                     power=self._overlap_power()).to(input.dtype)
             if self.zero_absent:
                 numerator, denominator = _zero_absent(numerator, denominator, intersection + fn)
             return _overlap_mean(numerator, denominator, valid_counts,
@@ -162,7 +198,13 @@ class _OverlapLoss(nn.Module):
                 empty_target=generalized[1], smooth=self.smooth,
             )
             return _overlap_mean(numerator, denominator, valid_counts).to(input.dtype)
-        numerator, denominator = 2 * intersection + self.smooth, prediction + truth + self.smooth
+        if self.average == "micro":
+            intersection, prediction, truth = (intersection.sum(-1, keepdim=True), prediction.sum(-1, keepdim=True),
+                                               truth.sum(-1, keepdim=True))
+        numerator = 2 * intersection + self.smooth if self.smooth_numerator else 2 * intersection
+        denominator = prediction + truth + self.smooth
+        if self.skip_absent:
+            return _present_mean(numerator, denominator, truth > 0, valid_counts).to(input.dtype)
         if self.zero_absent:
             numerator, denominator = _zero_absent(numerator, denominator, truth)
         return _overlap_mean(numerator, denominator, valid_counts).to(input.dtype)
@@ -207,7 +249,8 @@ class DiceLoss(_OverlapLoss):
     channel 0 after activation. ``activation`` is ``"softmax"`` (default), ``"sigmoid"`` or
     ``"none"`` for probabilities. Targets use ``target_format="index"`` (default) or
     ``"one-hot"`` (also accepts soft labels). ``smooth=1e-5`` adds the same nonnegative value
-    to numerator and denominator, matching MONAI's equal ``smooth_nr`` and ``smooth_dr``.
+    to numerator and denominator (unless ``smooth_numerator=False``), matching MONAI's equal
+    ``smooth_nr`` and ``smooth_dr``.
     ``backend`` selects ``"auto"``, ``"torch"`` or ``"triton"``.
     ``squared_pred=True`` changes the denominator to ``Σ p² + Σ g² + smooth``;
     the product numerator is unchanged, including for soft targets. This option
@@ -230,6 +273,22 @@ class DiceLoss(_OverlapLoss):
     default, as in MONAI, an empty target still penalizes predicted probability through the
     smoothed ratio. It runs on the PyTorch backend.
 
+    Three more arguments select conventions of other libraries; their defaults are the behavior
+    above, and each runs on the PyTorch backend (``backend="auto"`` leaves the fused kernels for
+    it, ``backend="triton"`` raises). ``average="micro"`` pools the selected classes into one
+    ratio per case (per batch with ``batch_dice``), ``1 - (2 Σ_c Σ p·g + smooth) / (Σ_c Σ p +
+    Σ_c Σ g + smooth)``, instead of averaging per-class ratios (``"macro"``, the default).
+    ``skip_absent=True`` averages only over the classes present in the target of each case (target
+    mass above zero), where ``zero_absent`` keeps absent classes in the mean with zero loss; a
+    case with no present class has loss one and zero gradient, and stays in the mean unless it is
+    entirely ignored. ``smooth_numerator=False`` adds ``smooth`` to the denominator only,
+    ``1 - 2 Σ p·g / (Σ p + Σ g + smooth)``. ``skip_absent`` excludes ``zero_absent`` and
+    ``average="micro"``. Kornia 0.9's ``dice_loss`` is ``DiceLoss(average="micro",
+    smooth=eps, smooth_numerator=False, ignore_index=-100)`` for ``average="micro"`` and
+    ``DiceLoss(skip_absent=True, smooth=eps, smooth_numerator=False, ignore_index=-100)`` for
+    ``"macro"``, except that kornia keeps an entirely ignored sample in the batch mean with loss
+    one and Exacta omits it.
+
     ``ignore_index`` excludes that integer label. All losses also accept a keyword-only
     boolean ``mask`` of shape ``(B, *spatial)`` or ``(B, 1, *spatial)`` in forward; True
     includes a voxel. Both exclusions combine. Excluded values have zero gradient, including
@@ -249,11 +308,13 @@ class DiceLoss(_OverlapLoss):
                  target_format: TargetFormat = "index", include_background: bool = True,
                  batch_dice: bool = False, distributed: bool = False, smooth: float = 1e-5,
                  ignore_index: int | None = None, backend: Backend = "auto",
-                 soft_label: bool = False, zero_absent: bool = False) -> None:
+                 soft_label: bool = False, zero_absent: bool = False, average: Average = "macro",
+                 skip_absent: bool = False, smooth_numerator: bool = True) -> None:
         super().__init__(activation=activation, target_format=target_format,
                          include_background=include_background, batch_dice=batch_dice,
                          distributed=distributed, smooth=smooth, ignore_index=ignore_index, backend=backend,
-                         soft_label=soft_label, zero_absent=zero_absent)
+                         soft_label=soft_label, zero_absent=zero_absent, average=average,
+                         skip_absent=skip_absent, smooth_numerator=smooth_numerator)
         if not isinstance(squared_pred, bool):
             raise TypeError("squared_pred must be a bool")
         if squared_pred and soft_label:
@@ -274,6 +335,13 @@ class TverskyLoss(_OverlapLoss):
     reductions follow :class:`DiceLoss`. ``soft_label=True`` uses the semimetric
     ``TP = (Σ p + Σ g - Σ |p - g|) / 2`` with ``FP = Σ p - TP`` and ``FN = Σ g - TP`` (see
     :class:`DiceLoss`), whose index is maximal exactly at ``p = g`` when both weights are positive.
+
+    ``average="micro"`` sums TP, FP and FN over the selected classes before the ratio,
+    ``skip_absent=True`` averages only over the classes present in each case's target and
+    ``smooth_numerator=False`` adds ``smooth`` to the denominator only (see :class:`DiceLoss`).
+    Kornia 0.9's ``TverskyLoss(alpha, beta, eps)`` is ``TverskyLoss(alpha=alpha, beta=beta,
+    skip_absent=True, smooth=eps, smooth_numerator=False, ignore_index=-100)``, except that
+    kornia keeps an entirely ignored sample in the batch mean with loss one and Exacta omits it.
     """
 
     def __init__(
@@ -291,11 +359,15 @@ class TverskyLoss(_OverlapLoss):
         backend: Backend = "auto",
         soft_label: bool = False,
         zero_absent: bool = False,
+        average: Average = "macro",
+        skip_absent: bool = False,
+        smooth_numerator: bool = True,
     ) -> None:
         super().__init__(
             activation=activation, target_format=target_format, include_background=include_background,
             batch_dice=batch_dice, distributed=distributed, smooth=smooth, ignore_index=ignore_index, backend=backend,
-            soft_label=soft_label, zero_absent=zero_absent,
+            soft_label=soft_label, zero_absent=zero_absent, average=average, skip_absent=skip_absent,
+            smooth_numerator=smooth_numerator,
         )
         _nonnegative_finite("alpha", alpha)
         _nonnegative_finite("beta", beta)
@@ -663,6 +735,25 @@ def _overlap_mean(numerator: Tensor, denominator: Tensor, valid_counts: Tensor |
         return _loss_reductions.overlap_power(1 - numerator / denominator, power).mean()
     numerator, denominator, scale = masked_overlap_terms(numerator, denominator, valid_counts)
     return (_loss_reductions.overlap_power(1 - numerator / denominator, power) * scale).sum()
+
+
+def _present_mean(numerator: Tensor, denominator: Tensor, present: Tensor, valid_counts: Tensor | None,
+                  *, power: float = 1.0) -> Tensor:
+    """Mean over the classes present in each case's target, then over cases.
+
+    A case with no present class has loss one and zero gradient, and keeps its place in the mean
+    unless it is entirely ignored, which omits it as in every overlap average. The ratio of an
+    absent class is replaced before the division, so that it cannot leak NaN into the gradient.
+    """
+    numerator = torch.where(present, numerator, 1)
+    denominator = torch.where(present, denominator, 1)
+    count = present.sum(-1)
+    error = _loss_reductions.overlap_power(1 - numerator / denominator, power)
+    per_case = torch.where(count > 0, (error * present).sum(-1) / count.clamp_min(1), 1)
+    if valid_counts is None:
+        return per_case.mean()
+    active = valid_counts > 0
+    return (per_case * (active.to(per_case.dtype) / active.sum().clamp_min(1))).sum()
 
 
 def _zero_absent(numerator: Tensor, denominator: Tensor, truth: Tensor) -> tuple[Tensor, Tensor]:

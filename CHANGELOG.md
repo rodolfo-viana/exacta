@@ -4,6 +4,21 @@ Release notes for Exacta.
 
 ## Unreleased
 
+- **Dice and Tversky losses:** three new arguments make conventions of other libraries compositions of
+  Exacta's. `average="micro"` pools the selected classes into one ratio per case (per batch with
+  `batch_dice=True`); the default `"macro"` is the previous mean of per-class ratios.
+  `skip_absent=True` averages only over the classes present in each case's target, where
+  `zero_absent=True` keeps them in the mean; a case with no present class has loss one and zero
+  gradient. `smooth_numerator=False` adds `smooth` to the denominator only; the default, in both terms,
+  is unchanged. With these, Kornia 0.9.2's `dice_loss(average="micro")`, `dice_loss(average="macro")` and
+  `TverskyLoss` are `DiceLoss(average="micro", ...)`, `DiceLoss(skip_absent=True, ...)` and
+  `TverskyLoss(skip_absent=True, ...)`, each with `smooth=eps, smooth_numerator=False,
+  ignore_index=-100`, and agree with Kornia in binary64 to about `2e-15` in value and gradient (a
+  smoothed numerator left up to `7e-10` at `eps=1e-8`). Remaining differences: Kornia's class
+  `weight`, and an entirely ignored sample, which Kornia keeps in the mean with loss one and Exacta
+  omits. The arguments run on PyTorch (`backend="auto"` leaves the fused kernels for them,
+  `backend="triton"` raises). Defaults, and so every previous result, are unchanged.
+
 - **Lovasz losses:** `LovaszSoftmaxLoss` and `LovaszHingeLoss` now compute the increments of the
   Jaccard sequence (the weights of the sorted errors) from exact int64 counts,
   `(I[k-1] U[k] - I[k] U[k-1]) / (U[k-1] U[k])`, with one binary64 division and one cast to the dtype

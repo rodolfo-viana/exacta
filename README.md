@@ -139,7 +139,9 @@ explicitly; different loss definitions produce different gradients.
 `DeepSupervisionLoss` combines a loss across explicitly paired prediction/target resolutions.
 `zero_absent=True` on Dice and Tversky losses gives zero loss to classes absent from the
 target, as segmentation_models_pytorch does; by default, as in MONAI, an empty target still
-penalizes predicted probability. `DiceLoss(squared_pred=True)` uses a squared denominator; Dice–CE, Dice–focal and Dice–top-k CE
+penalizes predicted probability; `skip_absent=True` drops absent classes from the class mean,
+`average="micro"` pools classes into one ratio and `smooth_numerator=False` smooths the denominator
+only, which composes Kornia's Dice and Tversky losses. `DiceLoss(squared_pred=True)` uses a squared denominator; Dice–CE, Dice–focal and Dice–top-k CE
 support the same option. Generalized Dice supports inverse-square, inverse-volume and uniform
 class weights. Standard cross-entropy and binary cross-entropy remain available in PyTorch.
 
