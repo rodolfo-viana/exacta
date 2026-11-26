@@ -4,7 +4,25 @@ Release notes for Exacta's alpha versions.
 
 ## Unreleased
 
-Changes for the next release will be recorded here.
+- Add `zero_absent=True` to `DiceLoss`, `TverskyLoss` and `FocalTverskyLoss`: classes whose target
+  is empty within the reduction get zero loss and gradient but still count in the mean, as in
+  segmentation_models_pytorch (its Dice and Tversky losses are reproduced with `batch_dice=True`,
+  `smooth=0`). By default, as in MONAI, an empty target still penalizes predicted probability.
+- Add reporting signatures: `exacta.conventions.signature("hd95")` returns
+  `hd95[both_empty=nan;combine=max;one_empty=inf;surface=voxels]@exacta-<version>`, naming every
+  convention behind a score with defaults filled in. `parse_signature` reads it back into options
+  for `functional.evaluate`, which then recomputes the same score bit for bit.
+  `signatures(selection)` and `MetricCollection.signatures()` cover several metrics and record
+  dataset pooling.
+- **Behavior change:** NSD now counts a distance as within the tolerance when
+  `d <= tolerance * (1 + tie_rtol)`, with a new `tie_rtol` argument (default `1e-6`) on
+  `functional.nsd`, `metrics.NSD` and the `nsd` options of `evaluate`/`MetricCollection`.
+  Distances equal to the tolerance in exact arithmetic previously could fall outside it after
+  rounding: with spacing 0.4 and tolerance 1.2, `fl(3 * 0.4) = 1.2000000000000002` excluded every
+  boundary voxel lying exactly three voxels away, changing NSD by up to 0.04 on test volumes.
+  `tie_rtol=0` restores the strict binary64 comparison used by SciPy-based tools such as MedPy
+  and DeepMind's surface-distance; MONAI's float32 comparison counts such ties, as the new
+  default does.
 
 ## 0.0.1a6 — 2026-11-24
 
