@@ -16,6 +16,13 @@ Other platforms install from source, which builds the CPU extension and requires
 compiler and Python development headers; OpenMP is optional. On Debian/Ubuntu, install
 `build-essential` and development headers matching your Python interpreter.
 
+The kernels reproduce reference expressions bit for bit, so they must be compiled without fused
+multiply-adds. The build gives GCC, Clang (Apple clang included), Intel icx and MSVC 2022 or later
+the flags that forbid them, checks at configuration time that the compiler does round every product
+and sum separately, and stops with an error for any other compiler or when that check fails. GCC,
+Clang and Apple clang are tested in CI; the MSVC and icx flags follow the vendors' documentation and
+have not been exercised.
+
 ## CPU and GPU
 
 CPU kernels are precompiled in wheels and compile during source installation. CUDA loss and
