@@ -43,9 +43,6 @@ metadata.version.input = "src/exacta/__init__.py"
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
-markers = [
-    "referee: subset of the tests for referees and reviewers (tests/referee_subset.txt); run with pytest -m referee",
-]
 filterwarnings = [
     # raised inside Triton's code generator on Python 3.14, not by exacta
     "ignore:AnnAssign.__init__ missing:DeprecationWarning",

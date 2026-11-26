@@ -101,18 +101,15 @@ Release notes for Exacta.
   the terms matters only in that case. A test pins this behaviour.
 - **Tests:** a GPU test checks that the Triton kernels' binary64 arithmetic is what the exactness
   argument assumes: every add, subtract, multiply and divide rounded once, and no fused
-  multiply-add. The C++ and Triton passes now point to the lines of the published pseudo-code.
+  multiply-add. The C++ and Triton passes now number the steps of the tie-tolerant envelope.
 - **Tests:** a Portability CI workflow builds the source distribution and runs the test suite on
   Linux x86-64 with Clang and OpenMP, Linux aarch64 and macOS arm64 (Apple clang, without OpenMP),
   and checks that a fixed set of results (`scripts/portability_digest.py`) is bit-identical on all
   of them.
-- **Documentation and tests for referees:** `examples/driver.py` runs a short tour of the public API on
+- **Example driver:** `examples/driver.py` runs a short tour of the public API on
   deterministic synthetic inputs, and `tests/test_example_driver.py` compares its output with
   `examples/driver_expected.txt` (the losses, whose last bits depend on the PyTorch build, to a
   relative `1e-9`; everything else, the mesh scores included, as text).
-  `pytest -m referee` runs 726 of the tests (`tests/referee_subset.txt`; under 2 minutes on CPU with the
-  reference tools installed). The LaTeX sources of the user manual are in `docs/manual/`;
-  `docs/manual/build.sh` builds the PDF, which is not tracked.
 - **Fixed arithmetic of the scores:** every surface score is now a fixed binary64 expression of the
   exact squared distances, independent of the CPU's vector instructions, the BLAS, the C library,
   the PyTorch and NumPy versions and the number of threads. Four steps were not, and a fifth is

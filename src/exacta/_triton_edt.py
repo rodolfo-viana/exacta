@@ -220,7 +220,7 @@ if triton is not None:
 
             # Lower envelope; k is the top of each lane's stack (-1: empty). b holds each entry's
             # breakpoint with the entry below it, z their running maximum (see csrc/cpu/edt.cpp).
-            # "Alg. 1, line N" refers to the paper's pseudo-code of this pass, as in edt.cpp.
+            # "Alg. 1, line N" numbers the steps of this pass, as in edt.cpp.
             k = tl.full([BLOCK], -1, dtype=tl.int32)
             for q in range(0, n):
                 fq = tl.load(src + base + q * stride, mask=valid, other=inf)

@@ -1,3 +1,0 @@
-# Makes a plain `latexmk userManual.tex` build the PDF with pdflatex, as docs/manual/build.sh does.
-$pdf_mode = 1;
-$pdflatex = 'pdflatex -interaction=nonstopmode -halt-on-error -file-line-error %O %S';
