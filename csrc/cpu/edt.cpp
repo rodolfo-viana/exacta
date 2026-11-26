@@ -41,51 +41,56 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 // the suffix minimum of b (stored back into b) stays below xq + tol. Testing pops against z, or
 // scanning right with z, can miss the minimum by an ulp when tied parabolas are far apart on
 // the line (tests/test_edt.py has such lines).
+//
+// The comments "Alg. 1, line N" refer to the pseudo-code of this pass in the paper that
+// describes Exacta (Algorithm 1, the tie-tolerant lower envelope); its proof of exactness assumes
+// exactly these binary64 operations, each rounded once (no fused multiply-add, see CMakeLists.txt).
 void edt_1d(const double *f, double tol, double *d, std::int64_t n, double h, std::int64_t *v,
             double *z, double *b) {
-  std::int64_t k = -1;
-  for (std::int64_t q = 0; q < n; ++q) {
+  std::int64_t k = -1;  // Alg. 1, line 1
+  for (std::int64_t q = 0; q < n; ++q) {  // line 2
     if (f[q] == kInf) continue;
-    const double xq = h * static_cast<double>(q);
+    const double xq = h * static_cast<double>(q);  // line 3
     // The breakpoint with the top of the stack is num / den, den > 0. Comparing num with
     // (b[k] - tol) * den decides as comparing the quotient would, but for an ulp far inside the
     // tolerance, and leaves one division per kept breakpoint.
     double num = 0.0, den = 1.0;
-    while (k >= 0) {
+    while (k >= 0) {  // line 4
       const double xv = h * static_cast<double>(v[k]);
-      num = (f[q] + xq * xq) - (f[v[k]] + xv * xv);
+      num = (f[q] + xq * xq) - (f[v[k]] + xv * xv);  // line 5
       den = 2.0 * (xq - xv);
-      if (num > (b[k] - tol) * den) break;  // v[k] may be lowest somewhere, or tie: keep it
-      --k;
+      if (num > (b[k] - tol) * den) break;  // lines 6-7: v[k] may be lowest somewhere, or tie
+      --k;  // line 9: v[k] lies above a neighbour everywhere
     }
     // b[0] = -inf, so the stack, once started, never empties.
-    const double s = k >= 0 ? num / den : -kInf;
+    const double s = k >= 0 ? num / den : -kInf;  // line 11
     ++k;
     v[k] = q;
     b[k] = s;
-    z[k] = k == 0 ? s : std::max(s, z[k - 1]);  // a kept tie leaves v[k - 1] a zero-width interval
+    // Line 12; a kept tie leaves v[k - 1] a zero-width interval.
+    z[k] = k == 0 ? s : std::max(s, z[k - 1]);
     z[k + 1] = kInf;
   }
-  if (k < 0) {
+  if (k < 0) {  // line 14
     for (std::int64_t q = 0; q < n; ++q) d[q] = kInf;
     return;
   }
-  for (std::int64_t i = k - 1; i >= 0; --i) b[i] = std::min(b[i], b[i + 1]);  // suffix minimum
+  for (std::int64_t i = k - 1; i >= 0; --i) b[i] = std::min(b[i], b[i + 1]);  // line 16: minima m
   // h * (q - p) rounds once, unlike h*q - h*p, and is how SciPy forms the offset, so values
   // match SciPy's bit for bit; threshold metrics (NSD) are sensitive to the last bit.
   const auto parabola = [&](std::int64_t q, std::int64_t p) {
     const double dx = h * static_cast<double>(q - p);
     return dx * dx + f[p];
   };
-  std::int64_t j = 0;
-  for (std::int64_t q = 0; q < n; ++q) {
-    const double xq = h * static_cast<double>(q);
+  std::int64_t j = 0;  // line 17
+  for (std::int64_t q = 0; q < n; ++q) {  // line 18
+    const double xq = h * static_cast<double>(q);  // line 19
     while (z[j + 1] < xq) ++j;
-    double best = parabola(q, v[j]);
-    for (std::int64_t i = j - 1; i >= 0 && z[i + 1] >= xq - tol; --i) {
+    double best = parabola(q, v[j]);  // line 20
+    for (std::int64_t i = j - 1; i >= 0 && z[i + 1] >= xq - tol; --i) {  // lines 21-22
       best = std::min(best, parabola(q, v[i]));
     }
-    for (std::int64_t i = j + 1; i <= k && b[i] <= xq + tol; ++i) {
+    for (std::int64_t i = j + 1; i <= k && b[i] <= xq + tol; ++i) {  // lines 24-25
       best = std::min(best, parabola(q, v[i]));
     }
     d[q] = best;

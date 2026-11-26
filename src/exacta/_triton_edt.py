@@ -22,6 +22,8 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor
 
+from exacta import _native
+
 try:
     import triton
     import triton.language as tl
@@ -44,6 +46,7 @@ def edt_sq(features: Tensor, spacing: Sequence[float], batch_ndim: int = 0) -> T
     """
     if triton is None:
         raise RuntimeError("Triton is not installed")
+    _native.check_edt_extent(features.shape[batch_ndim:], spacing)
     with torch.cuda.device(features.device):  # Triton launches on the current device
         return _transform(features, spacing, batch_ndim)
 
@@ -178,6 +181,7 @@ if triton is not None:
 
             # Lower envelope; k is the top of each lane's stack (-1: empty). b holds each entry's
             # breakpoint with the entry below it, z their running maximum (see csrc/cpu/edt.cpp).
+            # "Alg. 1, line N" refers to the paper's pseudo-code of this pass, as in edt.cpp.
             k = tl.full([BLOCK], -1, dtype=tl.int32)
             for q in range(0, n):
                 fq = tl.load(src + base + q * stride, mask=valid, other=inf)
@@ -197,10 +201,11 @@ if triton is not None:
                     xv = h * vk.to(tl.float64)
                     num = tl.where(active, gq - gv, num)
                     den = tl.where(active, 2.0 * (xq - xv), den)
-                    pop = active & (num <= (bk - tol) * den)  # v[k] neither lowest anywhere nor tied
+                    # Alg. 1, lines 6-9: pop v[k] when it is neither lowest anywhere nor tied.
+                    pop = active & (num <= (bk - tol) * den)
                     k = tl.where(pop, k - 1, k)
                     active = pop & (k >= 0)
-                s = tl.where(k >= 0, num / den, -inf)  # an empty stack stays empty only before the first push
+                s = tl.where(k >= 0, num / den, -inf)  # line 11; -inf only for the first push
                 k = tl.where(finite, k + 1, k)
                 at = _slot(k, lanes, slot)
                 z_prev = tl.load(z_buf + at - lanes, mask=finite & (k > 0), other=-inf)
@@ -210,7 +215,8 @@ if triton is not None:
                 tl.store(z_buf + at, tl.where(k == 0, s, tl.maximum(s, z_prev)), mask=finite)
                 tl.store(z_buf + at + lanes, tl.full([BLOCK], inf, dtype=tl.float64), mask=finite)
 
-            # Suffix minimum of b, stored back into b, bounds where entries above j can be lowest.
+            # Suffix minimum of b (Alg. 1, line 16), stored back into b, bounds where entries
+            # above j can be lowest.
             for r in range(1, n):
                 i = n - 1 - r
                 inner = valid & (i < k)
@@ -218,7 +224,8 @@ if triton is not None:
                 b_i = tl.load(b_buf + _slot(i + tl.zeros([BLOCK], dtype=tl.int32), lanes, slot), mask=inner, other=0.0)
                 tl.store(b_buf + _slot(i + tl.zeros([BLOCK], dtype=tl.int32), lanes, slot), tl.minimum(b_i, b_up), mask=inner)
 
-            # Evaluate: the envelope's parabola and every parabola tied with it near xq.
+            # Evaluate (Alg. 1, lines 17-25): the envelope's parabola and every parabola tied with
+            # it near xq; the left scan uses z, the right scan the suffix minima of b.
             has = valid & (k >= 0)
             j = tl.zeros([BLOCK], dtype=tl.int32)
             for q in range(0, n):
