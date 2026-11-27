@@ -45,13 +45,20 @@ Release notes for Exacta.
   into a soft target are unchanged. Not changed: the Lovasz softmax still sorts the rounded errors
   `|g - p|`, the squared error of `HausdorffDTLoss` still subtracts where `p` rounds to the target, and the
   value of `BoundaryLoss` is a sum of terms of both signs.
-  Cost: with softmax and integer labels the PyTorch backend forms the sums from the label indices (no one-hot
-  tensor) and `DiceCELoss` shares one softmax between its two terms, so that the forward and backward pass of
-  `DiceCELoss` on a `1 x 4 x 128^3` volume takes 1.07 times the previous time on the CPU in binary32 and
-  binary64 (1.2 times for `DiceLoss`, 1.7 times for the cross-entropy alone; 2 threads), and the fused kernels
-  1.0 times in binary32 and 1.25 times in binary64 (the added per-voxel log-normalizer and complement are
-  double-precision work in a kernel limited by double-precision throughput). Sigmoid activations, one-hot targets and the focal loss keep the generic composition and take
-  1.2 to 2.9 times as long on the CPU.
+  Cost: with softmax and integer labels (or a one-hot tensor that is exactly such labels: values 0 and 1, one 1
+  per included voxel, which costs the `max` over the classes that yields the labels, about 3 ms of reductions
+  and one host synchronisation) the PyTorch backend forms the sums from the label indices (no one-hot tensor)
+  and `DiceCELoss` shares one softmax between its two terms. Forward and backward of `DiceCELoss` on a
+  `1 x 4 x 128^3` volume then take 1.07 times the previous time on the CPU for index targets in binary32 and
+  binary64 (1.2 times for `DiceLoss`, 1.7 times for the cross-entropy alone; 2 threads), and 1.5 to 1.7 times
+  for a contiguous hard one-hot target (2.2 to 2.6 times for `DiceLoss`: the previous composition was cheap
+  there, 1.1 to 1.3 times for a channels-last one-hot tensor, where it was not). The fused kernels take 1.0 times
+  in binary32 and 1.25 times in binary64 (the added per-voxel log-normalizer and complement are
+  double-precision work in a kernel limited by double-precision throughput). The PyTorch backend on CUDA
+  (index targets, `DiceCELoss`, `64^3` and `128^3`, two and four classes) takes 1.1 to 1.8 times the previous
+  time: it forms the sums with masks above about half a million voxels, where CUDA's scatter/gather kernels are
+  slower, and is launch-bound below. Sigmoid activations, soft one-hot targets and the focal loss keep the
+  generic composition and take 1.2 to 3 times as long on the CPU.
 
 - **Sigmoid losses at saturated logits:** the gradients through a sigmoid lost accuracy as `sigma(z)`
   approached one and every digit once it rounded to one (`z` above 37 in binary64, 17 in binary32), on both

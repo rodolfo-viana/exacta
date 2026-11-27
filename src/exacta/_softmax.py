@@ -37,39 +37,82 @@ import torch
 from torch import Tensor
 
 
-def _put(x: Tensor, top: Tensor, value: Tensor) -> Tensor:
-    """``x`` with ``x[top] = value`` along the class axis: in place unless a graph is being built."""
-    return x.scatter(1, top, value) if torch.is_grad_enabled() else x.scatter_(1, top, value)
+# CUDA: a mask and a sum beat scatter/gather kernels (several times slower at this size) from about half a million
+# voxels per batch on; below that the extra launches of the mask form cost more than they save.
+_DENSE_VOXELS = 2**19
 
 
-def _exclusive(x: Tensor, top: Tensor, *, owned: bool = False) -> Tensor:
-    """Sum over the classes other than ``top``, formed without subtracting from the total.
+def _dense(index: Tensor) -> bool:
+    return index.device.type == "cuda" and index.numel() >= _DENSE_VOXELS
 
-    ``owned``: ``x`` may be modified in place (and is restored), which avoids a copy; it is never so while
-    a graph is being built.
+
+def _positions(index: Tensor, classes: int) -> Tensor | None:
+    """Where the mask form is used (large CUDA tensors): mask ``(B, C, *)`` of the entries at the class ``index``
+    ``(B, 1, *)`` of every voxel, to pass as ``hit`` to the helpers below that would otherwise rebuild it.
+    ``None`` elsewhere."""
+    if not _dense(index):
+        return None
+    return torch.arange(classes, device=index.device).reshape(1, -1, *([1] * (index.ndim - 2))) == index
+
+
+def _gather(x: Tensor, index: Tensor, hit: Tensor | None = None) -> Tensor:
+    """``x`` ``(B, C, V)`` at the class ``index`` of every voxel, ``(B, 1, V)``. CUDA's scatter/gather kernels are
+    several times slower than a mask and a sum over the few classes (the sum of one entry and zeros is exact)."""
+    if _dense(index):
+        hit = _positions(index, x.shape[1]) if hit is None else hit
+        return torch.where(hit, x, 0).sum(1, keepdim=True)
+    return x.gather(1, index)
+
+
+def _lookup(table: Tensor, index: Tensor, hit: Tensor | None = None) -> Tensor:
+    """``table`` ``(B, C)`` at the class ``index`` ``(B, 1, V)`` of every voxel, ``(B, 1, V)``."""
+    if _dense(index):
+        hit = _positions(index, table.shape[1]) if hit is None else hit
+        return torch.where(hit, table.reshape(*table.shape, *([1] * (index.ndim - 2))), 0).sum(1, keepdim=True)
+    return table.gather(1, index[:, 0])[:, None]
+
+
+def _put(x: Tensor, index: Tensor, value: Tensor, hit: Tensor | None = None) -> Tensor:
+    """``x`` with ``x[index] = value`` along the class axis: in place on the CPU unless a graph is being built."""
+    if _dense(index):
+        hit = _positions(index, x.shape[1]) if hit is None else hit
+        return torch.where(hit, value, x)
+    return x.scatter(1, index, value) if torch.is_grad_enabled() else x.scatter_(1, index, value)
+
+
+def _exclusive(x: Tensor, index: Tensor, *, owned: bool = False, kept: Tensor | None = None,
+               hit: Tensor | None = None) -> Tensor:
+    """Sum over the classes other than ``index``, formed without subtracting from the total.
+
+    ``owned``: on the CPU ``x`` may be modified in place (and is restored), which avoids a copy; it is never so
+    while a graph is being built. ``kept`` is ``x`` at ``index`` when the caller has it already.
     """
+    if _dense(index):
+        hit = _positions(index, x.shape[1]) if hit is None else hit
+        return torch.where(hit, 0, x).sum(1, keepdim=True)
     if owned and not torch.is_grad_enabled():
-        kept = x.gather(1, top)
-        x.scatter_(1, top, 0)
+        kept = x.gather(1, index) if kept is None else kept
+        x.scatter_(1, index, 0)
         rest = x.sum(1, keepdim=True)
-        x.scatter_(1, top, kept)
+        x.scatter_(1, index, kept)
         return rest
-    return x.scatter(1, top, 0).sum(1, keepdim=True)
+    return x.scatter(1, index, 0).sum(1, keepdim=True)
 
 
 def _neg_log(z: Tensor, top: Tensor, p_top: Tensor, q_top: Tensor) -> Tensor:
     """``-log softmax(z)`` as ``log1p(q_top / p_top) + (z_top - z)``, non-negative terms."""
-    return torch.log1p(q_top / p_top) + (z.gather(1, top) - z)
+    return torch.log1p(q_top / p_top) + (_gather(z, top) - z)
 
 
 class _Softmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, z: Tensor, complement: bool, nll: bool):  # type: ignore[override]
+        z = z.detach()  # eager forward runs without grad, but a tracer (dynamo) sees the input's requires_grad
         p = torch.softmax(z, 1)
         top = p.max(1, keepdim=True).indices
         q_top = _exclusive(p, top, owned=True)
         q = _put(1 - p, top, q_top) if complement else None
-        out_nll = _neg_log(z, top, p.gather(1, top), q_top) if nll else None
+        out_nll = _neg_log(z, top, p.amax(1, keepdim=True), q_top) if nll else None
         ctx.save_for_backward(p, top, q_top, *(() if q is None else (q,)))
         ctx.set_materialize_grads(False)
         return p, q, out_nll
@@ -104,8 +147,11 @@ class _Softmax(torch.autograd.Function):
                     v.sub_(grad_nll)
             total = v.sum(1, keepdim=True)
             dz = torch.sub(v, total).mul_(p).addcmul_(q, v)
-        dominant = q.gather(1, top) * v.gather(1, top) - p.gather(1, top) * _exclusive(v, top, owned=True)
-        return _put(dz, top, dominant), None, None
+        hit = _positions(top, p.shape[1])
+        v_top = _gather(v, top, hit)
+        p_top = _gather(p, top, hit) if graph else p.amax(1, keepdim=True)  # (amax would split a tie's gradient)
+        dominant = _gather(q, top, hit) * v_top - p_top * _exclusive(v, top, owned=True, kept=v_top, hit=hit)
+        return _put(dz, top, dominant, hit), None, None
 
 
 def softmax(z: Tensor) -> Tensor:
@@ -130,28 +176,31 @@ def neg_log_softmax(z: Tensor) -> Tensor:
     return _Softmax.apply(z, False, True)[2]
 
 
-def _label_nll(zf: Tensor, p: Tensor, index: Tensor, q_target: Tensor) -> Tensor:
+def _label_nll(zf: Tensor, p: Tensor, index: Tensor, q_target: Tensor, hit: Tensor | None = None) -> Tensor:
     """``-log p_t`` of the label ``t`` of every voxel, ``(B, 1, V)``, from ``q_t = 1 - p_t`` formed as the sum of
     the other probabilities: ``-log1p(-q_t)`` for a label of largest logit, otherwise ``(max - z_t) - log p_max``
     (``p_max = 1 / sum_j exp(z_j - max)``), a sum of non-negative terms."""
-    z_target = zf.gather(1, index)
+    z_target = _gather(zf, index, hit)
     top = zf.amax(1, keepdim=True)
     return torch.where(z_target >= top, -torch.log1p(-q_target), (top - z_target) - torch.log(p.amax(1, keepdim=True)))
 
 
 def _check_labels(target: Tensor, classes: int) -> None:
     """The errors ``F.one_hot`` raises for labels outside ``[0, classes)``, which the index-based sums below
-    would otherwise miscount (or, on CUDA, hit a device-side assert)."""
+    would otherwise miscount (or, on CUDA, hit a device-side assert). One host synchronisation."""
     if target.numel() and not torch.compiler.is_compiling():
-        low, high = (int(v) for v in torch.aminmax(target))
-        if low < 0:
-            raise RuntimeError("Class values must be non-negative.")
-        if high >= classes:
-            raise RuntimeError("Class values must be smaller than num_classes.")
+        low, high = torch.aminmax(target)
+        if bool((low < 0) | (high >= classes)):
+            raise RuntimeError("Class values must be non-negative." if int(low) < 0
+                               else "Class values must be smaller than num_classes.")
 
 
-def _per_class_counts(index: Tensor, invalid: Tensor | None, classes: int, dtype: torch.dtype) -> Tensor:
+def _per_class_counts(index: Tensor, invalid: Tensor | None, classes: int, dtype: torch.dtype,
+                      hit: Tensor | None = None) -> Tensor:
     """Exact number of valid voxels of every class in every case, ``(B, C)``, from int64 counts."""
+    if _dense(index):  # atomic adds into a few bins are slow; a mask and a sum are not
+        hit = _positions(index, classes) if hit is None else hit
+        return (hit if invalid is None else hit & ~invalid).sum(2).to(dtype)
     labels = index[:, 0] if invalid is None else torch.where(invalid[:, 0], classes, index[:, 0])  # extra bin: excluded
     counts = torch.zeros(index.shape[0], classes + 1, dtype=torch.long, device=index.device)
     return counts.scatter_add_(1, labels, torch.ones_like(labels))[:, :classes].to(dtype)
@@ -177,6 +226,7 @@ class _IndexOverlap(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, z: Tensor, target: Tensor, valid: Tensor | None, squared: bool, with_nll: bool):  # type: ignore[override]
+        saved_z, z = z, z.detach()  # the in-place writes below must not see a tensor that requires grad (tracers)
         batch, classes = z.shape[:2]
         voxels = math.prod(z.shape[2:])
         _check_labels(target, classes)
@@ -186,12 +236,13 @@ class _IndexOverlap(torch.autograd.Function):
         p = torch.softmax(zf, 1)
         work = p.scatter(1, index, 0)
         q_target = work.sum(1, keepdim=True)
-        nll = _label_nll(zf, p, index, q_target).reshape(target.shape) if with_nll else None
+        hit = _positions(index, classes)
+        nll = _label_nll(zf, p, index, q_target, hit).reshape(target.shape) if with_nll else None
         if invalid is not None:
             work.masked_fill_(invalid, 0)
             q_target.masked_fill_(invalid, 0)
         first = work.square().sum(2) if squared else work.sum(2)
-        torch.sub(p, work, out=work)
+        work.neg_().add_(p)  # p - work, exact elementwise: p at the label entries, 0 elsewhere
         if invalid is not None:
             work.masked_fill_(invalid, 0)
         inter = work.sum(2)
@@ -199,8 +250,8 @@ class _IndexOverlap(torch.autograd.Function):
         third = work.square().sum(2) if squared else work.sum(2)
         if squared:
             first, third = first + third, torch.zeros_like(third)
-        mass = _per_class_counts(index, invalid, classes, z.dtype)
-        ctx.save_for_backward(z, target, p, q_target, *(() if valid is None else (valid,)))
+        mass = _per_class_counts(index, invalid, classes, z.dtype, hit)
+        ctx.save_for_backward(saved_z, target, p, q_target, *(() if valid is None else (valid,)))
         ctx.squared = squared
         ctx.mark_non_differentiable(mass)
         ctx.set_materialize_grads(False)
@@ -214,37 +265,39 @@ class _IndexOverlap(torch.autograd.Function):
         voxels = math.prod(z.shape[2:])
         graph = torch.is_grad_enabled()  # double backward: differentiate through everything
         index = target.reshape(batch, 1, voxels)
-        flat = index[:, 0]
         invalid = ~rest[0].reshape(batch, 1, voxels) if rest else None
         zero = z.new_zeros(batch, classes)
         grad_inter = zero if grad_inter is None else grad_inter
         grad_first = zero if grad_first is None else grad_first
         grad_third = zero if grad_third is None else grad_third
+        hit = _positions(index, classes)
         if graph:
             p = softmax(z.reshape(batch, classes, voxels))
-            q_target = _exclusive(p, index)
+            q_target = _exclusive(p, index, hit=hit)
         # Effective gradient d with respect to p, per voxel: a class constant for the other classes, and
         # d_t for the label t; v = p d.
         if squared:
             v = p.square() * (2 * grad_first)[:, :, None]
-            label = grad_inter.gather(1, flat) - 2 * grad_first.gather(1, flat) * q_target[:, 0]
+            label = _lookup(grad_inter, index, hit) - 2 * _lookup(grad_first, index, hit) * q_target
         else:
             v = p * grad_first[:, :, None]
-            label = (grad_inter - grad_third).gather(1, flat)
-        label = p.gather(1, index) * label[:, None]
+            label = _lookup(grad_inter - grad_third, index, hit)
+        label = _gather(p, index, hit) * label
         if invalid is not None:  # excluded voxels contribute nothing to the sums (but may to the -log p_t)
             v = v.masked_fill(invalid, 0) if graph else v.masked_fill_(invalid, 0)
             label = label.masked_fill(invalid, 0)
         if grad_nll is not None:  # -log p_t of the label: v_t - grad
             label = label - grad_nll.reshape(batch, 1, voxels)
-        v = _put(v, index, label)
+        v = _put(v, index, label, hit)
         total = v.sum(1, keepdim=True)
-        top = p.max(1, keepdim=True).indices
+        p_top, top = p.max(1, keepdim=True)
         # p is a saved tensor, so its sum over the other classes is formed on a copy; v is ours.
-        q_top = _exclusive(p, top)
-        dominant = q_top * v.gather(1, top) - p.gather(1, top) * _exclusive(v, top, owned=True)
+        top_hit = _positions(top, classes)
+        q_top = _exclusive(p, top, hit=top_hit)
+        v_top = _gather(v, top, top_hit)
+        dominant = q_top * v_top - p_top * _exclusive(v, top, owned=True, kept=v_top, hit=top_hit)
         dz = v - p * total if graph else v.addcmul_(p, total, value=-1)
-        return _put(dz, top, dominant).reshape(z.shape), None, None, None, None
+        return _put(dz, top, dominant, top_hit).reshape(z.shape), None, None, None, None
 
 
 def index_overlap_statistics(
@@ -261,15 +314,17 @@ def index_overlap_statistics(
 class _CrossEntropyIndex(torch.autograd.Function):
     @staticmethod
     def forward(ctx, z: Tensor, target: Tensor) -> Tensor:  # type: ignore[override]
+        saved_z, z = z, z.detach()
         batch, classes = z.shape[:2]
         voxels = math.prod(z.shape[2:])
         _check_labels(target, classes)
         zf = z.reshape(batch, classes, voxels)
         index = target.reshape(batch, 1, voxels)
         p = torch.softmax(zf, 1)
-        q_target = _exclusive(p, index, owned=True)  # the other probabilities: 1 - p_t, without cancellation
-        nll = _label_nll(zf, p, index, q_target)
-        ctx.save_for_backward(z, target, p, q_target)
+        hit = _positions(index, classes)
+        q_target = _exclusive(p, index, owned=True, hit=hit)  # the other probabilities: 1 - p_t, without cancellation
+        nll = _label_nll(zf, p, index, q_target, hit)
+        ctx.save_for_backward(saved_z, target, p, q_target)
         return nll.reshape(target.shape)
 
     @staticmethod

@@ -137,15 +137,18 @@ class _OverlapLoss(nn.Module):
         return self._overlap(input, target, valid)
 
     def _overlap(self, input: Tensor, target: Tensor, valid: Tensor | None,
-                 nll_sink: list[Tensor] | None = None) -> Tensor:
-        """The loss of prepared (upcast, sanitized) inputs. With softmax and integer labels ``nll_sink`` receives
-        the per-voxel ``-log p_t`` that the same softmax pass yields (used by :class:`DiceCELoss`)."""
-        if self.activation == "softmax" and self.target_format == "index":
-            # Integer labels: the same sums from the label indices, without a one-hot tensor (see
-            # exacta._softmax._IndexOverlap). Background selection and the batch sum act on the (B, C) sums.
-            _check_index_target(target, input)
+                 nll_sink: list[Tensor] | None = None, labels: Tensor | None = None) -> Tensor:
+        """The loss of prepared (upcast, sanitized) inputs. With softmax and integer labels (``labels``, found by
+        :func:`_label_indices` when not given) ``nll_sink`` receives the per-voxel ``-log p_t`` that the same
+        softmax pass yields (used by :class:`DiceCELoss`)."""
+        if labels is None and self.activation == "softmax" and not self._semimetric():
+            labels = _label_indices(target, input, valid, self.target_format)
+        if labels is not None:
+            # Integer labels (or a one-hot tensor that holds exactly them): the same sums from the label indices,
+            # without a one-hot tensor (see exacta._softmax._IndexOverlap). Background selection and the batch
+            # sum act on the (B, C) sums.
             *stats, nll = _softmax.index_overlap_statistics(
-                input, target, valid, squared=self._squared_denominator(), with_nll=nll_sink is not None,
+                input, labels, valid, squared=self._squared_denominator(), with_nll=nll_sink is not None,
             )
             if nll_sink is not None:
                 nll_sink.append(nll)
@@ -628,13 +631,15 @@ class DiceCELoss(nn.Module):
             )
         if self._shares_softmax():
             # One softmax, one sum of the other probabilities and one backward pass serve both terms.
-            prepared, labels, valid = _prepare_masked_input(
+            prepared, labels_or_onehot, valid = _prepare_masked_input(
                 input, target, self.dice.target_format, self.dice.ignore_index, mask,
             )
-            nll: list[Tensor] = []
-            dice = self.dice._overlap(prepared, labels, valid, nll)
-            ce = self._index_cross_entropy(nll[0], labels, valid, weight)
-            return self.lambda_dice * dice + self.lambda_ce * ce
+            labels = _label_indices(labels_or_onehot, prepared, valid, self.dice.target_format)
+            if labels is not None:
+                nll: list[Tensor] = []
+                dice = self.dice._overlap(prepared, labels_or_onehot, valid, nll, labels)
+                ce = self._label_cross_entropy(nll[0], labels, valid, weight)
+                return self.lambda_dice * dice + self.lambda_ce * ce
         dice = self.dice(input, target, mask=mask) if self.lambda_dice else None
         if not self.lambda_ce:
             assert dice is not None
@@ -643,22 +648,23 @@ class DiceCELoss(nn.Module):
         return self.lambda_ce * ce if dice is None else self.lambda_dice * dice + self.lambda_ce * ce
 
     def _shares_softmax(self) -> bool:
-        """Whether the Dice and cross-entropy terms can read one softmax: softmax over integer labels, both terms
-        present, and the ordinary cross-entropy (not :class:`DiceFocalLoss`'s)."""
+        """Whether the Dice and cross-entropy terms may read one softmax: softmax over integer (or hard one-hot)
+        labels, both terms present, and the ordinary cross-entropy (not :class:`DiceFocalLoss`'s)."""
         return (self.lambda_dice != 0 and self.lambda_ce != 0 and self.dice.activation == "softmax"
-                and self.dice.target_format == "index"
-                and type(self)._pointwise is DiceCELoss._pointwise)
+                and not self.dice._semimetric() and type(self)._pointwise is DiceCELoss._pointwise)
 
-    def _index_cross_entropy(self, ce: Tensor, target: Tensor, valid: Tensor | None, weight: Tensor | None) -> Tensor:
-        """Reduce the per-voxel ``-log p_t`` of integer labels as ``F.cross_entropy`` would: the mean over voxels,
-        over the included voxels, or over the target weights."""
+    def _label_cross_entropy(self, ce: Tensor, labels: Tensor, valid: Tensor | None, weight: Tensor | None) -> Tensor:
+        """Reduce the per-voxel ``-log p_t`` of the labels ``t`` as ``F.cross_entropy`` would: for index targets the
+        mean over voxels, over the included voxels, or over the target weights; for a (hard) one-hot target, which
+        PyTorch treats as class probabilities, the weighted terms are averaged over voxels."""
         if weight is not None:
-            target_weights = weight[target.long()]
+            target_weights = weight[labels]
             ce = ce * target_weights
-            if valid is not None:
-                target_weights = torch.where(valid, target_weights, 0)
-                ce = torch.where(valid, ce, 0)
-            return _sum_mean(ce.sum(), target_weights.sum(), self.dice.distributed)
+            if self.dice.target_format == "index":
+                if valid is not None:
+                    target_weights = torch.where(valid, target_weights, 0)
+                    ce = torch.where(valid, ce, 0)
+                return _sum_mean(ce.sum(), target_weights.sum(), self.dice.distributed)
         if valid is None and not self.dice.distributed:
             return ce.mean()
         return _voxel_mean(ce, valid, channels=1, distributed=self.dice.distributed)
@@ -682,7 +688,9 @@ class DiceCELoss(nn.Module):
             _check_index_target(target, input)
             # -log p_t as log1p of the other probabilities' ratio to the largest, accurate where p_t rounds to 1,
             # with the gradient p - onehot formed as (1 - p_t) and p_i, never as p_t - 1.
-            return self._index_cross_entropy(_softmax.cross_entropy_index(input, target), target, valid, weight)
+            return self._label_cross_entropy(_softmax.cross_entropy_index(input, target), target, valid, weight)
+        elif (labels := _label_indices(target, input, valid, "one-hot")) is not None:
+            return self._label_cross_entropy(_softmax.cross_entropy_index(input, labels), labels, valid, weight)
         else:
             nll = _softmax.neg_log_softmax(input)
             soft = _one_hot(target, input, "one-hot").to(input.dtype)
@@ -801,6 +809,32 @@ def _class_weight(value: Tensor | Sequence[float] | None) -> Tensor | None:
     if weight.ndim != 1 or not weight.numel() or not bool(torch.isfinite(weight).all()) or bool((weight < 0).any()):
         raise ValueError("class_weight must be a nonempty vector of finite nonnegative weights")
     return weight
+
+
+def _label_indices(target: Tensor, input: Tensor, valid: Tensor | None, target_format: TargetFormat) -> Tensor | None:
+    """The integer labels ``(B, *spatial)`` of a prepared softmax target, or None when it holds none.
+
+    An index target is its own labels. A one-hot tensor qualifies when every included voxel holds exactly one 1
+    and zeros, and every excluded voxel (``valid`` False, zeroed by the preparation) holds zeros: then the sums
+    over ``p * g`` and ``(1 - p) * g`` are those over the label entries, which :class:`exacta._softmax._IndexOverlap`
+    forms without the one-hot tensor. The check is ``max == sum == (1 or valid)`` along the classes and a
+    nonnegative minimum (with a nonnegative tensor whose maximum equals its sum, the other entries are zero): one
+    ``max(1)`` (the labels), one ``sum(1)``, one global minimum, two comparisons of voxel-sized tensors and one
+    host synchronisation for the verdict. Soft labels, targets that require gradients and compiled code (the
+    verdict is data dependent) take the generic composition.
+    """
+    if target_format == "index":
+        _check_index_target(target, input)
+        return target
+    _one_hot(target, input, target_format)  # shape and device validation
+    if target.requires_grad or torch.compiler.is_compiling() or not target.numel():
+        return None
+    hard = target.to(torch.uint8) if target.dtype == torch.bool else target
+    top, labels = hard.max(1)
+    total = hard.sum(1)
+    expected = 1 if valid is None else valid
+    verdict = ((top == total) & (top == expected)).all() & (hard.amin() >= 0)
+    return labels if bool(verdict) else None
 
 
 def _activate(activation: Activation, input: Tensor) -> tuple[Tensor, Tensor]:

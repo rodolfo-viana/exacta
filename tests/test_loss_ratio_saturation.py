@@ -45,7 +45,34 @@ U = {torch.float64: 2.0**-53, torch.float32: 2.0**-24}
 TINY = {torch.float64: 1e-290, torch.float32: 1e-36}
 GAPS = (10.0, 20.0, 30.0, 40.0, 80.0)
 GPU = torch.cuda.is_available() and _triton_losses.available()
-BACKENDS = ["torch", pytest.param("triton", marks=pytest.mark.skipif(not GPU, reason="needs CUDA and Triton"))]
+NEEDS_GPU = pytest.mark.skipif(not GPU, reason="needs CUDA and Triton")
+# "torch": the PyTorch backend on the CPU; "torch_cuda": the same backend on CUDA (it forms the sums with masks
+# there, not with scatter/gather); "triton": the fused kernels.
+# On CUDA the index-based sums use scatter/gather below _softmax._DENSE_VOXELS voxels and masks above it ("masks"
+# forces the mask form on the small tensors used here, "cuda" the scatter/gather form).
+BACKENDS = ["torch", pytest.param("torch_cuda", marks=NEEDS_GPU), pytest.param("torch_cuda_masks", marks=NEEDS_GPU),
+            pytest.param("triton", marks=NEEDS_GPU)]
+DEVICES = ["cpu", pytest.param("cuda", marks=NEEDS_GPU), pytest.param("cuda_masks", marks=NEEDS_GPU)]
+
+
+def _device(backend: str) -> str:
+    return "cpu" if backend == "torch" else "cuda"
+
+
+def _engine(backend: str) -> str:
+    return "triton" if backend == "triton" else "torch"
+
+
+def _configure(name: str, monkeypatch) -> str:
+    """The device of a backend/device parameter, with the CUDA index form it names selected."""
+    from exacta import _softmax
+
+    if name.endswith("cuda"):
+        monkeypatch.setattr(_softmax, "_DENSE_VOXELS", 2**62)
+    elif name.endswith("masks"):
+        monkeypatch.setattr(_softmax, "_DENSE_VOXELS", 0)
+    return "cpu" if name == "torch" or name == "cpu" else "cuda"
+
 DTYPES = [torch.float64, torch.float32]
 SHAPE = (2, 3, 8)  # cases, classes, voxels
 
@@ -278,10 +305,10 @@ def measure(name: str, backend: str, dtype: torch.dtype, z: torch.Tensor, g: tor
     the first measure holds too.
     """
     spec = SPECS[name]
-    device = "cuda" if backend == "triton" else "cpu"
+    device = _device(backend)
     x = z.to(dtype).to(device).clone().requires_grad_()
     target = g.to(device) if spec.soft else g.argmax(1).to(device)
-    loss = spec.make(backend)(x, target.to(dtype) if spec.soft else target)
+    loss = spec.make(_engine(backend))(x, target.to(dtype) if spec.soft else target)
     (grad,) = torch.autograd.grad(loss, x)
     assert grad.dtype == dtype and loss.dtype == dtype
     value, reference_grad = reference(spec.terms, z.to(dtype).cpu(), g.to(dtype).cpu())
@@ -351,8 +378,9 @@ def _batch(name: str, kind: str, dtype: torch.dtype, seed: int, shape=SHAPE) -> 
 # z - max is itself rounded (up to |gap| u / 2 relative in every probability, 20 u at a gap of 40), and the fused
 # kernels use the fast exponential, whose argument rounding costs about |gap| u; focal terms cube it. The
 # reference sees the exact difference. Before the fix the same quantities were off by 100% (1e16 u in binary64).
-BOUND = {("torch", torch.float64): 16.0, ("triton", torch.float64): 16.0,
-         ("torch", torch.float32): 96.0, ("triton", torch.float32): 160.0}
+BOUND = {("torch", torch.float64): 16.0, ("torch_cuda", torch.float64): 16.0, ("torch_cuda_masks", torch.float64): 16.0,
+         ("triton", torch.float64): 16.0, ("torch", torch.float32): 96.0, ("torch_cuda", torch.float32): 96.0,
+         ("torch_cuda_masks", torch.float32): 96.0, ("triton", torch.float32): 160.0}
 # Mixed and moderate batches contain voxels where the softmax Jacobian p (I - 1 p') makes an element a small
 # difference of terms of the size of its neighbours; relative to the largest element of its voxel the error is
 # at most a few hundred u (a condition number of the problem, the same before the fix, up to 169 u measured).
@@ -367,7 +395,8 @@ BOUND_VOXEL = 512.0
 @pytest.mark.parametrize("dtype", DTYPES, ids=["binary64", "binary32"])
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("name", list(SPECS))
-def test_value_and_gradient_are_relatively_accurate(name, backend, dtype, kind, seed):
+def test_value_and_gradient_are_relatively_accurate(name, backend, dtype, kind, seed, monkeypatch):
+    _configure(backend, monkeypatch)
     if backend == "triton" and SPECS[name].torch_only:
         pytest.skip("runs on the PyTorch backend only")
     z, g = _batch(name, kind, dtype, seed)
@@ -390,13 +419,14 @@ def test_saturated_batches_have_small_losses(name, dtype):
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["binary64", "binary32"])
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_cross_entropy_of_a_dominant_class_keeps_its_value_and_gradient(backend, dtype):
+def test_cross_entropy_of_a_dominant_class_keeps_its_value_and_gradient(backend, dtype, monkeypatch):
+    _configure(backend, monkeypatch)
     # -log p_t = log1p(exp(-40) + exp(-80)) = 4.2e-18 for the dominant target, and the gradient p - onehot is
     # (-4.2e-18, 4.2e-18, 4.2e-34), where torch.softmax and F.cross_entropy give exactly 0.
-    device = "cuda" if backend == "triton" else "cpu"
+    device = _device(backend)
     z = torch.tensor([[[40.0], [0.0], [-40.0]]], dtype=dtype, device=device, requires_grad=True)
     target = torch.zeros(1, 1, dtype=torch.long, device=device)
-    loss = DiceCELoss(lambda_dice=0.0, backend=backend)(z, target)
+    loss = DiceCELoss(lambda_dice=0.0, backend=_engine(backend))(z, target)
     (grad,) = torch.autograd.grad(loss, z)
     with mpmath.workdps(DIGITS):
         e = [mp.mpf(1), mp.exp(mp.mpf(-40)), mp.exp(mp.mpf(-80))]
@@ -408,14 +438,15 @@ def test_cross_entropy_of_a_dominant_class_keeps_its_value_and_gradient(backend,
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_squared_dice_gradient_is_not_a_difference_of_equal_terms(backend):
+def test_squared_dice_gradient_is_not_a_difference_of_equal_terms(backend, monkeypatch):
+    _configure(backend, monkeypatch)
     # Perfectly predicted voxels with a gap of 40: the gradient is of the order 1e-35 relative to the (p N / D - g)
     # of its two terms, which agreed to 15 digits and were subtracted.
-    device = "cuda" if backend == "triton" else "cpu"
+    device = _device(backend)
     z = torch.tensor([[[40.0, -40.0, -40.0, 40.0], [-40.0, 40.0, 40.0, -40.0]]], dtype=torch.float64, device=device,
                      requires_grad=True)
     target = torch.tensor([[0, 1, 1, 0]], device=device)
-    (grad,) = torch.autograd.grad(DiceLoss(squared_pred=True, backend=backend)(z, target), z)
+    (grad,) = torch.autograd.grad(DiceLoss(squared_pred=True, backend=_engine(backend))(z, target), z)
     terms = _terms((1.0, "overlap", {"squared": True}))
     _, ref = reference(terms, z.detach().cpu().reshape(1, 2, 4), F.one_hot(target.cpu(), 2).movedim(-1, 1).double())
     for got, expected in zip(grad.flatten().tolist(), ref):
@@ -488,7 +519,8 @@ TORCH_ONLY = {"dice_micro", "dice_unsmoothed_numerator", "tversky_micro_unsmooth
 
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("name", list(TEXTBOOK))
-def test_moderate_logits_agree_with_the_textbook_formulas(name, backend):
+def test_moderate_logits_agree_with_the_textbook_formulas(name, backend, monkeypatch):
+    _configure(backend, monkeypatch)
     # Where nothing saturates, values and gradients stay those of 1 - ratio, to a few roundoffs: the ratio of
     # non-negative sums is the same function.
     if backend == "triton" and name in TORCH_ONLY:
@@ -498,8 +530,8 @@ def test_moderate_logits_agree_with_the_textbook_formulas(name, backend):
     z = 2.0 * torch.randn(3, 4, 6, 5, dtype=torch.float64, generator=gen)
     target = torch.randint(4, (3, 6, 5), generator=gen)
     results = []
-    device = "cuda" if backend == "triton" else "cpu"
-    for loss_of in (make(backend), lambda x, t: _textbook(x, t, **options)):
+    device = _device(backend)
+    for loss_of in (make(_engine(backend)), lambda x, t: _textbook(x, t, **options)):
         x = z.to(device).clone().requires_grad_()
         loss = loss_of(x, target.to(device))
         (grad,) = torch.autograd.grad(loss, x)
@@ -585,15 +617,18 @@ def test_softmax_pair_and_stats_have_correct_first_and_second_derivatives():
         assert torch.autograd.gradgradcheck(function, (z,))
 
 
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("squared", [False, True])
 @pytest.mark.parametrize("masked", [False, True])
-def test_index_overlap_statistics_have_correct_first_and_second_derivatives(squared, masked):
+def test_index_overlap_statistics_have_correct_first_and_second_derivatives(squared, masked, device, monkeypatch):
     from exacta import _softmax
 
+    device = _configure(device, monkeypatch)
+
     gen = torch.Generator().manual_seed(4)
-    z = (2.0 * torch.randn(2, 3, 5, dtype=torch.float64, generator=gen)).requires_grad_()
-    target = torch.randint(3, (2, 5), generator=gen)
-    valid = torch.rand(2, 5, generator=gen) < 0.7 if masked else None
+    z = (2.0 * torch.randn(2, 3, 5, dtype=torch.float64, generator=gen)).to(device).requires_grad_()
+    target = torch.randint(3, (2, 5), generator=gen).to(device)
+    valid = (torch.rand(2, 5, generator=gen) < 0.7).to(device) if masked else None
 
     def function(t):
         inter, first, third, _, nll = _softmax.index_overlap_statistics(t, target, valid, squared=squared, with_nll=True)
@@ -603,20 +638,25 @@ def test_index_overlap_statistics_have_correct_first_and_second_derivatives(squa
     assert torch.autograd.gradgradcheck(function, (z,))
 
 
-def test_cross_entropy_index_has_correct_first_and_second_derivatives():
+@pytest.mark.parametrize("device", DEVICES)
+def test_cross_entropy_index_has_correct_first_and_second_derivatives(device, monkeypatch):
     from exacta import _softmax
 
+    device = _configure(device, monkeypatch)
+
     gen = torch.Generator().manual_seed(6)
-    z = (3.0 * torch.randn(2, 4, 3, 2, dtype=torch.float64, generator=gen)).requires_grad_()
-    target = torch.randint(4, (2, 3, 2), generator=gen)
+    z = (3.0 * torch.randn(2, 4, 3, 2, dtype=torch.float64, generator=gen)).to(device).requires_grad_()
+    target = torch.randint(4, (2, 3, 2), generator=gen).to(device)
     assert torch.autograd.gradcheck(lambda t: _softmax.cross_entropy_index(t, target), (z,))
     assert torch.autograd.gradgradcheck(lambda t: _softmax.cross_entropy_index(t, target), (z,))
 
 
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", DTYPES, ids=["binary64", "binary32"])
 @pytest.mark.parametrize("squared", [False, True])
 @pytest.mark.parametrize("scale", [2.0, 10.0], ids=["moderate", "saturated"])
-def test_index_statistics_agree_with_the_one_hot_composition(dtype, squared, scale):
+def test_index_statistics_agree_with_the_one_hot_composition(dtype, squared, scale, device, monkeypatch):
+    device = _configure(device, monkeypatch)
     # The sums and their gradient from the label indices equal those of the one-hot composition (softmax pair and
     # products), to a few roundoffs relative to their size, at moderate and at saturated logits.
     from exacta import _softmax
@@ -627,6 +667,7 @@ def test_index_statistics_agree_with_the_one_hot_composition(dtype, squared, sca
     z = (scale * torch.randn(2, 3, 7, 6, generator=gen) + 2 * scale * F.one_hot(target, 3).movedim(-1, 1)).to(dtype)
     valid = torch.rand(2, 7, 6, generator=gen) < 0.8
     weights = torch.randn(4, 2, 3, generator=gen).to(dtype)
+    z, target, valid, weights = (t.to(device) for t in (z, target, valid, weights))
 
     def combine(stats, nll):
         return sum((w * s).sum() for w, s in zip(weights, stats)) + (nll * 0.5).sum()
@@ -651,6 +692,175 @@ def test_index_statistics_agree_with_the_one_hot_composition(dtype, squared, sca
         assert ((a - b).abs() <= 8 * u * b.abs() + 1e-300).all()
     scale_of_grad = grad.abs().amax(1, keepdim=True).clamp_min(1e-300)
     assert ((fast_grad - grad).abs() <= 200 * u * scale_of_grad).all()
+
+
+# -- hard one-hot targets take the label path ---------------------------------------------------------------
+
+
+HARD_ONE_HOT = {  # name: (factory of the module for a target format, whether the CE is normalized like index CE)
+    "dice": lambda f: DiceLoss(target_format=f),
+    "dice_squared": lambda f: DiceLoss(target_format=f, squared_pred=True),
+    "dice_batch_dice": lambda f: DiceLoss(target_format=f, batch_dice=True),
+    "dice_micro": lambda f: DiceLoss(target_format=f, average="micro"),
+    "dice_no_background": lambda f: DiceLoss(target_format=f, include_background=False),
+    "dice_skip_absent": lambda f: DiceLoss(target_format=f, skip_absent=True),
+    "dice_zero_absent": lambda f: DiceLoss(target_format=f, zero_absent=True),
+    "dice_unsmoothed_numerator": lambda f: DiceLoss(target_format=f, smooth_numerator=False),
+    "tversky": lambda f: TverskyLoss(target_format=f, alpha=0.3, beta=0.7),
+    "focal_tversky": lambda f: FocalTverskyLoss(target_format=f),
+    "generalized_dice": lambda f: GeneralizedDiceLoss(target_format=f),
+    "dice_ce": lambda f: DiceCELoss(target_format=f),
+    "dice_squared_ce": lambda f: DiceCELoss(target_format=f, squared_pred=True),
+    "generalized_dice_ce": lambda f: GeneralizedDiceCELoss(target_format=f),
+    "ce": lambda f: DiceCELoss(target_format=f, lambda_dice=0.0),
+}
+
+
+def _hard_batch(dtype, scale, seed, masked):
+    """Logits, class labels, their hard one-hot tensor and a mask; class 2 is absent from the second case."""
+    gen = torch.Generator().manual_seed(seed)
+    target = torch.randint(3, (2, 6, 5), generator=gen)
+    target[1] = torch.where(target[1] == 2, 1, target[1])
+    onehot = F.one_hot(target, 3).movedim(-1, 1).to(dtype).contiguous()
+    z = scale * torch.randn(2, 3, 6, 5, generator=gen) + 2 * scale * onehot.float()
+    mask = (torch.rand(2, 6, 5, generator=gen) < 0.8) if masked else None
+    return z.to(dtype), target, onehot, mask
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("masked", [False, True], ids=["unmasked", "masked"])
+@pytest.mark.parametrize("scale", [2.0, 10.0], ids=["moderate", "saturated"])
+@pytest.mark.parametrize("dtype", DTYPES, ids=["binary64", "binary32"])
+@pytest.mark.parametrize("name", list(HARD_ONE_HOT))
+def test_hard_one_hot_targets_agree_with_the_index_path_and_the_generic_composition(name, dtype, scale, masked, device,
+                                                                                   monkeypatch):
+    device = _configure(device, monkeypatch)
+    z, target, onehot, mask = (None if t is None else t.to(device) for t in _hard_batch(dtype, scale, 11, masked))
+    results = {}
+    for kind in ("one-hot", "index", "generic"):
+        module = HARD_ONE_HOT[name]("index" if kind == "index" else "one-hot")
+        # a one-hot target that requires gradients is not routed to the labels: the generic composition
+        labels = target if kind == "index" else onehot.clone().requires_grad_(kind == "generic")
+        x = z.clone().requires_grad_()
+        loss = module(x, labels, mask=mask)
+        (grad,) = torch.autograd.grad(loss, x)
+        results[kind] = (loss.item(), grad)
+    u = U[dtype]
+    (value, grad), (generic_value, generic_grad) = results["one-hot"], results["generic"]
+    assert abs(value - generic_value) <= 32 * u * abs(generic_value) + 1e-300
+    voxel = generic_grad.abs().amax(1, keepdim=True).clamp_min(1e-300)
+    assert ((grad - generic_grad).abs() <= 512 * u * voxel).all()
+    index_value, index_grad = results["index"]
+    # the same labels through the same code: equal (no class weights here, so that the cross-entropy of a one-hot
+    # target is normalized like the index one)
+    assert abs(value - index_value) <= 4 * u * abs(index_value) + 1e-300
+    assert (grad - index_grad).abs().max() <= 4 * u * index_grad.abs().max() + 1e-300
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=["binary64", "binary32"])
+def test_hard_one_hot_cross_entropy_with_class_weights_is_normalized_by_voxels(dtype):
+    # PyTorch treats a one-hot tensor as class probabilities: the weighted terms are averaged over voxels, not
+    # over the target weights as for index targets. The label path keeps that.
+    z, target, onehot, mask = _hard_batch(dtype, 3.0, 5, True)
+    weight = [0.5, 1.0, 2.0]
+    outs = []
+    for tensor in (onehot, onehot.clone().requires_grad_()):
+        x = z.clone().requires_grad_()
+        loss = DiceCELoss(target_format="one-hot", lambda_dice=0.0, class_weight=weight)(x, tensor, mask=mask)
+        outs.append((loss.item(), torch.autograd.grad(loss, x)[0]))
+    assert abs(outs[0][0] - outs[1][0]) <= 32 * U[dtype] * abs(outs[1][0])
+    torch.testing.assert_close(outs[0][1], outs[1][1], rtol=1e-4 if dtype == torch.float32 else 1e-11, atol=0)
+
+
+def test_hard_one_hot_targets_support_double_backward_on_the_torch_backend():
+    gen = torch.Generator().manual_seed(7)
+    z = torch.randn(2, 3, 4, 5, dtype=torch.float64, generator=gen)
+    target = torch.randint(3, (2, 4, 5), generator=gen)
+    onehot = F.one_hot(target, 3).movedim(-1, 1).double().contiguous()
+    v = torch.randn(2, 3, 4, 5, dtype=torch.float64, generator=gen)
+
+    def hessian_vector(loss_of):
+        x = z.clone().requires_grad_()
+        (first,) = torch.autograd.grad(loss_of(x), x, create_graph=True)
+        (second,) = torch.autograd.grad((first * v).sum(), x)
+        return second
+
+    for squared in (False, True):
+        fast = hessian_vector(lambda x: DiceCELoss(target_format="one-hot", squared_pred=squared)(x, onehot))
+        generic = hessian_vector(lambda x: DiceCELoss(target_format="one-hot", squared_pred=squared)(
+            x, onehot.clone().requires_grad_()))
+        torch.testing.assert_close(fast, generic, rtol=1e-9, atol=1e-13)
+
+
+def test_only_hard_one_hot_targets_are_routed_to_the_label_functions(monkeypatch):
+    from exacta import _softmax
+    from exacta.losses import segmentation
+
+    calls = []
+    real = _softmax.index_overlap_statistics
+    monkeypatch.setattr(segmentation._softmax, "index_overlap_statistics",
+                        lambda *args, **kw: calls.append(1) or real(*args, **kw))
+    z, target, onehot, _ = _hard_batch(torch.float64, 2.0, 3, False)
+    soft = 0.9 * onehot + 0.05
+    module = DiceCELoss(target_format="one-hot")
+    module(z, onehot)
+    assert len(calls) == 1
+    module(z, soft)
+    module(z, onehot.clone().requires_grad_())
+    DiceLoss(target_format="one-hot", soft_label=True)(z, onehot)
+    DiceLoss(target_format="one-hot", activation="sigmoid")(z, onehot)
+    assert len(calls) == 1  # soft labels, a target that requires gradients, soft_label and sigmoid: generic
+
+
+def test_label_indices_accepts_exactly_the_hard_one_hot_targets():
+    from exacta.losses.segmentation import _label_indices
+
+    x = torch.zeros(1, 3, 2, 2)
+    hard = F.one_hot(torch.tensor([[[0, 1], [2, 1]]]), 3).movedim(-1, 1).float()
+    assert _label_indices(hard, x, None, "one-hot").tolist() == [[[0, 1], [2, 1]]]
+    for dtype in (torch.float64, torch.float16, torch.bfloat16, torch.int64, torch.uint8, torch.bool):
+        assert _label_indices(hard.to(dtype), x, None, "one-hot") is not None, dtype
+    for bad in (
+        hard * 0.9,                                       # soft
+        hard + 0.01,                                      # soft, voxels sum to 1.03
+        torch.stack((hard[:, 0] * 0.5, hard[:, 1], hard[:, 2] + hard[:, 0] * 0.5), 1),  # soft
+        hard.clone().index_put_((torch.tensor([0]), torch.tensor([1]), torch.tensor([0]), torch.tensor([0])),
+                                torch.tensor(1.0)),       # two ones in a voxel (classes 0 and 1 at [0, 0])
+        hard * 0,                                         # a voxel without a label
+        torch.stack((hard[:, 0] * 2, hard[:, 1] - hard[:, 0], hard[:, 2]), 1),  # a 2 and a -1
+        torch.stack((hard[:, 0] + 0.5, hard[:, 1] - 0.5 * hard[:, 0] * 2, hard[:, 2]), 1),  # a negative entry
+    ):
+        assert _label_indices(bad, x, None, "one-hot") is None
+    # excluded voxels hold zeros (as prepared) and are accepted only with the mask that excludes them
+    valid = torch.tensor([[[True, True], [False, True]]])
+    prepared = torch.where(valid[:, None], hard, 0)
+    assert _label_indices(prepared, x, valid, "one-hot") is not None
+    assert _label_indices(prepared, x, None, "one-hot") is None
+    # a target that requires gradients is differentiated by the generic composition
+    assert _label_indices(hard.clone().requires_grad_(), x, None, "one-hot") is None
+
+
+def test_function_forwards_do_not_write_into_tensors_that_require_grad():
+    # A tracer (dynamo in PyTorch 2.4) runs Function.forward with grad mode on and inputs that require grad,
+    # where out= arguments and in-place writes into tensors derived from them raise. The forwards work on detached
+    # inputs, so calling them in that state must succeed.
+    from types import SimpleNamespace
+
+    from exacta import _softmax
+
+    ctx = SimpleNamespace(save_for_backward=lambda *a: None, mark_non_differentiable=lambda *a: None,
+                          set_materialize_grads=lambda *a: None)
+    gen = torch.Generator().manual_seed(0)
+    z = torch.randn(2, 3, 4, 5, generator=gen, requires_grad=True)
+    target = torch.randint(3, (2, 4, 5), generator=gen)
+    valid = torch.rand(2, 4, 5, generator=gen) < 0.8
+    with torch.enable_grad():
+        for squared in (False, True):
+            outputs = _softmax._IndexOverlap.forward(ctx, z, target, valid, squared, True)
+            assert not any(o.requires_grad for o in outputs if o is not None)
+        assert not _softmax._CrossEntropyIndex.forward(ctx, z, target).requires_grad
+        for outputs in (_softmax._Softmax.forward(ctx, z, True, True), _softmax._Softmax.forward(ctx, z, False, False)):
+            assert not any(o.requires_grad for o in outputs if o is not None)
 
 
 def test_labels_outside_the_classes_raise_on_the_index_paths():
@@ -733,10 +943,12 @@ def test_dice_and_cross_entropy_propagate_gradients_into_a_soft_target_on_the_to
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_losses_and_gradients_stay_finite_beyond_the_range_of_the_exponential(backend):
+def test_losses_and_gradients_stay_finite_beyond_the_range_of_the_exponential(backend, monkeypatch):
+    _configure(backend, monkeypatch)
     # exp underflows for a gap above 745 (binary64) or 104 (binary32); nothing may become NaN or inf, for every
     # softmax loss, in particular the focal powers q ** gamma for 0 < gamma < 1.
-    device = "cuda" if backend == "triton" else "cpu"
+    device = _device(backend)
+    backend = _engine(backend)
     for dtype, magnitude in ((torch.float64, 800.0), (torch.float32, 150.0)):
         gen = torch.Generator().manual_seed(0)
         target = torch.randint(3, (2, 16), generator=gen)
