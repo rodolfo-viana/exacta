@@ -16,7 +16,7 @@ from exacta.losses.segmentation import (
     Activation, TargetFormat, _check_ignore_index, _check_index_target, _check_mask, _global_overlap,
     _one_hot, _overlap_mean, _upcast,
 )
-from exacta import _native, _soft_pool
+from exacta import _logistic, _native, _soft_pool
 
 SkeletonBackend = Literal["auto", "torch", "native"]
 
@@ -272,7 +272,7 @@ class SkeletonRecallLoss(nn.Module):
         if valid is not None:
             input = torch.where(valid[:, None], input, 0)  # sanitise before the activation
         probs = input.softmax(1) if self.activation == "softmax" else (
-            input.sigmoid() if self.activation == "sigmoid" else input)
+            _logistic.sigmoid(input) if self.activation == "sigmoid" else input)
         if valid is not None:
             probs = torch.where(valid[:, None], probs, 0)
             truth = torch.where(valid[:, None], truth, 0)

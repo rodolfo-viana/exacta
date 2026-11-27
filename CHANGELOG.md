@@ -4,6 +4,31 @@ Release notes for Exacta.
 
 ## Unreleased
 
+- **Sigmoid losses at saturated logits:** the gradients through a sigmoid lost accuracy as `sigma(z)`
+  approached one and every digit once it rounded to one (`z` above 37 in binary64, 17 in binary32), on both
+  backends, and so did the value of the binary cross-entropy on the PyTorch backend. `torch.sigmoid`
+  differentiates as `sigma * (1 - sigma)`, exactly 0 there (`sigma(z) * sigma(-z)` is `4.2e-18` at `z = 40`);
+  the BCE gradient `sigma(z) - g` is 0 for `g = 1` and `z > 0`; and
+  `F.binary_cross_entropy_with_logits` returned 0 instead of `4.2e-18` for `g = 0` and `z = -40`. Against a
+  120-digit mpmath reference, the relative error of the gradient of every element with `z > 37` was 100%
+  (`9e15 u` in binary64, `1.7e7 u` in binary32, `u` being the roundoff) for sigmoid Dice, Tversky, focal
+  Tversky, generalized Dice, Dice+BCE and Dice+focal on the PyTorch and fused Triton backends, and for BCE
+  with `g = 1`; the PyTorch BCE value was off by 100% for `g = 0` and `z < -37` (the fused value was exact).
+  The sigmoid focal loss, which formed `p**gamma` as `exp(gamma * log p)`, was off by up to `23 u` in value
+  and `35 u` in gradient in binary64 (`gamma * |log p| * u`, growing with `|z|`). Now the sigmoid is a small
+  `torch.autograd.Function` with derivative `sigma(z) * sigma(-z)`; the BCE is `log1p(exp(-|z|))` plus
+  `(1 - g) z` for `z >= 0` or `g |z|` for `z < 0` (a sum of non-negative terms), with gradient
+  `(1 - g) sigma(z) - g sigma(-z)`; and the focal powers are taken from `sigma(z)` and `sigma(-z)`
+  directly. The fused kernels use the same forms. For logits of magnitude 10 to 80 with 0/1 targets, and for
+  batches mixing saturated and moderate logits, the largest relative error is now `3 u` in value and `7 u`
+  in gradient in binary64 on both backends, and `7 u` in binary32 on PyTorch (the fused binary32 kernels
+  reach `43 u` at `|z| = 40` through the fast exponential, as before). The same sigmoid serves
+  `BoundaryLoss`, `HausdorffDTLoss` and `SkeletonRecallLoss` with `activation="sigmoid"` (the squared
+  error `(p - y)**2` of `HausdorffDTLoss` still cancels where `p` rounds to `y`). Values at moderate
+  logits change only in the last bits, and the PyTorch backend still supports double backward and
+  gradients into a soft target. The value of the Dice and Tversky losses remains `1 - ratio`, accurate in
+  absolute rather than relative terms when the loss is below about `1e-16`.
+
 - **Dice and Tversky losses:** three new arguments make conventions of other libraries compositions of
   Exacta's. `average="micro"` pools the selected classes into one ratio per case (per batch with
   `batch_dice=True`); the default `"macro"` is the previous mean of per-class ratios.

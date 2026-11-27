@@ -13,7 +13,7 @@ reads them again, recomputes the activation and writes the gradient from a close
     Generalized Dice: A_c = 2·w_c / (E·D), B_c = w_c·N / (E·D²), where the numerator
                       N and denominator D are class-weighted sums and E counts cases.
     softmax CE:  dL/dz = (p·Σg - g) / (cases·voxels)
-    sigmoid BCE: dL/dz = (p - g) / (cases·classes·voxels)
+    sigmoid BCE: dL/dz = ((1-g)·p - g·q) / (cases·classes·voxels), with p = sigmoid(z), q = sigmoid(-z)
 
 Each block of voxels writes its own partial sums, which are then reduced with ``torch.sum``, so
 results do not depend on scheduling (atomic adds would). Half-precision logits are read as they
@@ -27,6 +27,11 @@ flow into the target; the loss modules use the PyTorch path when the target requ
 Focal loss uses a separate pointwise reduction, sharing the activation/target loader. Its
 softmax derivative uses q=dL/d(log p), then dL/dz=q-p·Σq; sigmoid differentiates the positive
 and negative focal terms separately. Stable log probabilities avoid log(0) for finite logits.
+
+The sigmoid forms never subtract from one: where p rounds to 1, 1-p and p·(1-p) are 0 although
+q = sigmoid(-z) and p·q are not (4.2e-18 at z = 40). The derivative of the sigmoid is p·q, the
+gradient of the cross-entropy is (1-g)·p - g·q and the cross-entropy is a sum of non-negative terms,
+so their relative error stays a few roundoffs at any finite logit, in float32 and float64.
 """
 
 from __future__ import annotations
@@ -381,8 +386,9 @@ if triton is not None:
             ce = _focal_terms(p, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, False, C_PAD, BLOCK, COMPUTE)
         elif ACT == 0:  # cross-entropy -Σ g log p, per class
             ce = tl.where(g != 0, g * (lse[None, :] - z), 0.0)
-        else:  # binary cross-entropy with logits
-            ce = tl.maximum(z, 0.0) - tl.where(g != 0, z * g, 0.0) + libdevice.log1p(tl.exp(-tl.abs(z)))
+        else:  # binary cross-entropy with logits: log1p(exp(-|z|)) plus (1-g)·z for z >= 0, g·|z| for z < 0
+            linear = tl.where(z >= 0, tl.where(g != 1, (1.0 - g) * z, 0.0), tl.where(g != 0, -g * z, 0.0))
+            ce = linear + libdevice.log1p(tl.exp(-tl.abs(z)))
         if CE and WEIGHTED:
             ce *= tl.load(class_weight + ch, mask=ch < classes, other=0).to(COMPUTE)[:, None]
         rows: tl.constexpr = 6 if COUNTS else 5
@@ -431,9 +437,10 @@ if triton is not None:
                 wg = weight * g
                 d_z += tl.load(ce_scale) * (p * tl.sum(wg, axis=0)[None, :] - wg)
         elif ACT == 1:
-            d_z = d_p * p * (1.0 - p)
+            q = tl.sigmoid(-z)  # 1 - p is 0 where p rounds to 1
+            d_z = d_p * p * q
             if CE and not FOCAL:
-                d_z += tl.load(ce_scale) * weight * (p - g)
+                d_z += tl.load(ce_scale) * weight * ((1.0 - g) * p - g * q)
         else:
             d_z = d_p
         if CE and FOCAL:
@@ -475,15 +482,17 @@ if triton is not None:
             tail = libdevice.log1p(tl.exp(-tl.abs(z)))
             pos_ce = tl.maximum(-z, 0.0) + tail
             neg_ce = tl.maximum(z, 0.0) + tail
-            pos_mod = tl.exp(-GAMMA * neg_ce)
-            neg_mod = tl.exp(-GAMMA * pos_ce)
+            u = tl.sigmoid(-z)
+            # (1-p)**gamma and p**gamma from the accurate probabilities: exp(-gamma * ce) would lose
+            # gamma * |log| * u of relative accuracy.
+            pos_mod = libdevice.pow(u, tl.full((C_PAD, BLOCK), GAMMA, COMPUTE))
+            neg_mod = libdevice.pow(p, tl.full((C_PAD, BLOCK), GAMMA, COMPUTE))
             pos_weight = g
             neg_weight = 1.0 - g
             if ALPHA is not None:
                 pos_weight *= ALPHA
                 neg_weight *= 1.0 - ALPHA
             if BACKWARD:
-                u = tl.sigmoid(-z)
                 dz = (-pos_weight * pos_mod * (u + GAMMA * p * pos_ce)
                       + neg_weight * neg_mod * (p + GAMMA * u * neg_ce))
             else:
