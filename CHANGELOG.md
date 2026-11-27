@@ -106,6 +106,16 @@ Release notes for Exacta.
   Linux x86-64 with Clang and OpenMP, Linux aarch64 and macOS arm64 (Apple clang, without OpenMP),
   and checks that a fixed set of results (`scripts/portability_digest.py`) is bit-identical on all
   of them.
+- **Tests:** `tests/test_signature_roundtrip.py` checks, in 264 cases, that a reporting signature
+  recomputes its score bit for bit. For each surface representation, HD, HD95 and ASSD with each
+  join (`max`, `mean`, `pooled`) and NSD with the default tie margin and with `tie_rtol=0`, on 2-D
+  and 3-D masks built from integer arithmetic with dyadic, decimal and anisotropic spacings, it
+  computes the score, writes its signature, rebuilds the call from the signature alone
+  (`parse_signature` and `functional.evaluate`) and compares the bits of the recomputed score. The
+  NSD tolerances sit at distances that tie with them, so the default margin and `tie_rtol=0` give
+  different scores in some cases of every representation. `scripts/portability_digest.py` runs the
+  same cases and adds the signature strings and the recomputed scores (12 results) to
+  what the Portability CI compares across its platforms.
 - **Example driver:** `examples/driver.py` runs a short tour of the public API on
   deterministic synthetic inputs, and `tests/test_example_driver.py` compares its output with
   `examples/driver_expected.txt` (the losses, whose last bits depend on the PyTorch build, to a

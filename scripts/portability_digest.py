@@ -2,9 +2,12 @@
 
 ``run`` evaluates deterministic computations (exact Euclidean distance transform, connected
 components, skeletons and the surface metrics with every surface model) on inputs drawn with
-NumPy's PCG64 stream and integer arithmetic, so the inputs are identical on every machine. It
-writes the SHA-256 of each float64/int output and the values in hexadecimal. ``compare`` checks
-that digest files written on different machines agree exactly. The CI workflow
+NumPy's PCG64 stream and integer arithmetic, so the inputs are identical on every machine. It also
+round-trips reporting signatures on masks built from integer arithmetic: it computes distance
+scores, writes their signatures, rebuilds each call from the signature alone and recomputes the
+score, which must equal the first in every bit. It writes the SHA-256 of each float64/int output
+(of the text, for the signature strings) and the values in hexadecimal. ``compare`` checks that
+digest files written on different machines agree exactly. The CI workflow
 ``.github/workflows/portability.yml`` runs both across its platform matrix.
 """
 
@@ -15,9 +18,9 @@ import hashlib
 import json
 import platform
 import sys
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 SEED = 20261126
 SPACING = (2.5, 0.7, 0.9)
@@ -104,10 +107,128 @@ def _weights_summary() -> Any:
     return np.array(out)
 
 
+class RoundTripCase(NamedTuple):
+    """One distance score whose signature is written, read back and recomputed.
+
+    ``options`` are the conventions of the score (they go into its signature); ``inputs`` are the
+    arguments of the call that a signature does not carry (spacing, number of classes).
+    """
+
+    label: str
+    ndim: int
+    surface: str
+    metric: str
+    options: dict[str, Any]
+    inputs: dict[str, Any]
+    pred: Any
+    target: Any
+
+
+# Spacing of each kind with the NSD tolerance used at it, in 2-D and in 3-D. Dyadic spacings are
+# exact in binary; 0.1, 0.3 and 0.7 are not, and the tolerances sit at distances of the masks below
+# that tie with them (a per-class tolerance in one case), so that NSD with tie_rtol=0 differs from
+# NSD with the default margin in some cases of every surface representation.
+ROUNDTRIP_SPACINGS = (
+    ("dyadic", (0.5, 0.25), 1.0, (1.0, 0.5, 0.25), 1.5),
+    ("decimal", (0.3, 0.3), 0.9, (0.3, 0.3, 0.3), 0.6),
+    ("tenth", (0.1, 0.1), 0.3, (0.1, 0.1, 0.1), 0.3),
+    ("anisotropic", (0.7, 1.3), 1.4, (2.5, 0.7, 0.9), (0.6, 0.9)),
+)
+ROUNDTRIP_SURFACES = ("voxels", "surfels", "mesh")
+ROUNDTRIP_METRICS = tuple(
+    (metric, {"combine": join}) for metric in ("hausdorff_distance", "hd95", "assd")
+    for join in ("max", "mean", "pooled")
+) + (("nsd", {}), ("nsd", {"tie_rtol": 0}))
+
+
+def _roundtrip_masks(shape: tuple[int, ...]) -> tuple[Any, Any]:
+    """A ball and a second, smaller ball (target), and a shifted ball with a lattice of voxels
+    removed and one isolated voxel (prediction), as (1, *shape) label maps: integer arithmetic only."""
+    import numpy as np
+    import torch
+
+    grid = np.indices(shape, dtype=np.int64)
+    centre = [size // 2 for size in shape]
+    radius = min(shape) // 3
+
+    def ball(shift: tuple[int, ...], squared_radius: int) -> Any:
+        return sum((g - c - s) ** 2 for g, c, s in zip(grid, centre, shift)) <= squared_radius
+
+    rest = (0,) * (len(shape) - 2)
+    target = ball((0,) * len(shape), radius**2) | ball((-radius, radius, *rest), 2)
+    holes = sum((axis + 3) * (g + axis) for axis, g in enumerate(grid)) % 7 == 0
+    pred = ball((1, *(0,) * (len(shape) - 1)), radius**2 + 4) & ~holes
+    pred[(1,) * len(shape)] = True
+    return torch.from_numpy(pred.astype(np.int64))[None], torch.from_numpy(target.astype(np.int64))[None]
+
+
+@lru_cache(maxsize=None)
+def roundtrip_cases() -> tuple[RoundTripCase, ...]:
+    """The signature round-trip cases: 2-D and 3-D masks, the spacings above, every surface
+    representation, and HD, HD95 and ASSD with each way of joining the two directions (max, mean,
+    pooled) and NSD with the default tie margin and with ``tie_rtol=0``."""
+    cases = []
+    for ndim, shape in ((2, (22, 24)), (3, (14, 16, 18))):
+        pred, target = _roundtrip_masks(shape)
+        for kind, spacing_2d, tolerance_2d, spacing_3d, tolerance_3d in ROUNDTRIP_SPACINGS:
+            spacing, tolerance = (spacing_2d, tolerance_2d) if ndim == 2 else (spacing_3d, tolerance_3d)
+            inputs = {"spacing": spacing, "num_classes": 2}
+            for surface in ROUNDTRIP_SURFACES:
+                for metric, options in ROUNDTRIP_METRICS:
+                    conventions = {**options, "surface": surface}
+                    if metric == "nsd":
+                        conventions["tolerance"] = tolerance
+                    label = "-".join([f"{ndim}d", kind, surface, metric, *(str(v) for v in options.values())])
+                    cases.append(RoundTripCase(label, ndim, surface, metric, conventions, inputs, pred, target))
+    return tuple(cases)
+
+
+@lru_cache(maxsize=None)
+def _roundtrip_group(ndim: int, surface: str) -> tuple[list[str], Any]:
+    """Signatures and recomputed scores of the cases with ``ndim`` dimensions and ``surface``.
+
+    Each score comes from the public function with the case's conventions; the call is then rebuilt
+    from the signature alone with ``parse_signature`` and ``evaluate``. Raises if the two scores
+    differ in any bit.
+    """
+    import numpy as np
+
+    import exacta.functional as F
+    from exacta.conventions import parse_signature, signature
+
+    functions = {"hausdorff_distance": F.hausdorff_distance, "hd95": F.hd95, "assd": F.assd, "nsd": F.nsd}
+    texts, recomputed = [], []
+    for case in roundtrip_cases():
+        if (case.ndim, case.surface) != (ndim, surface):
+            continue
+        score = functions[case.metric](case.pred, case.target, **case.inputs, **case.options)
+        text = signature(case.metric, **case.options)
+        name, options, _ = parse_signature(text)
+        again = F.evaluate(case.pred, case.target, metrics={name: options}, **case.inputs)[name]
+        if again.numpy().tobytes() != score.numpy().tobytes():
+            raise RuntimeError(f"{case.label}: {text} recomputed {[v.hex() for v in again.flatten().tolist()]}, "
+                               f"not {[v.hex() for v in score.flatten().tolist()]}")
+        texts.append(text)
+        recomputed.append(again.numpy())
+    return texts, np.stack(recomputed)
+
+
+def _roundtrip_signatures(ndim: int, surface: str) -> list[str]:
+    return _roundtrip_group(ndim, surface)[0]
+
+
+def _roundtrip_recomputed(ndim: int, surface: str) -> Any:
+    return _roundtrip_group(ndim, surface)[1]
+
+
 def _digest(value: Any) -> dict[str, Any]:
     import numpy as np
 
     array = np.ascontiguousarray(np.asarray(value))
+    if array.dtype.kind == "U":  # text: hash the UTF-8 lines, independent of the array's padding
+        lines = array.ravel().tolist()
+        text = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+        return {"dtype": "str", "shape": list(array.shape), "sha256": text, "first_values": lines[:6]}
     flat = array.astype(np.float64).ravel() if array.dtype.kind == "f" else array.ravel()
     values = [v.hex() if array.dtype.kind == "f" else str(int(v)) for v in flat.tolist()[:6]]
     return {
@@ -172,6 +293,12 @@ def _cases() -> dict[str, Callable[[], Any]]:
     cases["skeleton_lee"] = lambda: F.skeletonize(target[0].bool(), method="lee")
     cases["cldice"] = lambda: F.cldice(pred, target, num_classes=2)
     cases["betti_6"] = lambda: F.betti_numbers(target, connectivity=1, num_classes=2)
+    # Round trip of reporting signatures: the signature strings, and the scores recomputed from them
+    # (run() fails if a recomputed score differs in any bit from the score the signature came from).
+    for ndim in (2, 3):
+        for surface in ROUNDTRIP_SURFACES:
+            cases[f"roundtrip_{ndim}d_{surface}_signatures"] = partial(_roundtrip_signatures, ndim, surface)
+            cases[f"roundtrip_{ndim}d_{surface}_recomputed"] = partial(_roundtrip_recomputed, ndim, surface)
     return cases
 
 
@@ -185,7 +312,8 @@ def run(out: Path) -> None:
     for name, fn in _cases().items():
         value = fn()
         results[name] = _digest(value)
-        print(f"{name:26s} {results[name]['sha256']}  {results[name]['first_values'][:2]}")
+        shown = results[name]["first_values"][: 1 if results[name]["dtype"] == "str" else 2]
+        print(f"{name:34s} {results[name]['sha256']}  {shown}")
     environment = {
         "exacta": exacta.__version__,
         "python": platform.python_version(),
