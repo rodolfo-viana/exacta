@@ -5,9 +5,9 @@ import math
 from typing import Literal
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 
+from exacta import _softmax
 from exacta.losses.segmentation import (
     Backend, DiceLoss, _check_ignore_index, _check_index_target, _check_index_values,
     _check_lambdas, _check_mask, _prepare_masked_input,
@@ -86,7 +86,8 @@ class TopKCELoss(nn.Module):
         input, target, valid = _indexed(input, target, self.ignore_index, mask)
         if not target.numel():
             return input.sum() * 0
-        terms = F.cross_entropy(input, target, reduction="none")
+        # -log p_t as a sum of non-negative terms, with a gradient that keeps the dominant class at saturation.
+        terms = _softmax.cross_entropy_index(input, target)
         if self.fraction == 1:
             return torch.where(valid, terms, 0).sum() / valid.sum().clamp_min(1)
         upper = math.ceil(self.fraction * target.numel())
@@ -149,7 +150,7 @@ class LovaszSoftmaxLoss(nn.Module):
         first = 0 if self.include_background else 1
         if input.shape[1] <= first:
             raise ValueError("include_background=False needs at least 2 channels")
-        probs = input.softmax(1) if self.from_logits else input
+        probs = _softmax.softmax(input) if self.from_logits else input
         if not target.numel():
             return probs.sum() * 0
         if self.per_image:

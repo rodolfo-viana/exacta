@@ -13,10 +13,10 @@ from torch import Tensor, nn
 from exacta.functional.topology import SkeletonMethod, _skeleton_method, skeletonize
 from exacta.losses.geometry import _geometry_input, _options
 from exacta.losses.segmentation import (
-    Activation, TargetFormat, _check_ignore_index, _check_index_target, _check_mask, _global_overlap,
+    Activation, TargetFormat, _activate, _check_ignore_index, _check_index_target, _check_mask, _global_overlap,
     _one_hot, _overlap_mean, _upcast,
 )
-from exacta import _logistic, _native, _soft_pool
+from exacta import _native, _soft_pool
 
 SkeletonBackend = Literal["auto", "torch", "native"]
 
@@ -271,22 +271,24 @@ class SkeletonRecallLoss(nn.Module):
         truth = _one_hot(target_skeleton, input, self.target_format).to(input.dtype)
         if valid is not None:
             input = torch.where(valid[:, None], input, 0)  # sanitise before the activation
-        probs = input.softmax(1) if self.activation == "softmax" else (
-            _logistic.sigmoid(input) if self.activation == "sigmoid" else input)
+        probs, complement = _activate(self.activation, input)
         if valid is not None:
             probs = torch.where(valid[:, None], probs, 0)
+            complement = torch.where(valid[:, None], complement, 0)
             truth = torch.where(valid[:, None], truth, 0)
         if not self.include_background:
             if input.shape[1] < 2:
                 raise ValueError("include_background=False needs at least 2 channels")
-            probs, truth = probs[:, 1:], truth[:, 1:]
+            probs, complement, truth = probs[:, 1:], complement[:, 1:], truth[:, 1:]
         dims = tuple(range(2, probs.ndim))
         if self.batch_dice:
             dims = (0, *dims)
-        covered, skeleton = (probs * truth).sum(dims), truth.sum(dims)
+        # 1 - (covered + smooth) / (skeleton + smooth) = missed / (covered + missed + smooth), with
+        # covered = Σ p·s, missed = Σ (1-p)·s and skeleton = covered + missed, sums of non-negative terms.
+        covered, missed = (probs * truth).sum(dims), (complement * truth).sum(dims)
         counts = None if valid is None else valid.flatten(1).sum(1)
         if counts is not None and self.batch_dice:
             counts = counts.sum()
         if self.distributed:
-            covered, skeleton, _, counts = _global_overlap(covered, skeleton, skeleton, counts, input)
-        return _overlap_mean(covered + self.smooth, skeleton + self.smooth, counts).to(input.dtype)
+            (covered, missed), counts = _global_overlap((covered, missed), counts, input)
+        return _overlap_mean(missed, covered + self.smooth, counts).to(input.dtype)

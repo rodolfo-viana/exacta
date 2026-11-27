@@ -6,6 +6,8 @@ from typing import Any, Literal
 import torch
 from torch import Tensor, nn
 
+from exacta import _softmax
+from exacta._loss_reductions import error_ratio
 from exacta.losses.segmentation import (
     _check_ignore_index, _check_index_target, _check_index_values, _check_mask,
     _nonnegative_finite, _prepare_masked_input,
@@ -90,10 +92,12 @@ class GeneralizedWassersteinDiceLoss(nn.Module):
         observed = None if valid is None else valid.reshape(shape)
         safe_labels = labels.clamp(0, self.num_classes - 1) if compiling else labels
         matrix = self.dist_matrix.to(device=input.device, dtype=input.dtype)
-        probs = input.softmax(1).flatten(2)
+        probs = _softmax.softmax(input).flatten(2)
         # Keep voxels contiguous, matching the softmax reduction/backward layout.
         costs = matrix.T[:, safe_labels].permute(1, 0, 2)
         error = (probs * costs).sum(1)
+        # 1 - error = Σ_c p_c (1 - cost), a sum of non-negative terms (the costs lie in [0, 1]).
+        agreement = (probs * (1 - matrix).T[:, safe_labels].permute(1, 0, 2)).sum(1)
         if observed is not None:
             error = torch.where(observed, error, 0)
         if self.weighting_mode == "GDL":
@@ -106,15 +110,15 @@ class GeneralizedWassersteinDiceLoss(nn.Module):
             weight = safe_labels.ne(0)
         if observed is not None:
             weight = torch.where(observed, weight, 0) if self.weighting_mode == "GDL" else weight & observed
-        true_positive = (weight * (1 - error)).sum(1)
+        true_positive = (weight * agreement).sum(1)
         all_error = (weight * error).sum(1) if self.weighting_mode == "GDL" else error.sum(1)
         numerator = 2 * true_positive + self.smooth
-        denominator = 2 * true_positive + all_error + self.smooth
+        # The loss 1 - numerator / denominator, with denominator = numerator + all_error, is all_error / denominator.
         if self.smooth > 0:
-            values = 1 - numerator / denominator
+            values = error_ratio(all_error, numerator)
         else:
-            nonzero = denominator != 0
-            values = torch.where(nonzero, 1 - numerator / torch.where(nonzero, denominator, 1), 0)
+            nonzero = numerator + all_error != 0
+            values = error_ratio(torch.where(nonzero, all_error, 0), torch.where(nonzero, numerator, 1))
         # Eager execution validates labels above. Compiled execution must not
         # silently turn invalid labels into valid ones or index out of bounds.
         if compiling:

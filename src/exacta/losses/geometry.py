@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from exacta import _logistic, _native, _triton_edt
+from exacta import _logistic, _native, _softmax, _triton_edt
 from exacta._inputs import as_spacing
 from exacta.losses.segmentation import (
     Activation, TargetFormat, _check_mask, _check_target_format, _one_hot, _upcast, _voxel_mean,
@@ -28,7 +28,7 @@ def _geometry_input(input: Tensor, target: Tensor, activation: Activation,
         raise ValueError("geometry losses require complete binary targets; ignored labels are not geometry")
     if valid is not None:
         input = torch.where(valid[:, None], input, 0)
-    probs = (input.softmax(1) if activation == "softmax"
+    probs = (_softmax.softmax(input) if activation == "softmax"
              else _logistic.sigmoid(input) if activation == "sigmoid" else input)
     if not include_background:
         if input.shape[1] < 2:

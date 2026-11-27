@@ -4,6 +4,49 @@ Release notes for Exacta.
 
 ## Unreleased
 
+- **Overlap and softmax losses at saturated logits:** three computations lost digits where a loss is below
+  the roundoff or the dominant softmax probability rounds to one (a logit gap above 37 in binary64, 17 in
+  binary32), on both backends. (1) The Dice, Tversky, focal Tversky and generalized Dice losses were
+  `1 - ratio`, which has only absolute accuracy: with eight voxels per class and a gap of 40 (loss `4.2e-18`)
+  the value was exactly 0, and on batches with gaps of 10 to 80 it was off by up to `6e-12` in binary64 and
+  `1e-3` in binary32 (all digits for the squared Dice in binary32). (2) The squared Dice differentiates as
+  `dL/dp = (2 p N / D - 2 g) / D`, with `N = 2 sum p g + smooth` and `D = sum p^2 + sum g^2 + smooth`: where
+  `p = g = 1`, `N / D` is within roundoff of one, and the two terms, each of order `2 / D`, cancel to a
+  difference of the order of `1 - p` that is formed with an absolute error of roundoff times each term, so
+  the logit gradient of a saturated batch had relative errors of up to 190 in binary64. (3) `torch.softmax`
+  differentiates as `p_i (d_i - sum_j p_j d_j)`, `-log p_t` is `-log 1` and the gradient `p - onehot` is 0 for
+  the dominant class: every gradient element of the dominant class of the Dice, Tversky, focal Tversky,
+  generalized Dice, cross-entropy and focal losses, and of their sums, had a relative error of 100%, and the
+  cross-entropy and focal values were off by up to `2e-12` in binary64 and `5e-4` in binary32 on those
+  batches, and 0 beyond the gap of 37 (17). Now the overlap losses are ratios of sums of non-negative terms,
+  with `TP = sum p g`, `FP = sum p (1 - g)`, `FN = sum (1 - p) g`: Dice is `(FP + FN) / (2 TP + FP + FN +
+  smooth)`, Tversky `(alpha FP + beta FN) / (TP + alpha FP + beta FN + smooth)`, the squared Dice
+  `sum (p - g)^2 / (sum p^2 + sum g^2 + smooth)` and the generalized Dice `sum_c w_c (FP_c + FN_c)` over its
+  denominator. They are algebraically the same losses (each docstring gives the identity; `smooth_numerator`,
+  `average="micro"`, `skip_absent`, `zero_absent`, `soft_label`, `batch_dice`, masks, class weights and the
+  focal power keep their meaning), and differentiate as `error / (numerator + error)` does,
+  `numerator / denominator^2` and `-error / denominator^2`. `1 - p` is never formed from a rounded `p`: it is
+  `sigmoid(-z)`, or the sum of the other softmax probabilities, and enters `FN` and `p - g = p (1 - g) -
+  (1 - p) g`. The softmax is a `torch.autograd.Function` whose backward is `dz_i = (1 - p_i) v_i - p_i
+  sum_{j != i} v_j`, the sum over the other classes being formed directly for the class of largest
+  probability; the cross-entropy is `log1p(sum_{j != t} exp(z_j - z_t))` where `z_t` is the maximum
+  (`(max - z_t) + log1p(sum_{j != max} exp(z_j - max))` otherwise, a sum of non-negative terms), with gradient
+  `p_i` for `i != t` and `-(1 - p_t)` for the target; the softmax focal terms are `(1 - p)^gamma (-log p)`
+  from the same two quantities. `TopKCELoss`, the softmax of `LovaszSoftmaxLoss`, `BoundaryLoss`,
+  `HausdorffDTLoss` and `SkeletonRecallLoss` use the new softmax, and `SkeletonRecallLoss` and
+  `GeneralizedWassersteinDiceLoss` the ratio of non-negative sums. The fused kernels use the same forms.
+  Against a 160-digit mpmath reference, on saturated batches with gaps of 10 to 80 (losses of `4e-5` to
+  `1e-34`), the largest relative error is `3 u` in value and `9 u` in every gradient element in binary64 on
+  both backends, and `7 u` and `40 u` in binary32 on PyTorch (`3 u` and `75 u` in the fused kernels, whose
+  fast exponential costs about the gap times `u`; the shifted logit `z - max` is itself rounded in binary32),
+  `u` being the roundoff; relative accuracy holds while the quantity is representable (in binary32 `(1 - p)^2`
+  is subnormal beyond a gap of 44). At moderate logits values change by at most `4.4 u` and gradients by
+  `13 u` of their largest component, in both dtypes. Double backward on the PyTorch backend and gradients
+  into a soft target are unchanged. Not changed: the Lovasz softmax still sorts the rounded errors
+  `|g - p|`, the squared error of `HausdorffDTLoss` still subtracts where `p` rounds to the target, and the
+  value of `BoundaryLoss` is a sum of terms of both signs. The PyTorch backend does a few more passes over the probabilities and takes about
+  twice as long on the CPU.
+
 - **Sigmoid losses at saturated logits:** the gradients through a sigmoid lost accuracy as `sigma(z)`
   approached one and every digit once it rounded to one (`z` above 37 in binary64, 17 in binary32), on both
   backends, and so did the value of the binary cross-entropy on the PyTorch backend. `torch.sigmoid`
