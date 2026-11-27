@@ -64,6 +64,26 @@ Release notes for Exacta.
   norm, median over the batches of real binary32 logits, 1.4e-4 with 3e5 voxels, 1.3e-3 with 1.2e6
   and 2.8e-3 with 1.8e6 (at most 5.3e-2). kornia's, in binary64 on 2-D slices, differs by at most
   3e-14 under the same sort order.
+- **Mesh distances:** the nearest-element search behind `surface="mesh"` (a k-d tree that skips a
+  node or element whose bounding box is farther than the best distance so far plus the margin
+  `1e-9 * (X + 1)`, `X` being the largest coordinate magnitude) was tested, not shown, to return the
+  minimum over all elements of the computed point-to-element distances: a computed point-to-triangle
+  distance can fall below the exact one by an amount that grows as the triangle gets thinner, and
+  nothing tied that amount to the margin. For segments (2-D) it is at most about `30 u X` (`u` the
+  unit roundoff), far below the margin, so 2-D is unchanged. For triangles the kernel now computes
+  shape constants of every triangle (edge lengths, area, the angle at the first vertex) when it
+  builds the tree, and uses the larger of `1e-9 * (X + 1)` and a bound on those errors that holds
+  while the constants and `X` stay within stated limits; where they do not (a degenerate triangle,
+  or coordinates too large for the thinnest triangle), the search visits every element. The result
+  is thus the minimum over all elements of the distances `point_triangle` and `point_segment`
+  compute, for every input without overflow or underflow. For the marching-cubes meshes Exacta
+  builds, the fixed margin is the larger one whenever the spacing ratio `R = max(s) / min(s)` is at
+  most `1.5e4` and coordinates stay below `9e10 * min(s) / R`, so results there do not change: HD,
+  HD95, ASSD, NSD and all 1.19e6 underlying distances on Medical Segmentation Decathlon heart and
+  spleen labels are bitwise identical. The pass over the triangles adds up to about 3% to the
+  distance step. `tests/test_mesh_margin.py` checks thin triangles (spacing ratios up to `1e6`),
+  meshes translated up to `1e9` spacings from the origin and degenerate triangles against a search
+  of every element.
 - **MeshMetrics compatibility:** with `surface="mesh"` in 3-D, masks are now meshed in the box
   MeshMetrics 1.2 to 1.4.1 use for NumPy masks (the bounding box of both masks, starting one voxel
   before it), so vertex coordinates are measured from the same voxel. This removes many differences
