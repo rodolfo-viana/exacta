@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from exacta import _triton_losses, _loss_reductions
+from exacta import _logistic, _triton_losses, _loss_reductions
 from exacta._distributed import sum_ranks
 from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms, masked_overlap_terms
 
@@ -137,7 +137,7 @@ class _OverlapLoss(nn.Module):
         if self.activation == "softmax":
             probs = input.softmax(1)
         elif self.activation == "sigmoid":
-            probs = input.sigmoid()
+            probs = _logistic.sigmoid(input)
         else:
             probs = input
         onehot = _one_hot(target, input, self.target_format).to(probs.dtype)
@@ -534,10 +534,12 @@ class FocalLoss(nn.Module):
                 )
                 terms = terms * weights.reshape(1, -1, *([1] * (input.ndim - 2)))
             return _voxel_mean(terms.sum(1), valid, channels=1, distributed=self.distributed)
+        # (1-p)**gamma and p**gamma come from the probabilities sigma(-z) and sigma(z), each accurate at
+        # saturation; exp(gamma * log) would lose gamma * |log| * u, about 2e-14 at |z| = 80 and gamma = 2.
         pos = F.logsigmoid(input)
         neg = F.logsigmoid(-input)
-        positive = -truth * (self.gamma * neg).exp() * pos
-        negative = -(1 - truth) * (self.gamma * pos).exp() * neg
+        positive = -truth * _sigmoid_power(_logistic.sigmoid(-input), self.gamma) * pos
+        negative = -(1 - truth) * _sigmoid_power(_logistic.sigmoid(input), self.gamma) * neg
         if self.alpha is not None:
             positive, negative = self.alpha * positive, (1 - self.alpha) * negative
         return _voxel_mean(positive + negative, valid, channels=input.shape[1], distributed=self.distributed)
@@ -630,7 +632,11 @@ class DiceCELoss(nn.Module):
         if self.dice.activation == "sigmoid":
             onehot = _one_hot(target, input, self.dice.target_format).to(input.dtype)
             shaped_weight = None if weight is None else weight.reshape(1, -1, *([1] * (input.ndim - 2)))
-            ce = F.binary_cross_entropy_with_logits(input, onehot, weight=shaped_weight, reduction=reduction)
+            ce = _logistic.bce_with_logits(input, onehot)
+            if shaped_weight is not None:
+                ce = ce * shaped_weight
+            if reduction == "mean":
+                ce = ce.mean()
         elif self.dice.target_format == "index":
             _check_index_target(target, input)
             ce = F.cross_entropy(input, target.long(), weight=weight, reduction=reduction)
@@ -709,6 +715,18 @@ class DiceFocalLoss(DiceCELoss):
 
     def _pointwise(self, input: Tensor, target: Tensor, mask: Tensor | None, weight: Tensor | None) -> Tensor:
         return self.focal(input, target, mask=mask)
+
+
+def _sigmoid_power(probability: Tensor, gamma: float) -> Tensor:
+    """``probability ** gamma``, zero (with zero gradient) where the probability has underflowed to 0.
+
+    A direct power keeps the relative accuracy of the probability, and the guard keeps the loss and its
+    gradient finite for every finite logit when 0 < gamma < 1, as ``exp(gamma * log)`` did.
+    """
+    if gamma == 0:
+        return torch.ones_like(probability)
+    positive = probability > 0
+    return torch.where(positive, torch.where(positive, probability, 1).pow(gamma), 0)
 
 
 def _check_lambdas(overlap: float, pointwise: float) -> None:
