@@ -2,9 +2,12 @@
 //
 // A k-d tree over the elements, split at the median of their centroids and searched depth-first.
 // Each node keeps the bounding box of its elements' vertices, and each element its own box (in
-// single precision, rounded outward); a box holds what it bounds, so a node or element whose box
-// is farther from the query than the best distance so far cannot hold a closer element. The
-// result is the exact minimum over elements of the point-to-element distance.
+// single precision, rounded outward); a box holds what it bounds, so its distance from the query
+// is at most the exact distance to any element inside. A node or element is skipped when its box
+// is farther than the best distance so far plus a margin that bounds the rounding errors of the
+// box distances and how far a computed point-to-element distance can fall below the exact one
+// (Tree::margin). The result is the exact minimum over elements of the point-to-element distance
+// that point_triangle or point_segment computes.
 //
 // The tree is stored in heap order (the children of node i are 2i + 1 and 2i + 2), so subtrees
 // are built in parallel, and the elements are copied in tree order, so a leaf's are contiguous.
@@ -26,6 +29,7 @@
 namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
+constexpr double kU = std::numeric_limits<double>::epsilon() / 2;  // unit roundoff, 2^-53
 constexpr int kLeafSize = 8;
 constexpr std::int64_t kTaskSize = 1 << 15;  // smaller subtrees are built by one thread
 
@@ -103,6 +107,44 @@ double point_segment(const double *p, const double *a, const double *b, int dim)
   return std::sqrt(s);
 }
 
+// Shape constants of triangle abc for Tree::margin. With edge lengths l_ab, l_ac, l_bc, twice the
+// area A2, longest edge D and shortest edge l:
+//   kappa = 5.03 sigma + 24.07 / sin(angle at a) + 0.01, where
+//   sigma = max(2 l_ab l_ac, (1 + (l_ab + l_ac) / l_bc) l_bc max(l_ab, l_ac)) / A2;
+//   width = (2.001 kappa + 26) D;
+//   psi = max(1e4 / (l sin(angle at a)), 1e4 D / l^2, 1e3 D l_ab l_ac / A2^2, kappa D / A2).
+// When the region tests of point_triangle pick the face for a query p whose projection onto the
+// plane lies outside the triangle, that projection is within u kappa L of the triangle, L being
+// the distance from p to the farthest vertex, provided u L psi <= 1. Degenerate triangles, and any
+// that overflow, get psi = inf. The values carry a relative rounding error far below 1% whenever
+// u L psi <= 1, which the 1% headroom of Tree::margin covers.
+void triangle_constants(const double *v, double &width, double &kappa, double &psi) {
+  double ab[3], ac[3], bc[3], n[3];
+  for (int i = 0; i < 3; ++i) {
+    ab[i] = v[3 + i] - v[i];
+    ac[i] = v[6 + i] - v[i];
+    bc[i] = v[6 + i] - v[3 + i];
+  }
+  n[0] = ab[1] * ac[2] - ab[2] * ac[1];
+  n[1] = ab[2] * ac[0] - ab[0] * ac[2];
+  n[2] = ab[0] * ac[1] - ab[1] * ac[0];
+  const double lab = std::sqrt(dot(ab, ab, 3)), lac = std::sqrt(dot(ac, ac, 3));
+  const double lbc = std::sqrt(dot(bc, bc, 3)), area2 = std::sqrt(dot(n, n, 3));
+  const double longest = std::max(lab, std::max(lac, lbc));
+  const double shortest = std::min(lab, std::min(lac, lbc));
+  const double inv_sin_a = lab * lac / area2;
+  const double sigma =
+      std::max(2.0 * lab * lac, (1.0 + (lab + lac) / lbc) * lbc * std::max(lab, lac)) / area2;
+  kappa = 5.03 * sigma + 24.07 * inv_sin_a + 0.01;
+  width = (2.001 * kappa + 26.0) * longest;
+  psi = std::max(std::max(1e4 * inv_sin_a / shortest, 1e4 * longest / (shortest * shortest)),
+                 std::max(1e3 * longest * inv_sin_a / area2, kappa * longest / area2));
+  if (!(area2 > 0.0 && psi < kInf && width < kInf)) {  // also catches NaN
+    width = kappa = 0.0;
+    psi = kInf;
+  }
+}
+
 // x in single precision, rounded towards `direction` (+-1) so that it does not cross x.
 float rounded(double x, float direction) {
   constexpr float kMax = std::numeric_limits<float>::max();
@@ -120,6 +162,7 @@ struct Tree {
   std::unique_ptr<float[]> boxes;      // each element's box (lo, then hi), rounded outward
   std::vector<Node> nodes;             // heap order; unused slots are empty leaves
   double scale = 0.0;                  // largest coordinate magnitude of the vertices
+  double width = 0.0, kappa = 0.0, psi = 0.0;  // largest triangle_constants over the triangles
 
   bool leaf(const Node &node) const { return node.end - node.begin <= kLeafSize; }
 
@@ -228,15 +271,35 @@ struct Tree {
     return s;
   }
 
+  // The margin for a query whose coordinates, and the vertices', are at most `magnitude` in
+  // absolute value. An element is skipped only if its (or a node's) computed squared box distance
+  // exceeds the rounded (best + margin)^2; that never skips the element of smallest computed
+  // distance as long as the margin is at least the most that distance can fall below the exact
+  // distance to the element, plus the rounding of the box distance and of the bound. In units of
+  // u * magnitude that is at most 30 for segments, and for triangles
+  // u * (width + 130 magnitude + 7 u kappa^2 magnitude) (with the constants of
+  // triangle_constants), provided u reach psi <= 1 for reach = 2 sqrt(3) magnitude, the farthest
+  // a vertex can be from the query. The fixed term 1e-9 * (magnitude + 1) exceeds both unless the
+  // triangles are very thin (kappa above about 1.3e6); where the triangle bound does not apply,
+  // nothing is skipped.
+  double margin(double magnitude) const {
+    const double fixed = 1e-9 * (magnitude + 1.0);
+    if (dim != 3) return fixed;
+    const double reach = 3.4642 * magnitude;
+    if (!(kU * reach * (1.01 * psi) <= 1.0 && kU * kappa <= 1e-4)) return kInf;
+    return std::max(fixed, 1.01 * (kU * width + 130.0 * kU * magnitude +
+                                   7.0 * kU * kU * kappa * kappa * magnitude));
+  }
+
   double nearest(const double *p) const {
     // The tree is balanced (depth < 64 for any realistic mesh), and each level adds at most one
     // pending node, so a small fixed stack suffices. A node or element whose box is farther than
-    // the best distance so far (compared squared, with a margin far above the rounding errors of
-    // either distance) cannot hold a closer element. Pending nodes keep the box distance found
-    // when their parent was opened, so those pruned later are never read again.
+    // the best distance so far (compared squared, with the margin above) cannot hold an element
+    // of smaller computed distance. Pending nodes keep the box distance found when their parent
+    // was opened, so those pruned later are never read again.
     double magnitude = scale;
     for (int i = 0; i < dim; ++i) magnitude = std::max(magnitude, std::abs(p[i]));
-    const double margin = 1e-9 * (magnitude + 1.0);
+    const double margin = this->margin(magnitude);
     std::int64_t stack[128];
     double distance[128];
     int top = 0;
@@ -311,6 +374,20 @@ int point_mesh_distances(const double *points, std::int64_t n_points, const doub
     }
   }
   tree.scale = scale;
+  if (dim == 3) {
+    double width = 0.0, kappa = 0.0, psi = 0.0;
+#pragma omp parallel for num_threads(threads) schedule(static) reduction(max : width, kappa, psi)
+    for (std::int64_t e = 0; e < n_elements; ++e) {
+      double w, k, s;
+      triangle_constants(elements + e * stride, w, k, s);
+      width = std::max(width, w);
+      kappa = std::max(kappa, k);
+      psi = std::max(psi, s);
+    }
+    tree.width = width;
+    tree.kappa = kappa;
+    tree.psi = psi;
+  }
 
   // Node sizes at depth d are at most ceil(n / 2^d); every node at the first depth where that is
   // at most kLeafSize is a leaf.
