@@ -21,9 +21,17 @@ where that is exact enough.
 
 The backward passes are built from differentiable operations on the saved probabilities, so the PyTorch
 backend of the losses keeps supporting double backward (gradient penalties) and gradients into a soft target.
+
+For integer labels (the usual case) the overlap sums and the cross-entropy come from the label indices
+directly (:class:`_IndexOverlap`, :class:`_CrossEntropyIndex`): no one-hot tensor, no dense ``1 - p``, and one
+softmax shared by the Dice and cross-entropy terms of ``DiceCELoss``. Their backward passes are written
+twice, in place when no graph is being built and out of place when one is (double backward), and tested
+against each other and against the one-hot composition.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 from torch import Tensor
@@ -122,28 +130,160 @@ def neg_log_softmax(z: Tensor) -> Tensor:
     return _Softmax.apply(z, False, True)[2]
 
 
+def _label_nll(zf: Tensor, p: Tensor, index: Tensor, q_target: Tensor) -> Tensor:
+    """``-log p_t`` of the label ``t`` of every voxel, ``(B, 1, V)``, from ``q_t = 1 - p_t`` formed as the sum of
+    the other probabilities: ``-log1p(-q_t)`` for a label of largest logit, otherwise ``(max - z_t) - log p_max``
+    (``p_max = 1 / sum_j exp(z_j - max)``), a sum of non-negative terms."""
+    z_target = zf.gather(1, index)
+    top = zf.amax(1, keepdim=True)
+    return torch.where(z_target >= top, -torch.log1p(-q_target), (top - z_target) - torch.log(p.amax(1, keepdim=True)))
+
+
+def _check_labels(target: Tensor, classes: int) -> None:
+    """The errors ``F.one_hot`` raises for labels outside ``[0, classes)``, which the index-based sums below
+    would otherwise miscount (or, on CUDA, hit a device-side assert)."""
+    if target.numel() and not torch.compiler.is_compiling():
+        low, high = (int(v) for v in torch.aminmax(target))
+        if low < 0:
+            raise RuntimeError("Class values must be non-negative.")
+        if high >= classes:
+            raise RuntimeError("Class values must be smaller than num_classes.")
+
+
+def _per_class_counts(index: Tensor, invalid: Tensor | None, classes: int, dtype: torch.dtype) -> Tensor:
+    """Exact number of valid voxels of every class in every case, ``(B, C)``, from int64 counts."""
+    labels = index[:, 0] if invalid is None else torch.where(invalid[:, 0], classes, index[:, 0])  # extra bin: excluded
+    counts = torch.zeros(index.shape[0], classes + 1, dtype=torch.long, device=index.device)
+    return counts.scatter_add_(1, labels, torch.ones_like(labels))[:, :classes].to(dtype)
+
+
+class _IndexOverlap(torch.autograd.Function):
+    """Per-case, per-class ``(TP, FP, FN, mass)`` of the softmax overlap losses for integer class labels.
+
+    With ``q_t = sum_{j != t} p_j`` the complement of the probability of the label ``t`` of a voxel (the sum of
+    the other probabilities), ``TP_c = sum_{t = c} p_c``, ``FP_c = sum_{t != c} p_c``, ``FN_c = sum_{t = c} q_t``
+    and the mass ``sum_{t = c} 1``: the sums of ``p * g``, ``p * (1 - g)`` and ``(1 - p) * g`` for the one-hot
+    ``g`` of the label, each term a non-negative number. They come from one buffer: ``p`` with the label entries
+    zeroed (``FP`` and ``q_t``), then ``p`` at the label entries only (``p - buffer``, exact elementwise), then
+    ``q_t`` at the label entries, so that no one-hot tensor and no ``(1 - g)`` or ``q`` tensor is formed. With
+    ``squared`` the second slot holds ``sum (p - g)**2 = sum_{t != c} p_c**2 + sum_{t = c} q_t**2`` and the third
+    is zero. The backward pass differentiates through the simplex, ``d_c = d FP_c`` for ``c != t`` and
+    ``d_t = d TP_t - d FN_t`` as the effective gradient with respect to ``p`` (``2 p_c d M_c`` and
+    ``d TP_t - 2 q_t d M_t`` when squared), then applies the softmax product ``dz_i = (1 - p_i) v_i - p_i
+    sum_{j != i} v_j`` with ``v = p d``; the class of largest probability takes the sum over the others
+    directly. While a graph is being built (double backward) everything is recomputed from the logits with
+    differentiable operations.
+    """
+
+    @staticmethod
+    def forward(ctx, z: Tensor, target: Tensor, valid: Tensor | None, squared: bool, with_nll: bool):  # type: ignore[override]
+        batch, classes = z.shape[:2]
+        voxels = math.prod(z.shape[2:])
+        _check_labels(target, classes)
+        zf = z.reshape(batch, classes, voxels)
+        index = target.reshape(batch, 1, voxels)
+        invalid = None if valid is None else ~valid.reshape(batch, 1, voxels)
+        p = torch.softmax(zf, 1)
+        work = p.scatter(1, index, 0)
+        q_target = work.sum(1, keepdim=True)
+        nll = _label_nll(zf, p, index, q_target).reshape(target.shape) if with_nll else None
+        if invalid is not None:
+            work.masked_fill_(invalid, 0)
+            q_target.masked_fill_(invalid, 0)
+        first = work.square().sum(2) if squared else work.sum(2)
+        torch.sub(p, work, out=work)
+        if invalid is not None:
+            work.masked_fill_(invalid, 0)
+        inter = work.sum(2)
+        work.scatter_(1, index, q_target)
+        third = work.square().sum(2) if squared else work.sum(2)
+        if squared:
+            first, third = first + third, torch.zeros_like(third)
+        mass = _per_class_counts(index, invalid, classes, z.dtype)
+        ctx.save_for_backward(z, target, p, q_target, *(() if valid is None else (valid,)))
+        ctx.squared = squared
+        ctx.mark_non_differentiable(mass)
+        ctx.set_materialize_grads(False)
+        return inter, first, third, mass, nll
+
+    @staticmethod
+    def backward(ctx, grad_inter, grad_first, grad_third, grad_mass, grad_nll):  # type: ignore[override]
+        z, target, p, q_target, *rest = ctx.saved_tensors
+        squared = ctx.squared
+        batch, classes = z.shape[:2]
+        voxels = math.prod(z.shape[2:])
+        graph = torch.is_grad_enabled()  # double backward: differentiate through everything
+        index = target.reshape(batch, 1, voxels)
+        flat = index[:, 0]
+        invalid = ~rest[0].reshape(batch, 1, voxels) if rest else None
+        zero = z.new_zeros(batch, classes)
+        grad_inter = zero if grad_inter is None else grad_inter
+        grad_first = zero if grad_first is None else grad_first
+        grad_third = zero if grad_third is None else grad_third
+        if graph:
+            p = softmax(z.reshape(batch, classes, voxels))
+            q_target = _exclusive(p, index)
+        # Effective gradient d with respect to p, per voxel: a class constant for the other classes, and
+        # d_t for the label t; v = p d.
+        if squared:
+            v = p.square() * (2 * grad_first)[:, :, None]
+            label = grad_inter.gather(1, flat) - 2 * grad_first.gather(1, flat) * q_target[:, 0]
+        else:
+            v = p * grad_first[:, :, None]
+            label = (grad_inter - grad_third).gather(1, flat)
+        label = p.gather(1, index) * label[:, None]
+        if invalid is not None:  # excluded voxels contribute nothing to the sums (but may to the -log p_t)
+            v = v.masked_fill(invalid, 0) if graph else v.masked_fill_(invalid, 0)
+            label = label.masked_fill(invalid, 0)
+        if grad_nll is not None:  # -log p_t of the label: v_t - grad
+            label = label - grad_nll.reshape(batch, 1, voxels)
+        v = _put(v, index, label)
+        total = v.sum(1, keepdim=True)
+        top = p.max(1, keepdim=True).indices
+        # p is a saved tensor, so its sum over the other classes is formed on a copy; v is ours.
+        q_top = _exclusive(p, top)
+        dominant = q_top * v.gather(1, top) - p.gather(1, top) * _exclusive(v, top, owned=True)
+        dz = v - p * total if graph else v.addcmul_(p, total, value=-1)
+        return _put(dz, top, dominant).reshape(z.shape), None, None, None, None
+
+
+def index_overlap_statistics(
+    z: Tensor, target: Tensor, valid: Tensor | None = None, *, squared: bool = False, with_nll: bool = False,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None]:
+    """``(TP, FP, FN, mass, nll)`` of the softmax of ``z`` against integer labels ``target`` (``(B, *spatial)``):
+    the first four of shape ``(B, C)``, summed over the voxels where ``valid`` (or all of them), and with
+    ``with_nll`` the per-voxel ``-log p_t`` (``target.shape``), which shares the softmax, the sum of the other
+    probabilities and the backward pass; see :class:`_IndexOverlap`. The gradient flows to ``z`` only, with no
+    one-hot tensor and no cancellation at saturated logits."""
+    return _IndexOverlap.apply(z, target.long(), valid, squared, with_nll)
+
+
 class _CrossEntropyIndex(torch.autograd.Function):
     @staticmethod
     def forward(ctx, z: Tensor, target: Tensor) -> Tensor:  # type: ignore[override]
-        p = torch.softmax(z, 1)
-        top = p.max(1, keepdim=True).indices
-        q_top = _exclusive(p, top, owned=True)
-        ctx.save_for_backward(z, p, top, q_top, target)
-        nll = torch.log1p(q_top / p.gather(1, top)) + (z.gather(1, top) - z.gather(1, target.unsqueeze(1)))
-        return nll.squeeze(1)
+        batch, classes = z.shape[:2]
+        voxels = math.prod(z.shape[2:])
+        _check_labels(target, classes)
+        zf = z.reshape(batch, classes, voxels)
+        index = target.reshape(batch, 1, voxels)
+        p = torch.softmax(zf, 1)
+        q_target = _exclusive(p, index, owned=True)  # the other probabilities: 1 - p_t, without cancellation
+        nll = _label_nll(zf, p, index, q_target)
+        ctx.save_for_backward(z, target, p, q_target)
+        return nll.reshape(target.shape)
 
     @staticmethod
     def backward(ctx, grad: Tensor):  # type: ignore[override]
-        z, p, top, q_top, target = ctx.saved_tensors
+        z, target, p, q_target = ctx.saved_tensors
+        batch, classes = z.shape[:2]
+        voxels = math.prod(z.shape[2:])
+        index = target.reshape(batch, 1, voxels)
         if torch.is_grad_enabled():  # double backward: differentiate through the softmax
-            p = softmax(z)
-            q_top = _exclusive(p, top)
-        index = target.unsqueeze(1)
-        # dz_i = grad (p_i - delta_it), with the entry of the target -grad (1 - p_t), formed as the sum of the
-        # other probabilities where t is the class of largest probability.
-        q_target = torch.where(index == top, q_top, 1 - p.gather(1, index))
-        weight = grad.unsqueeze(1)
-        return _put(weight * p, index, -weight * q_target), None
+            p = softmax(z.reshape(batch, classes, voxels))
+            q_target = _exclusive(p, index)
+        weight = grad.reshape(batch, 1, voxels)
+        # dz_i = grad (p_i - delta_it), the entry of the label being -grad (1 - p_t) = -grad q_t.
+        return _put(p * weight, index, -weight * q_target).reshape(z.shape), None
 
 
 def cross_entropy_index(z: Tensor, target: Tensor) -> Tensor:

@@ -134,22 +134,45 @@ class _OverlapLoss(nn.Module):
         input, target, valid = _prepare_masked_input(
             input, target, self.target_format, self.ignore_index, mask,
         )
-        probs, complement = _activate(self.activation, input)
-        onehot = _one_hot(target, input, self.target_format).to(probs.dtype)
-        if valid is not None:
-            probs = torch.where(valid[:, None], probs, 0)
-            complement = torch.where(valid[:, None], complement, 0)
-            onehot = torch.where(valid[:, None], onehot, 0)
-        if not self.include_background:
-            if probs.shape[1] < 2:
-                raise ValueError("include_background=False needs at least 2 channels")
-            probs, complement, onehot = probs[:, 1:], complement[:, 1:], onehot[:, 1:]
-        dims = tuple(range(2, probs.ndim))
-        if self.batch_dice:
-            dims = (0, *dims)
-        stats = _overlap_statistics(
-            probs, complement, onehot, dims, semimetric=self._semimetric(), squared=self._squared_denominator(),
-        )
+        return self._overlap(input, target, valid)
+
+    def _overlap(self, input: Tensor, target: Tensor, valid: Tensor | None,
+                 nll_sink: list[Tensor] | None = None) -> Tensor:
+        """The loss of prepared (upcast, sanitized) inputs. With softmax and integer labels ``nll_sink`` receives
+        the per-voxel ``-log p_t`` that the same softmax pass yields (used by :class:`DiceCELoss`)."""
+        if self.activation == "softmax" and self.target_format == "index":
+            # Integer labels: the same sums from the label indices, without a one-hot tensor (see
+            # exacta._softmax._IndexOverlap). Background selection and the batch sum act on the (B, C) sums.
+            _check_index_target(target, input)
+            *stats, nll = _softmax.index_overlap_statistics(
+                input, target, valid, squared=self._squared_denominator(), with_nll=nll_sink is not None,
+            )
+            if nll_sink is not None:
+                nll_sink.append(nll)
+            if not self.include_background:
+                if input.shape[1] < 2:
+                    raise ValueError("include_background=False needs at least 2 channels")
+                stats = tuple(x[:, 1:] for x in stats)
+            if self.batch_dice:
+                stats = tuple(x.sum(0) for x in stats)
+        else:
+            probs, complement = _activate(self.activation, input)
+            onehot = _one_hot(target, input, self.target_format).to(probs.dtype)
+            if valid is not None:
+                probs = torch.where(valid[:, None], probs, 0)
+                complement = torch.where(valid[:, None], complement, 0)
+                onehot = torch.where(valid[:, None], onehot, 0)
+            if not self.include_background:
+                if probs.shape[1] < 2:
+                    raise ValueError("include_background=False needs at least 2 channels")
+                probs, complement, onehot = probs[:, 1:], complement[:, 1:], onehot[:, 1:]
+            dims = tuple(range(2, probs.ndim))
+            if self.batch_dice:
+                dims = (0, *dims)
+            stats = _overlap_statistics(
+                probs, complement, onehot, dims, semimetric=self._semimetric(),
+                squared=self._squared_denominator(),
+            )
         valid_counts = None if valid is None else valid.flatten(1).sum(1)
         if valid_counts is not None and self.batch_dice:
             valid_counts = valid_counts.sum()
@@ -603,12 +626,42 @@ class DiceCELoss(nn.Module):
                 input, target, mask=mask, lambda_dice=self.lambda_dice, lambda_ce=self.lambda_ce,
                 cross_entropy=self.lambda_ce != 0, class_weight=weight, focal=self._focal_config(),
             )
+        if self._shares_softmax():
+            # One softmax, one sum of the other probabilities and one backward pass serve both terms.
+            prepared, labels, valid = _prepare_masked_input(
+                input, target, self.dice.target_format, self.dice.ignore_index, mask,
+            )
+            nll: list[Tensor] = []
+            dice = self.dice._overlap(prepared, labels, valid, nll)
+            ce = self._index_cross_entropy(nll[0], labels, valid, weight)
+            return self.lambda_dice * dice + self.lambda_ce * ce
         dice = self.dice(input, target, mask=mask) if self.lambda_dice else None
         if not self.lambda_ce:
             assert dice is not None
             return self.lambda_dice * dice
         ce = self._pointwise(input, target, mask, weight)
         return self.lambda_ce * ce if dice is None else self.lambda_dice * dice + self.lambda_ce * ce
+
+    def _shares_softmax(self) -> bool:
+        """Whether the Dice and cross-entropy terms can read one softmax: softmax over integer labels, both terms
+        present, and the ordinary cross-entropy (not :class:`DiceFocalLoss`'s)."""
+        return (self.lambda_dice != 0 and self.lambda_ce != 0 and self.dice.activation == "softmax"
+                and self.dice.target_format == "index"
+                and type(self)._pointwise is DiceCELoss._pointwise)
+
+    def _index_cross_entropy(self, ce: Tensor, target: Tensor, valid: Tensor | None, weight: Tensor | None) -> Tensor:
+        """Reduce the per-voxel ``-log p_t`` of integer labels as ``F.cross_entropy`` would: the mean over voxels,
+        over the included voxels, or over the target weights."""
+        if weight is not None:
+            target_weights = weight[target.long()]
+            ce = ce * target_weights
+            if valid is not None:
+                target_weights = torch.where(valid, target_weights, 0)
+                ce = torch.where(valid, ce, 0)
+            return _sum_mean(ce.sum(), target_weights.sum(), self.dice.distributed)
+        if valid is None and not self.dice.distributed:
+            return ce.mean()
+        return _voxel_mean(ce, valid, channels=1, distributed=self.dice.distributed)
 
     def _pointwise(self, input: Tensor, target: Tensor, mask: Tensor | None, weight: Tensor | None) -> Tensor:
         input, target, valid = _prepare_masked_input(
@@ -629,17 +682,7 @@ class DiceCELoss(nn.Module):
             _check_index_target(target, input)
             # -log p_t as log1p of the other probabilities' ratio to the largest, accurate where p_t rounds to 1,
             # with the gradient p - onehot formed as (1 - p_t) and p_i, never as p_t - 1.
-            ce = _softmax.cross_entropy_index(input, target)
-            if weight is not None:
-                target_weights = weight[target.long()]
-                ce = ce * target_weights
-                if valid is not None:
-                    target_weights = torch.where(valid, target_weights, 0)
-                    ce = torch.where(valid, ce, 0)
-                denominator = target_weights.sum()
-                return _sum_mean(ce.sum(), denominator, self.dice.distributed)
-            if reduction == "mean":
-                ce = ce.mean()
+            return self._index_cross_entropy(_softmax.cross_entropy_index(input, target), target, valid, weight)
         else:
             nll = _softmax.neg_log_softmax(input)
             soft = _one_hot(target, input, "one-hot").to(input.dtype)

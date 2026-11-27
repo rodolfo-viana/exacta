@@ -44,8 +44,14 @@ Release notes for Exacta.
   `13 u` of their largest component, in both dtypes. Double backward on the PyTorch backend and gradients
   into a soft target are unchanged. Not changed: the Lovasz softmax still sorts the rounded errors
   `|g - p|`, the squared error of `HausdorffDTLoss` still subtracts where `p` rounds to the target, and the
-  value of `BoundaryLoss` is a sum of terms of both signs. The PyTorch backend does a few more passes over the probabilities and takes about
-  twice as long on the CPU.
+  value of `BoundaryLoss` is a sum of terms of both signs.
+  Cost: with softmax and integer labels the PyTorch backend forms the sums from the label indices (no one-hot
+  tensor) and `DiceCELoss` shares one softmax between its two terms, so that the forward and backward pass of
+  `DiceCELoss` on a `1 x 4 x 128^3` volume takes 1.07 times the previous time on the CPU in binary32 and
+  binary64 (1.2 times for `DiceLoss`, 1.7 times for the cross-entropy alone; 2 threads), and the fused kernels
+  1.0 times in binary32 and 1.25 times in binary64 (the added per-voxel log-normalizer and complement are
+  double-precision work in a kernel limited by double-precision throughput). Sigmoid activations, one-hot targets and the focal loss keep the generic composition and take
+  1.2 to 2.9 times as long on the CPU.
 
 - **Sigmoid losses at saturated logits:** the gradients through a sigmoid lost accuracy as `sigma(z)`
   approached one and every digit once it rounded to one (`z` above 37 in binary64, 17 in binary32), on both

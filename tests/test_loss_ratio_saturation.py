@@ -585,6 +585,83 @@ def test_softmax_pair_and_stats_have_correct_first_and_second_derivatives():
         assert torch.autograd.gradgradcheck(function, (z,))
 
 
+@pytest.mark.parametrize("squared", [False, True])
+@pytest.mark.parametrize("masked", [False, True])
+def test_index_overlap_statistics_have_correct_first_and_second_derivatives(squared, masked):
+    from exacta import _softmax
+
+    gen = torch.Generator().manual_seed(4)
+    z = (2.0 * torch.randn(2, 3, 5, dtype=torch.float64, generator=gen)).requires_grad_()
+    target = torch.randint(3, (2, 5), generator=gen)
+    valid = torch.rand(2, 5, generator=gen) < 0.7 if masked else None
+
+    def function(t):
+        inter, first, third, _, nll = _softmax.index_overlap_statistics(t, target, valid, squared=squared, with_nll=True)
+        return inter, first, third, nll
+
+    assert torch.autograd.gradcheck(function, (z,))
+    assert torch.autograd.gradgradcheck(function, (z,))
+
+
+def test_cross_entropy_index_has_correct_first_and_second_derivatives():
+    from exacta import _softmax
+
+    gen = torch.Generator().manual_seed(6)
+    z = (3.0 * torch.randn(2, 4, 3, 2, dtype=torch.float64, generator=gen)).requires_grad_()
+    target = torch.randint(4, (2, 3, 2), generator=gen)
+    assert torch.autograd.gradcheck(lambda t: _softmax.cross_entropy_index(t, target), (z,))
+    assert torch.autograd.gradgradcheck(lambda t: _softmax.cross_entropy_index(t, target), (z,))
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=["binary64", "binary32"])
+@pytest.mark.parametrize("squared", [False, True])
+@pytest.mark.parametrize("scale", [2.0, 10.0], ids=["moderate", "saturated"])
+def test_index_statistics_agree_with_the_one_hot_composition(dtype, squared, scale):
+    # The sums and their gradient from the label indices equal those of the one-hot composition (softmax pair and
+    # products), to a few roundoffs relative to their size, at moderate and at saturated logits.
+    from exacta import _softmax
+    from exacta.losses.segmentation import _overlap_statistics
+
+    gen = torch.Generator().manual_seed(9)
+    target = torch.randint(3, (2, 7, 6), generator=gen)
+    z = (scale * torch.randn(2, 3, 7, 6, generator=gen) + 2 * scale * F.one_hot(target, 3).movedim(-1, 1)).to(dtype)
+    valid = torch.rand(2, 7, 6, generator=gen) < 0.8
+    weights = torch.randn(4, 2, 3, generator=gen).to(dtype)
+
+    def combine(stats, nll):
+        return sum((w * s).sum() for w, s in zip(weights, stats)) + (nll * 0.5).sum()
+
+    outs = []
+    for fast in (True, False):
+        x = z.clone().requires_grad_()
+        if fast:
+            *stats, nll = _softmax.index_overlap_statistics(x, target, valid, squared=squared, with_nll=True)
+        else:
+            clean = torch.where(valid[:, None], x, 0)
+            probs, complement = _softmax.softmax_pair(clean)
+            onehot = torch.where(valid[:, None], F.one_hot(target, 3).movedim(-1, 1).to(dtype), 0)
+            stats = _overlap_statistics(torch.where(valid[:, None], probs, 0), torch.where(valid[:, None], complement, 0),
+                                        onehot, (2, 3), semimetric=False, squared=squared)
+            nll = _softmax.neg_log_softmax(x).gather(1, target[:, None])[:, 0]
+        (grad,) = torch.autograd.grad(combine(stats, nll), x)
+        outs.append((stats, grad))
+    (fast_stats, fast_grad), (stats, grad) = outs
+    u = U[dtype]
+    for a, b in zip(fast_stats, stats):
+        assert ((a - b).abs() <= 8 * u * b.abs() + 1e-300).all()
+    scale_of_grad = grad.abs().amax(1, keepdim=True).clamp_min(1e-300)
+    assert ((fast_grad - grad).abs() <= 200 * u * scale_of_grad).all()
+
+
+def test_labels_outside_the_classes_raise_on_the_index_paths():
+    z = torch.randn(1, 3, 4, dtype=torch.float64)
+    for target in (torch.full((1, 4), 3), torch.full((1, 4), -1)):
+        with pytest.raises(RuntimeError, match="Class values"):
+            DiceLoss(backend="torch")(z, target)
+        with pytest.raises(RuntimeError, match="Class values"):
+            DiceCELoss(lambda_dice=0.0, backend="torch")(z, target)
+
+
 def test_softmax_stats_are_relatively_accurate_at_saturation():
     from exacta import _softmax
 

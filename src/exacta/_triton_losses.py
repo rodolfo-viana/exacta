@@ -334,14 +334,16 @@ if triton is not None:
 
     @triton.jit
     def _tile(logits, target, voxel_mask, b, voxel0, voxels, classes, ACT, ONE_HOT,
-              HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE):
+              HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE, LSE):
         """Activation p, its complement q = 1 - p, target g, logits z and log-normalizer of a tile.
 
         q is the sum of the other probabilities where p exceeds one half (and 1 - p otherwise, where p <= 1/2),
         sigmoid(-z) or 1 - p for the three activations, so that it does not vanish where p rounds to one.
         For softmax, z remains shifted by the maximum logit, so that z and the log-normalizer, whose
         difference is -log p, do not lose precision when all logits share a large offset; the log-normalizer
-        is log1p of the sum of exp(z_j) over the classes other than one maximal class.
+        is log1p of the sum of exp(z_j) over the classes other than one maximal class, formed from the other
+        probabilities where one class exceeds a half (only when ``LSE``: the cross-entropy and focal terms need it,
+        the overlap terms do not).
         """
         offs = voxel0 + tl.arange(0, BLOCK)
         ch = tl.arange(0, C_PAD)
@@ -365,12 +367,18 @@ if triton is not None:
             top = tl.max(tl.where(in_classes[:, None], z, float("-inf")), axis=0)
             z = z - top[None, :]
             e = tl.exp(tl.where(in_classes[:, None], z, float("-inf")))
-            p = e / tl.sum(e, axis=0)[None, :]
+            total = tl.sum(e, axis=0)
+            p = e / total[None, :]
             big = p > 0.5
-            q = tl.where(big, tl.sum(tl.where(big, 0.0, p), axis=0)[None, :], 1.0 - p)
-            below = tl.sum(tl.where(in_classes[:, None] & (z < 0.0), e, 0.0), axis=0)
-            ties = tl.sum(tl.where(in_classes[:, None] & (z == 0.0), 1.0, 0.0), axis=0)
-            lse = libdevice.log1p(below + (ties - 1.0))
+            rest = tl.sum(tl.where(big, 0.0, p), axis=0)  # the other probabilities, when one class exceeds a half
+            q = tl.where(big, rest[None, :], 1.0 - p)
+            if LSE:
+                # log-normalizer log(sum_j exp(z_j - max)) = log1p(r), with r = sum_{j != top} exp(z_j - max) =
+                # rest / p_max = rest * total when one class has p > 1/2 (rest = 1 - p_max is exact then), and
+                # total - 1 (total >= 2) otherwise
+                lse = libdevice.log1p(tl.where(rest < 0.5, rest * total, total - 1.0))
+            else:
+                lse = tl.zeros([BLOCK], dtype=COMPUTE)
         elif ACT == 1:
             p = tl.sigmoid(z)
             q = tl.sigmoid(-z)
@@ -410,7 +418,7 @@ if triton is not None:
         b = tl.program_id(1).to(tl.int64)
         p, q, g, z, lse, mask, row, ch, valid, bad = _tile(
             logits, target, voxel_mask, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT,
-            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE
+            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE, CE
         )
         w = (mask & valid[None, :]).to(COMPUTE)
         # Terms with g = 0 are left out rather than multiplied by 0: a class masked with a -inf
@@ -428,15 +436,16 @@ if triton is not None:
             ce *= tl.load(class_weight + ch, mask=ch < classes, other=0).to(COMPUTE)[:, None]
         rows: tl.constexpr = 7 if COUNTS else 6
         out = partial + ((b * blocks + blk) * rows) * C_PAD + ch
-        tl.store(out, tl.sum(p * g * w, axis=1))
+        gw = g * w
+        tl.store(out, tl.sum(p * gw, axis=1))
         if SQUARED:  # Σ (p - g)² with p - g = (1-g)·p - g·q, and no separate FN
             gap = (1.0 - g) * p - g * q
             tl.store(out + C_PAD, tl.sum(gap * gap * w, axis=1))
             tl.store(out + 2 * C_PAD, tl.zeros([C_PAD], dtype=COMPUTE))
-        else:  # FP and FN, each a sum of non-negative terms
-            tl.store(out + C_PAD, tl.sum(p * (1.0 - g) * w, axis=1))
-            tl.store(out + 2 * C_PAD, tl.sum(q * g * w, axis=1))
-        tl.store(out + 3 * C_PAD, tl.sum(g * w, axis=1))
+        else:  # FP and FN, each a sum of non-negative terms; w - g·w = (1-g)·w
+            tl.store(out + C_PAD, tl.sum(p * (w - gw), axis=1))
+            tl.store(out + 2 * C_PAD, tl.sum(q * gw, axis=1))
+        tl.store(out + 3 * C_PAD, tl.sum(gw, axis=1))
         tl.store(out + 4 * C_PAD, tl.sum(ce * w, axis=1))
         invalid = tl.zeros([C_PAD], dtype=COMPUTE)
         if not ONE_HOT:
@@ -457,7 +466,7 @@ if triton is not None:
         b = tl.program_id(1).to(tl.int64)
         p, q, g, z, lse, mask, row, ch, valid, bad = _tile(
             logits, target, voxel_mask, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT,
-            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE
+            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE, CE and FOCAL
         )
         a = tl.load(coef + (b * 2) * C_PAD + ch)[:, None]
         c = tl.load(coef + (b * 2 + 1) * C_PAD + ch)[:, None]
@@ -557,7 +566,7 @@ if triton is not None:
         b = tl.program_id(1).to(tl.int64)
         p, q, g, z, lse, mask, row, ch, valid, bad = _tile(
             logits, target, voxel_mask, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT,
-            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE
+            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE, True
         )
         result = _focal_terms(p, q, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, BACKWARD, C_PAD, BLOCK, COMPUTE)
         if BACKWARD:
