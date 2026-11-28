@@ -2,7 +2,11 @@
 
 Release notes for Exacta.
 
-## Unreleased
+## 0.2.0 — 2026-11-28
+
+Version 0.2.0 computes the overlap, cross-entropy, focal, Hausdorff and Lovasz losses accurately at
+saturated logits, adds `average`, `skip_absent` and `smooth_numerator` to the Dice and Tversky
+losses, and makes every surface score a fixed binary64 expression of the exact squared distances.
 
 - **Hausdorff and Lovasz softmax losses at saturated logits:** both formed `p - y` or `|g - p|` from a rounded
   probability, which is exactly zero where the logit gap exceeds 37 in binary64 (17 in binary32) although the

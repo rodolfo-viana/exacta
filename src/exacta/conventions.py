@@ -9,7 +9,7 @@ next to the number. :func:`parse_signature` reads it back into options for
 definition::
 
     >>> signature("hd95")                                      # doctest: +SKIP
-    'hd95[both_empty=nan;combine=max;one_empty=inf;surface=voxels]@exacta-0.1.2'
+    'hd95[both_empty=nan;combine=max;one_empty=inf;surface=voxels]@exacta-0.2.0'
     >>> name, options, version = parse_signature(_)            # doctest: +SKIP
     >>> exacta.functional.evaluate(pred, target, metrics={name: options}, ...)  # doctest: +SKIP
 

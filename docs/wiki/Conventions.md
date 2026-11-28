@@ -13,9 +13,9 @@ makes these choices arguments; matching a library requires matching all relevant
 | NSD threshold | Distances at or below tolerance are included, up to a relative margin `tie_rtol` (default `1e-6`, since 0.1.0) that keeps exact ties within despite rounding; `tie_rtol=0` compares strictly |
 | Sums over surface elements | Means (ASSD) and weighted NSD fractions use correctly rounded sums (since 0.1.2), so their bits do not depend on element order, thread count or device |
 | Image exterior | Counts as background |
-| Dice/Tversky class reduction (losses) | `average="macro"` (default): mean of per-class ratios; `"micro"`: one ratio over the pooled classes (development version) |
-| Classes absent from the target (Dice/Tversky losses) | Default (MONAI): predicted probability is penalized through the smoothed ratio; `zero_absent=True` (segmentation_models_pytorch): zero loss, class stays in the mean; `skip_absent=True` (Kornia): class leaves the mean (development version) |
-| Smoothing of Dice/Tversky losses | `smooth_numerator=True` (default, MONAI): `smooth` in numerator and denominator; `False` (Kornia): denominator only (development version) |
+| Dice/Tversky class reduction (losses) | `average="macro"` (default): mean of per-class ratios; `"micro"`: one ratio over the pooled classes (since 0.2.0) |
+| Classes absent from the target (Dice/Tversky losses) | Default (MONAI): predicted probability is penalized through the smoothed ratio; `zero_absent=True` (segmentation_models_pytorch): zero loss, class stays in the mean; `skip_absent=True` (Kornia): class leaves the mean (since 0.2.0) |
+| Smoothing of Dice/Tversky losses | `smooth_numerator=True` (default, MONAI): `smooth` in numerator and denominator; `False` (Kornia): denominator only (since 0.2.0) |
 | Both masks empty | `both_empty`, default NaN |
 | One mask empty | Dice/IoU: zero; HD/ASSD: `one_empty`, default infinity; NSD: `one_empty`, default zero |
 | Undefined ratio | `zero_division`, default NaN, for precision/sensitivity/specificity and volume ratios |
@@ -70,7 +70,7 @@ widens a tolerance of zero. `tie_rtol=0` reproduces SciPy-based tools (MedPy, De
 surface-distance), which compare in binary64; MONAI compares float32 distances, which counts
 exact ties as the default does.
 
-**Fixed arithmetic (since 0.1.3).** After the exact squared distances, each score is a fixed
+**Fixed arithmetic (since 0.2.0).** After the exact squared distances, each score is a fixed
 sequence of binary64 operations, every one rounded once, so the bits of a score do not depend on
 the CPU's vector instructions, the BLAS or C library, the PyTorch or NumPy version, the number of
 threads or the device. A distance is the correctly rounded square root of the squared distance.
