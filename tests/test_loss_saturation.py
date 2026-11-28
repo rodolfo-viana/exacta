@@ -8,10 +8,8 @@ so that cancellation at ``|z| = 80`` cannot reach the digits compared), from the
 float inputs.
 
 The errors are relative: per element for the gradient, which spans many orders of magnitude within
-one batch, and for the value of losses that are sums of non-negative terms (BCE, focal). The value of
-a Dice or Tversky loss is ``1 - ratio``; it is compared relative to itself too, but only on batches
-where the loss is of order one (a loss of ``1e-18`` next to a ratio of one is below the resolution of
-that subtraction, whatever the sigmoid does).
+one batch, and for the value of every loss (the Dice and Tversky losses are ratios of non-negative sums, not
+``1 - ratio``, see ``test_loss_ratio_saturation.py``).
 """
 
 from __future__ import annotations
@@ -133,7 +131,6 @@ class Spec:
 
     make: Callable[[str], torch.nn.Module]
     terms: tuple
-    floor: float = 0.0  # smallest |value| for which the value is compared relatively (see the module note)
     top32: float = 40.0  # largest |z| in binary32 (focal terms are about exp(-3|z|) there: 1e-26 at 20)
 
 
@@ -151,28 +148,27 @@ SPECS = {
         ((1.0, _ref_focal, {"gamma": 2.0, "alpha": 0.25}),), top32=20.0),
     "dice": Spec(
         lambda b: DiceLoss(activation="sigmoid", target_format="one-hot", backend=b),
-        ((1.0, _ref_overlap, {}),), floor=0.05),
+        ((1.0, _ref_overlap, {}),)),
     "tversky": Spec(
         lambda b: TverskyLoss(alpha=0.3, beta=0.7, activation="sigmoid", target_format="one-hot", backend=b),
-        ((1.0, _ref_overlap, {"tversky": (0.3, 0.7)}),), floor=0.05),
+        ((1.0, _ref_overlap, {"tversky": (0.3, 0.7)}),)),
     "focal_tversky": Spec(
         lambda b: FocalTverskyLoss(gamma=0.75, alpha=0.3, beta=0.7, activation="sigmoid",
                                    target_format="one-hot", backend=b),
-        ((1.0, _ref_overlap, {"tversky": (0.3, 0.7), "gamma": 0.75}),), floor=0.05),
+        ((1.0, _ref_overlap, {"tversky": (0.3, 0.7), "gamma": 0.75}),)),
     "generalized_dice": Spec(
         lambda b: GeneralizedDiceLoss(activation="sigmoid", target_format="one-hot", backend=b),
-        ((1.0, _ref_generalized, {}),), floor=0.05),
+        ((1.0, _ref_generalized, {}),)),
     "dice_bce": Spec(
         lambda b: DiceCELoss(activation="sigmoid", target_format="one-hot", lambda_dice=0.7, lambda_ce=1.3,
                              backend=b),
-        ((0.7, _ref_overlap, {}), (1.3, _ref_bce, {})), floor=0.05),
+        ((0.7, _ref_overlap, {}), (1.3, _ref_bce, {}))),
     "dice_focal": Spec(
         lambda b: DiceFocalLoss(activation="sigmoid", target_format="one-hot", gamma=2.0, alpha=0.25,
                                 lambda_dice=0.7, lambda_focal=1.3, backend=b),
-        ((0.7, _ref_overlap, {}), (1.3, _ref_focal, {"gamma": 2.0, "alpha": 0.25})), floor=0.05),
+        ((0.7, _ref_overlap, {}), (1.3, _ref_focal, {"gamma": 2.0, "alpha": 0.25}))),
 }
 POINTWISE = ("bce", "focal_gamma0", "focal")
-OVERLAP = tuple(name for name in SPECS if name not in POINTWISE)
 
 
 def _reference(spec: Spec, z: torch.Tensor, g: torch.Tensor):
@@ -274,23 +270,15 @@ def test_pointwise_loss_and_gradient_are_relatively_accurate_at_every_logit(name
 @pytest.mark.parametrize("name", list(SPECS))
 def test_batches_with_saturated_logits_are_relatively_accurate(name, backend, dtype, kind, seed):
     z, g = _batch(name, kind, dtype, seed)
-    value_error, grad_error, magnitude = measure(name, backend, dtype, z, g)
+    value_error, grad_error, _ = measure(name, backend, dtype, z, g)
     assert grad_error <= BOUND[backend, dtype], f"gradient: {grad_error:.3g} u"
-    if magnitude >= SPECS[name].floor:  # 1 - ratio is not relative-accurate for tiny losses
-        assert value_error <= BOUND[backend, dtype], f"value: {value_error:.3g} u"
-
-
-def test_overlap_values_are_compared_only_where_one_minus_ratio_has_digits_to_spare():
-    # Guards the 'floor' above: the batches used must not be vacuous for the value check.
-    for name in OVERLAP:
-        for kind, seed in itertools.product(("saturated", "mixed"), (0, 1, 2)):
-            assert measure(name, "torch", torch.float64, *_batch(name, kind, torch.float64, seed))[2] >= SPECS[name].floor
+    assert value_error <= BOUND[backend, dtype], f"value: {value_error:.3g} u"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_perfectly_saturated_overlap_gradient_is_not_lost(backend):
-    # The value is 1 - ratio with ratio rounded to one, but the gradient is a product of
-    # sigma(z) * sigma(-z) and must not vanish: it is about 4e-18 here, and was exactly 0.
+    # The ratio rounds to one, but the gradient is a product of sigma(z) * sigma(-z) and must not vanish:
+    # it is about 4e-18 here, and was exactly 0.
     device = "cuda" if backend == "triton" else "cpu"
     z = torch.tensor([[[40.0, -40.0, 40.0, -40.0]]], dtype=torch.float64, device=device, requires_grad=True)
     g = torch.tensor([[[1.0, 0.0, 1.0, 0.0]]], dtype=torch.float64, device=device)

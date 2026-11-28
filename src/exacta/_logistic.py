@@ -39,6 +39,26 @@ def sigmoid(z: Tensor) -> Tensor:
     return _Sigmoid.apply(z)
 
 
+class _SigmoidPair(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, z: Tensor) -> tuple[Tensor, Tensor]:  # type: ignore[override]
+        ctx.save_for_backward(z)
+        return torch.sigmoid(z), torch.sigmoid(-z)
+
+    @staticmethod
+    def backward(ctx, grad_p: Tensor, grad_q: Tensor) -> Tensor:  # type: ignore[override]
+        (z,) = ctx.saved_tensors
+        # q = 1 - p, so that d q = -d p.
+        return (grad_p - grad_q) * sigmoid(z) * sigmoid(-z)
+
+
+def sigmoid_pair(z: Tensor) -> tuple[Tensor, Tensor]:
+    """``(sigma(z), sigma(-z))``: the probability and its complement ``1 - p``, each accurate at any logit."""
+    if torch.compiler.is_compiling():  # dynamo (PyTorch 2.4) traces the single-output Function, not the pair
+        return sigmoid(z), sigmoid(-z)
+    return _SigmoidPair.apply(z)
+
+
 def _terms(z: Tensor, g: Tensor) -> Tensor:
     # softplus(z) - g z = log1p(exp(-|z|)) + (1 - g) z      for z >= 0
     #                   = log1p(exp(-|z|)) + g |z|          for z < 0

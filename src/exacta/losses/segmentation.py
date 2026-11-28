@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from exacta import _logistic, _triton_losses, _loss_reductions
+from exacta import _logistic, _loss_reductions, _softmax, _triton_losses
 from exacta._distributed import sum_ranks
 from exacta._loss_reductions import EmptyTarget, WeightType, generalized_dice_terms, masked_overlap_terms
 
@@ -134,80 +134,83 @@ class _OverlapLoss(nn.Module):
         input, target, valid = _prepare_masked_input(
             input, target, self.target_format, self.ignore_index, mask,
         )
-        if self.activation == "softmax":
-            probs = input.softmax(1)
-        elif self.activation == "sigmoid":
-            probs = _logistic.sigmoid(input)
+        return self._overlap(input, target, valid)
+
+    def _overlap(self, input: Tensor, target: Tensor, valid: Tensor | None,
+                 nll_sink: list[Tensor] | None = None, labels: Tensor | None = None) -> Tensor:
+        """The loss of prepared (upcast, sanitized) inputs. With softmax and integer labels (``labels``, found by
+        :func:`_label_indices` when not given) ``nll_sink`` receives the per-voxel ``-log p_t`` that the same
+        softmax pass yields (used by :class:`DiceCELoss`)."""
+        if labels is None and self.activation == "softmax" and not self._semimetric():
+            labels = _label_indices(target, input, valid, self.target_format)
+        if labels is not None:
+            # Integer labels (or a one-hot tensor that holds exactly them): the same sums from the label indices,
+            # without a one-hot tensor (see exacta._softmax._IndexOverlap). Background selection and the batch
+            # sum act on the (B, C) sums.
+            *label_stats, nll = _softmax.index_overlap_statistics(
+                input, labels, valid, squared=self._squared_denominator(), with_nll=nll_sink is not None,
+            )
+            stats: Sequence[Tensor] = label_stats
+            if nll_sink is not None:
+                assert nll is not None
+                nll_sink.append(nll)
+            if not self.include_background:
+                if input.shape[1] < 2:
+                    raise ValueError("include_background=False needs at least 2 channels")
+                stats = [x[:, 1:] for x in stats]
+            if self.batch_dice:
+                stats = [x.sum(0) for x in stats]
         else:
-            probs = input
-        onehot = _one_hot(target, input, self.target_format).to(probs.dtype)
-        if valid is not None:
-            probs = torch.where(valid[:, None], probs, 0)
-            onehot = torch.where(valid[:, None], onehot, 0)
-        if not self.include_background:
-            if probs.shape[1] < 2:
-                raise ValueError("include_background=False needs at least 2 channels")
-            probs, onehot = probs[:, 1:], onehot[:, 1:]
-        dims = tuple(range(2, probs.ndim))
-        if self.batch_dice:
-            dims = (0, *dims)
-        if self._semimetric():
-            # Wang et al. (MICCAI 2023): TP = (Σp + Σg - Σ|p - g|) / 2 equals Σp·g for hard
-            # labels, and makes every overlap ratio maximal exactly at p = g for soft labels.
-            prediction, truth = probs.sum(dims), onehot.sum(dims)
-            intersection = (prediction + truth - (probs - onehot).abs().sum(dims)) / 2
-        else:
-            intersection = (probs * onehot).sum(dims)
-        weights = self._tversky_weights()
+            probs, complement = _activate(self.activation, input)
+            onehot = _one_hot(target, input, self.target_format).to(probs.dtype)
+            if valid is not None:
+                probs = torch.where(valid[:, None], probs, 0)
+                complement = torch.where(valid[:, None], complement, 0)
+                onehot = torch.where(valid[:, None], onehot, 0)
+            if not self.include_background:
+                if probs.shape[1] < 2:
+                    raise ValueError("include_background=False needs at least 2 channels")
+                probs, complement, onehot = probs[:, 1:], complement[:, 1:], onehot[:, 1:]
+            dims = tuple(range(2, probs.ndim))
+            if self.batch_dice:
+                dims = (0, *dims)
+            stats = _overlap_statistics(
+                probs, complement, onehot, dims, semimetric=self._semimetric(),
+                squared=self._squared_denominator(),
+            )
         valid_counts = None if valid is None else valid.flatten(1).sum(1)
         if valid_counts is not None and self.batch_dice:
             valid_counts = valid_counts.sum()
-        if weights is not None:
-            alpha, beta = weights
-            if self._semimetric():
-                fp, fn = prediction - intersection, truth - intersection
-            else:
-                fp = (probs * (1 - onehot)).sum(dims)
-                fn = ((1 - probs) * onehot).sum(dims)
-            if self.distributed:
-                intersection, fp, fn, valid_counts = _global_overlap(intersection, fp, fn, valid_counts, input)
-            if self.average == "micro":
-                intersection, fp, fn = (intersection.sum(-1, keepdim=True), fp.sum(-1, keepdim=True),
-                                        fn.sum(-1, keepdim=True))
-            numerator = intersection + self.smooth if self.smooth_numerator else intersection
-            denominator = intersection + alpha * fp + beta * fn + self.smooth
-            if self.skip_absent:
-                return _present_mean(numerator, denominator, intersection + fn > 0, valid_counts,
-                                     power=self._overlap_power()).to(input.dtype)
-            if self.zero_absent:
-                numerator, denominator = _zero_absent(numerator, denominator, intersection + fn)
-            return _overlap_mean(numerator, denominator, valid_counts,
-                                 power=self._overlap_power()).to(input.dtype)
-        if self._squared_denominator():
-            prediction, truth = probs.square().sum(dims), onehot.square().sum(dims)
-        elif not self._semimetric():
-            prediction, truth = probs.sum(dims), onehot.sum(dims)
         if self.distributed:
-            intersection, prediction, truth, valid_counts = _global_overlap(
-                intersection, prediction, truth, valid_counts, input,
-            )
+            stats, valid_counts = _global_overlap(stats, valid_counts, input)
+        intersection, fp, fn, truth = stats
         generalized = self._generalized_config()
         if generalized is not None:
-            numerator, denominator, _ = generalized_dice_terms(
-                intersection, prediction, truth, weight_type=generalized[0],
+            error, numerator, _ = generalized_dice_terms(
+                intersection, fp + fn, truth, weight_type=generalized[0],
                 empty_target=generalized[1], smooth=self.smooth,
             )
-            return _overlap_mean(numerator, denominator, valid_counts).to(input.dtype)
+            return _overlap_mean(error, numerator, valid_counts).to(input.dtype)
         if self.average == "micro":
-            intersection, prediction, truth = (intersection.sum(-1, keepdim=True), prediction.sum(-1, keepdim=True),
-                                               truth.sum(-1, keepdim=True))
-        numerator = 2 * intersection + self.smooth if self.smooth_numerator else 2 * intersection
-        denominator = prediction + truth + self.smooth
+            intersection, fp, fn, truth = [x.sum(-1, keepdim=True) for x in (intersection, fp, fn, truth)]
+        weights = self._tversky_weights()
+        if weights is None:
+            error, numerator = fp + fn, 2 * intersection
+        else:
+            error, numerator = weights[0] * fp + weights[1] * fn, intersection
+        # With ratio = (numerator + smooth) / (numerator + error + smooth), the loss 1 - ratio is
+        # error / (numerator + error + smooth), a quotient of non-negative sums. With smooth_numerator=False
+        # the ratio is numerator / (numerator + error + smooth) and the loss (error + smooth) / (...).
+        if self.smooth_numerator:
+            numerator = numerator + self.smooth
+        else:
+            error = error + self.smooth
         if self.skip_absent:
-            return _present_mean(numerator, denominator, truth > 0, valid_counts).to(input.dtype)
+            return _present_mean(error, numerator, truth > 0, valid_counts,
+                                 power=self._overlap_power()).to(input.dtype)
         if self.zero_absent:
-            numerator, denominator = _zero_absent(numerator, denominator, truth)
-        return _overlap_mean(numerator, denominator, valid_counts).to(input.dtype)
+            error, numerator = _zero_absent(error, numerator, truth)
+        return _overlap_mean(error, numerator, valid_counts, power=self._overlap_power()).to(input.dtype)
 
     def _fused(
         self, input: Tensor, target: Tensor, *, lambda_dice: float, lambda_ce: float, cross_entropy: bool,
@@ -243,6 +246,15 @@ class _OverlapLoss(nn.Module):
 
 class DiceLoss(_OverlapLoss):
     """Soft Dice loss ``1 - (2 Σ p·g + smooth) / (Σ p + Σ g + smooth)``.
+
+    The loss is computed as a ratio of non-negative sums, ``(Σ p·(1-g) + Σ (1-p)·g) / (Σ p + Σ g + smooth)``,
+    the same quantity: ``Σ p + Σ g - 2 Σ p·g = FP + FN`` and the smoothing cancels in ``1 - ratio``. Subtracting
+    the ratio from one has only absolute accuracy (it is 0 below about ``1e-16``, however good the prediction),
+    where the sums keep their relative accuracy, and ``1 - p`` is formed without cancellation from the logits
+    (as the sum of the other softmax probabilities, or ``sigmoid(-z)``), so that values and gradients stay
+    accurate at saturated logits. With ``squared_pred=True`` the numerator is ``Σ (p - g)²``
+    (``Σ p² + Σ g² - 2 Σ p·g``), with ``p - g`` formed as ``p·(1-g) - (1-p)·g``. With ``smooth_numerator=False``
+    the numerator of the loss is ``FP + FN + smooth``.
 
     Sums cover spatial dimensions and optionally the batch (``batch_dice=True``); the result
     is averaged over remaining cases and classes. ``include_background=False`` excludes
@@ -335,6 +347,8 @@ class TverskyLoss(_OverlapLoss):
     reductions follow :class:`DiceLoss`. ``soft_label=True`` uses the semimetric
     ``TP = (Σ p + Σ g - Σ |p - g|) / 2`` with ``FP = Σ p - TP`` and ``FN = Σ g - TP`` (see
     :class:`DiceLoss`), whose index is maximal exactly at ``p = g`` when both weights are positive.
+    The loss is computed as ``(alpha·FP + beta·FN) / (TP + alpha·FP + beta·FN + smooth)``, the same quantity
+    as ``1 - (TP + smooth) / (TP + alpha·FP + beta·FN + smooth)`` without subtracting nearly equal numbers.
 
     ``average="micro"`` sums TP, FP and FN over the selected classes before the ratio,
     ``skip_absent=True`` averages only over the classes present in each case's target and
@@ -380,6 +394,7 @@ class TverskyLoss(_OverlapLoss):
 class FocalTverskyLoss(TverskyLoss):
     """Mean of ``(1 - TverskyIndex)**gamma`` over selected cases/classes.
 
+    ``(1 - TverskyIndex)`` is formed as the ratio of non-negative sums of :class:`TverskyLoss`.
     ``gamma`` is the actual exponent (default 0.75, as in the authors' code),
     not its reciprocal. ``gamma=1`` equals TverskyLoss, including its gradient.
     For gamma != 1, an exactly perfect prediction has zero gradient, including
@@ -409,7 +424,7 @@ class GeneralizedDiceLoss(_OverlapLoss):
     """Class-volume-weighted Dice following Sudre et al. (2017).
 
     ``1 - (2 Σ_c w_c Σ p_c*g_c + smooth) / (Σ_c w_c Σ (p_c+g_c) + smooth)``,
-    averaged over cases. ``weight_type="square"`` (default) uses inverse squared target
+    computed as ``Σ_c w_c (FP_c + FN_c) / (Σ_c w_c Σ (p_c+g_c) + smooth)``, averaged over cases. ``weight_type="square"`` (default) uses inverse squared target
     volume; ``"simple"`` uses inverse volume and ``"uniform"`` uses unit weights.
     This is a ratio of class-weighted sums, unlike DiceLoss's mean of classwise ratios.
     With ``batch_dice=True``, accumulate volumes over the batch before computing weights
@@ -472,6 +487,9 @@ class FocalLoss(nn.Module):
     a scalar in [0, 1] weights positive sigmoid labels by alpha and negatives by 1-alpha.
     For softmax it weights background (channel 0) by 1-alpha and each foreground class by
     alpha. Every channel participates. With ``gamma=0, alpha=None`` this is ordinary CE/BCE.
+    The softmax terms are products of non-negative factors, ``w·g·(1-p)**gamma·(-log p)``, with
+    ``1-p`` the sum of the other probabilities and ``-log p`` a sum of non-negative terms, so that they
+    and their gradients keep their relative accuracy where ``p`` rounds to one.
     Target formats, masking and backends follow :class:`DiceLoss`. With exclusions, average
     over included voxels (and channels for sigmoid); fully ignored batches return zero.
     ``distributed=True`` sums the numerator and denominator over the default process
@@ -517,16 +535,11 @@ class FocalLoss(nn.Module):
         )
         truth = _one_hot(target, input, self.target_format).to(input.dtype)
         if self.activation == "softmax":
-            logp = input.log_softmax(1)
-            if self.gamma == 0:
-                modulation = torch.ones_like(logp)
-            else:
-                complement = -logp.expm1()
-                # At rounded p=1, the positive-gamma loss and its gradient are both zero.
-                # Avoid the undefined derivative of 0**gamma for fractional gamma < 1.
-                safe = torch.where(complement > 0, complement, 1)
-                modulation = torch.where(complement > 0, safe.pow(self.gamma), 0)
-            terms = -truth * modulation * logp
+            # -log p and 1 - p, each accurate where p rounds to 1: the term is a product of non-negative
+            # factors, -w g (1-p)**gamma log p = w g (1-p)**gamma nll, with no cancellation anywhere.
+            _, complement, nll = _softmax.softmax_stats(input)
+            modulation = _power(complement, self.gamma)
+            terms = truth * modulation * nll
             if self.alpha is not None:
                 weights = torch.where(
                     torch.arange(input.shape[1], device=input.device) == 0,
@@ -538,8 +551,8 @@ class FocalLoss(nn.Module):
         # saturation; exp(gamma * log) would lose gamma * |log| * u, about 2e-14 at |z| = 80 and gamma = 2.
         pos = F.logsigmoid(input)
         neg = F.logsigmoid(-input)
-        positive = -truth * _sigmoid_power(_logistic.sigmoid(-input), self.gamma) * pos
-        negative = -(1 - truth) * _sigmoid_power(_logistic.sigmoid(input), self.gamma) * neg
+        positive = -truth * _power(_logistic.sigmoid(-input), self.gamma) * pos
+        negative = -(1 - truth) * _power(_logistic.sigmoid(input), self.gamma) * neg
         if self.alpha is not None:
             positive, negative = self.alpha * positive, (1 - self.alpha) * negative
         return _voxel_mean(positive + negative, valid, channels=input.shape[1], distributed=self.distributed)
@@ -555,7 +568,10 @@ class DiceCELoss(nn.Module):
     Dice. Softmax index targets normalize by the sum of included target weights,
     matching PyTorch CE. Soft targets normalize by voxel count; sigmoid weights
     both positive and negative terms and normalizes by voxel count times channels.
-    Zero total target weight returns zero CE. Other arguments as in :class:`DiceLoss`;
+    Zero total target weight returns zero CE. The softmax cross-entropy is ``log1p(Σ_{j≠t} exp(z_j - z_t))``
+    where ``z_t`` is the maximum logit (``(max - z_t) + log1p(Σ_{j≠max} exp(z_j - max))`` otherwise), with gradient
+    ``p_i·Σ_{j≠i} g_j - g_i·(1 - p_i)`` and ``1 - p_i`` the sum of the other probabilities: relatively accurate
+    where ``p_t`` rounds to one. Other arguments as in :class:`DiceLoss`;
     ``soft_label`` changes only the Dice term (CE is already minimal at ``p = g``).
     """
 
@@ -615,12 +631,45 @@ class DiceCELoss(nn.Module):
                 input, target, mask=mask, lambda_dice=self.lambda_dice, lambda_ce=self.lambda_ce,
                 cross_entropy=self.lambda_ce != 0, class_weight=weight, focal=self._focal_config(),
             )
+        if self._shares_softmax():
+            # One softmax, one sum of the other probabilities and one backward pass serve both terms.
+            prepared, labels_or_onehot, valid = _prepare_masked_input(
+                input, target, self.dice.target_format, self.dice.ignore_index, mask,
+            )
+            labels = _label_indices(labels_or_onehot, prepared, valid, self.dice.target_format)
+            if labels is not None:
+                nll: list[Tensor] = []
+                shared_dice = self.dice._overlap(prepared, labels_or_onehot, valid, nll, labels)
+                shared_ce = self._label_cross_entropy(nll[0], labels, valid, weight)
+                return self.lambda_dice * shared_dice + self.lambda_ce * shared_ce
         dice = self.dice(input, target, mask=mask) if self.lambda_dice else None
         if not self.lambda_ce:
             assert dice is not None
             return self.lambda_dice * dice
         ce = self._pointwise(input, target, mask, weight)
         return self.lambda_ce * ce if dice is None else self.lambda_dice * dice + self.lambda_ce * ce
+
+    def _shares_softmax(self) -> bool:
+        """Whether the Dice and cross-entropy terms may read one softmax: softmax over integer (or hard one-hot)
+        labels, both terms present, and the ordinary cross-entropy (not :class:`DiceFocalLoss`'s)."""
+        return (self.lambda_dice != 0 and self.lambda_ce != 0 and self.dice.activation == "softmax"
+                and not self.dice._semimetric() and type(self)._pointwise is DiceCELoss._pointwise)
+
+    def _label_cross_entropy(self, ce: Tensor, labels: Tensor, valid: Tensor | None, weight: Tensor | None) -> Tensor:
+        """Reduce the per-voxel ``-log p_t`` of the labels ``t`` as ``F.cross_entropy`` would: for index targets the
+        mean over voxels, over the included voxels, or over the target weights; for a (hard) one-hot target, which
+        PyTorch treats as class probabilities, the weighted terms are averaged over voxels."""
+        if weight is not None:
+            target_weights = weight[labels]
+            ce = ce * target_weights
+            if self.dice.target_format == "index":
+                if valid is not None:
+                    target_weights = torch.where(valid, target_weights, 0)
+                    ce = torch.where(valid, ce, 0)
+                return _sum_mean(ce.sum(), target_weights.sum(), self.dice.distributed)
+        if valid is None and not self.dice.distributed:
+            return ce.mean()
+        return _voxel_mean(ce, valid, channels=1, distributed=self.dice.distributed)
 
     def _pointwise(self, input: Tensor, target: Tensor, mask: Tensor | None, weight: Tensor | None) -> Tensor:
         input, target, valid = _prepare_masked_input(
@@ -639,17 +688,19 @@ class DiceCELoss(nn.Module):
                 ce = ce.mean()
         elif self.dice.target_format == "index":
             _check_index_target(target, input)
-            ce = F.cross_entropy(input, target.long(), weight=weight, reduction=reduction)
-            if weight is not None:
-                target_weights = weight[target.long()]
-                if valid is not None:
-                    target_weights = torch.where(valid, target_weights, 0)
-                    ce = torch.where(valid, ce, 0)
-                denominator = target_weights.sum()
-                return _sum_mean(ce.sum(), denominator, self.dice.distributed)
+            # -log p_t as log1p of the other probabilities' ratio to the largest, accurate where p_t rounds to 1,
+            # with the gradient p - onehot formed as (1 - p_t) and p_i, never as p_t - 1.
+            return self._label_cross_entropy(_softmax.cross_entropy_index(input, target), target, valid, weight)
+        elif (labels := _label_indices(target, input, valid, "one-hot")) is not None:
+            return self._label_cross_entropy(_softmax.cross_entropy_index(input, labels), labels, valid, weight)
         else:
-            ce = F.cross_entropy(input, _one_hot(target, input, "one-hot").to(input.dtype),
-                                 weight=weight, reduction=reduction)
+            nll = _softmax.neg_log_softmax(input)
+            soft = _one_hot(target, input, "one-hot").to(input.dtype)
+            if weight is not None:
+                soft = soft * weight.reshape(1, -1, *([1] * (input.ndim - 2)))
+            ce = torch.where(soft != 0, soft * nll, 0).sum(1)
+            if reduction == "mean":
+                ce = ce.mean()
         if reduction == "none":
             ce = _voxel_mean(ce, valid, channels=input.shape[1] if self.dice.activation == "sigmoid" else 1,
                              distributed=self.dice.distributed)
@@ -717,7 +768,25 @@ class DiceFocalLoss(DiceCELoss):
         return self.focal(input, target, mask=mask)
 
 
-def _sigmoid_power(probability: Tensor, gamma: float) -> Tensor:
+class _Power(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, probability: Tensor, gamma: float) -> Tensor:  # type: ignore[override]
+        ctx.save_for_backward(probability)
+        ctx.gamma = gamma
+        positive = probability > 0
+        return torch.where(positive, torch.where(positive, probability, 1).pow(gamma), 0)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor) -> tuple[Tensor, None]:  # type: ignore[override]
+        (probability,) = ctx.saved_tensors
+        positive = probability > 0
+        safe = torch.where(positive, probability, 1)
+        # gamma x**(gamma-1) grad as gamma x**gamma (grad / x): where grad is a small multiple of x (the
+        # focal terms multiply by -log p, about 1 - p), x**(gamma-1) alone overflows for 0 < gamma < 1.
+        return torch.where(positive, ctx.gamma * safe.pow(ctx.gamma) * (grad / safe), 0), None
+
+
+def _power(probability: Tensor, gamma: float) -> Tensor:
     """``probability ** gamma``, zero (with zero gradient) where the probability has underflowed to 0.
 
     A direct power keeps the relative accuracy of the probability, and the guard keeps the loss and its
@@ -725,8 +794,10 @@ def _sigmoid_power(probability: Tensor, gamma: float) -> Tensor:
     """
     if gamma == 0:
         return torch.ones_like(probability)
-    positive = probability > 0
-    return torch.where(positive, torch.where(positive, probability, 1).pow(gamma), 0)
+    if torch.compiler.is_compiling():  # a Function with a float argument and its own ctx attribute: not for dynamo
+        positive = probability > 0
+        return torch.where(positive, torch.where(positive, probability, 1).pow(gamma), 0)
+    return _Power.apply(probability, gamma)
 
 
 def _check_lambdas(overlap: float, pointwise: float) -> None:
@@ -745,51 +816,111 @@ def _class_weight(value: Tensor | Sequence[float] | None) -> Tensor | None:
     return weight
 
 
-def _overlap_mean(numerator: Tensor, denominator: Tensor, valid_counts: Tensor | None,
+def _label_indices(target: Tensor, input: Tensor, valid: Tensor | None, target_format: TargetFormat) -> Tensor | None:
+    """The integer labels ``(B, *spatial)`` of a prepared softmax target, or None when it holds none.
+
+    An index target is its own labels. A one-hot tensor qualifies when every included voxel holds exactly one 1
+    and zeros, and every excluded voxel (``valid`` False, zeroed by the preparation) holds zeros: then the sums
+    over ``p * g`` and ``(1 - p) * g`` are those over the label entries, which :class:`exacta._softmax._IndexOverlap`
+    forms without the one-hot tensor. The check is ``max == sum == (1 or valid)`` along the classes and a
+    nonnegative minimum (with a nonnegative tensor whose maximum equals its sum, the other entries are zero): one
+    ``max(1)`` (the labels), one ``sum(1)``, one global minimum, two comparisons of voxel-sized tensors and one
+    host synchronisation for the verdict. Soft labels, targets that require gradients and compiled code (the
+    verdict is data dependent) take the generic composition.
+    """
+    if target_format == "index":
+        _check_index_target(target, input)
+        return target
+    _one_hot(target, input, target_format)  # shape and device validation
+    if target.requires_grad or torch.compiler.is_compiling() or not target.numel():
+        return None
+    hard = target.to(torch.uint8) if target.dtype == torch.bool else target
+    top, labels = hard.max(1)
+    total = hard.sum(1)
+    expected = 1 if valid is None else valid
+    verdict = ((top == total) & (top == expected)).all() & (hard.amin() >= 0)
+    return labels if bool(verdict) else None
+
+
+def _activate(activation: Activation, input: Tensor) -> tuple[Tensor, Tensor]:
+    """The probabilities and their complements ``1 - p``, the latter formed without subtracting from one
+    (see :mod:`exacta._softmax` and :mod:`exacta._logistic`), so that both stay accurate at saturated logits."""
+    if activation == "softmax":
+        return _softmax.softmax_pair(input)
+    if activation == "sigmoid":
+        return _logistic.sigmoid_pair(input)
+    return input, 1 - input
+
+
+def _overlap_statistics(
+    probs: Tensor, complement: Tensor, onehot: Tensor, dims: tuple[int, ...], *, semimetric: bool, squared: bool,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Per-class ``(TP, FP, FN, target mass)``, each a sum of non-negative terms.
+
+    ``TP = Σ p·g``, ``FP = Σ p·(1-g)``, ``FN = Σ (1-p)·g = Σ q·g`` and ``Σ g``, with ``q`` the complement
+    of ``p`` formed without cancellation. ``Σ p + Σ g = 2 TP + FP + FN``, so every overlap ratio of
+    ``Σ p``, ``Σ g`` and ``TP`` is a ratio of sums of non-negative terms. With ``squared`` (the squared
+    denominator of :class:`DiceLoss`) ``FP`` holds ``Σ (p - g)**2 = Σ p² + Σ g² - 2 Σ p·g`` and ``FN`` is
+    zero. With ``semimetric`` (``soft_label=True``) ``TP = Σ min(p, g)``, ``FP = Σ max(p - g, 0)`` and
+    ``FN = Σ max(g - p, 0)``, which equal ``(Σ p + Σ g - Σ |p - g|) / 2``, ``Σ p - TP`` and ``Σ g - TP``.
+    ``p - g`` is formed as ``p·(1-g) - q·g``, so that it does not vanish where ``p`` rounds to ``g``.
+    """
+    truth = onehot.sum(dims)
+    if semimetric:
+        gap = (1 - onehot) * probs - onehot * complement
+        return torch.minimum(probs, onehot).sum(dims), gap.relu().sum(dims), (-gap).relu().sum(dims), truth
+    intersection = (probs * onehot).sum(dims)
+    if squared:
+        gap = (1 - onehot) * probs - onehot * complement
+        return intersection, gap.square().sum(dims), torch.zeros_like(intersection), truth
+    return intersection, (probs * (1 - onehot)).sum(dims), (complement * onehot).sum(dims), truth
+
+
+def _overlap_mean(error: Tensor, numerator: Tensor, valid_counts: Tensor | None,
                   *, power: float = 1.0) -> Tensor:
+    """Mean of ``(error / (numerator + error))**power``: the loss ``1 - ratio`` of ``ratio =
+    numerator / (numerator + error)``, formed as a ratio of non-negative sums."""
     if valid_counts is None:
-        if power == 1:
-            return 1 - (numerator / denominator).mean()
-        return _loss_reductions.overlap_power(1 - numerator / denominator, power).mean()
-    numerator, denominator, scale = masked_overlap_terms(numerator, denominator, valid_counts)
-    return (_loss_reductions.overlap_power(1 - numerator / denominator, power) * scale).sum()
+        return _loss_reductions.overlap_power(_loss_reductions.error_ratio(error, numerator), power).mean()
+    error, numerator, scale = masked_overlap_terms(error, numerator, valid_counts)
+    return (_loss_reductions.overlap_power(_loss_reductions.error_ratio(error, numerator), power) * scale).sum()
 
 
-def _present_mean(numerator: Tensor, denominator: Tensor, present: Tensor, valid_counts: Tensor | None,
+def _present_mean(error: Tensor, numerator: Tensor, present: Tensor, valid_counts: Tensor | None,
                   *, power: float = 1.0) -> Tensor:
     """Mean over the classes present in each case's target, then over cases.
 
     A case with no present class has loss one and zero gradient, and keeps its place in the mean
-    unless it is entirely ignored, which omits it as in every overlap average. The ratio of an
-    absent class is replaced before the division, so that it cannot leak NaN into the gradient.
+    unless it is entirely ignored, which omits it as in every overlap average. The error of an absent
+    class is replaced before the division, so that it cannot leak NaN into the gradient.
     """
+    error = torch.where(present, error, 0)
     numerator = torch.where(present, numerator, 1)
-    denominator = torch.where(present, denominator, 1)
     count = present.sum(-1)
-    error = _loss_reductions.overlap_power(1 - numerator / denominator, power)
-    per_case = torch.where(count > 0, (error * present).sum(-1) / count.clamp_min(1), 1)
+    loss = _loss_reductions.overlap_power(_loss_reductions.error_ratio(error, numerator), power)
+    per_case = torch.where(count > 0, (loss * present).sum(-1) / count.clamp_min(1), 1)
     if valid_counts is None:
         return per_case.mean()
     active = valid_counts > 0
     return (per_case * (active.to(per_case.dtype) / active.sum().clamp_min(1))).sum()
 
 
-def _zero_absent(numerator: Tensor, denominator: Tensor, truth: Tensor) -> tuple[Tensor, Tensor]:
-    """Ratio 1 (loss and gradient 0) for terms whose target is empty; they stay in the mean."""
+def _zero_absent(error: Tensor, numerator: Tensor, truth: Tensor) -> tuple[Tensor, Tensor]:
+    """Loss 0 (and gradient 0) for terms whose target is empty; they stay in the mean."""
     absent = truth == 0
     one = torch.ones((), dtype=numerator.dtype, device=numerator.device)
-    return torch.where(absent, one, numerator), torch.where(absent, one, denominator)
+    return torch.where(absent, 0, error), torch.where(absent, one, numerator)
 
 
 def _global_overlap(
-    intersection: Tensor, prediction: Tensor, truth: Tensor, count: Tensor | None, input: Tensor,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    stats: Sequence[Tensor], count: Tensor | None, input: Tensor,
+) -> tuple[tuple[Tensor, ...], Tensor]:
+    """Sum the per-class statistics (and the voxel count) over the ranks, in float64."""
     count = (torch.tensor(input.numel() // input.shape[1], device=input.device, dtype=torch.float64)
              if count is None else count.double())
-    packed = torch.cat((intersection.double(), prediction.double(), truth.double(), count.reshape(1)))
-    packed = sum_ranks(packed)
-    classes = intersection.numel()
-    return packed[:classes], packed[classes:2*classes], packed[2*classes:3*classes], packed[-1]
+    packed = sum_ranks(torch.cat((*(s.double() for s in stats), count.reshape(1))))
+    classes = stats[0].numel()
+    return tuple(packed[k * classes:(k + 1) * classes] for k in range(len(stats))), packed[-1]
 
 
 def _sum_mean(numerator: Tensor, denominator: Tensor, distributed: bool) -> Tensor:

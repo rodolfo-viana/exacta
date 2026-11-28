@@ -3,17 +3,30 @@
 The PyTorch implementation in :mod:`exacta.losses.segmentation` materialises the activation, the
 one-hot target and their product, and autograd keeps them for the backward pass: several times
 the memory of the logits. Here the forward pass reads logits and target once and accumulates,
-for every case and class, ``Σ p·g``, ``Σ p``, ``Σ g`` and the cross-entropy; the backward pass
-reads them again, recomputes the activation and writes the gradient from a closed form:
+for every case and class, ``TP = Σ p·g``, ``FP = Σ p·(1-g)``, ``FN = Σ q·g``, ``Σ g`` and the
+cross-entropy, with ``q = 1 - p`` formed without cancellation (see below); the backward pass reads
+them again, recomputes the activation and writes the gradient from a closed form. Every overlap loss
+is a ratio of non-negative sums, ``L = E / D`` with ``D = N + E``, so that nothing subtracts nearly
+equal quantities (``1 - N/D`` has only absolute accuracy):
 
-    Dice:   dL/dp = -A·g + B per (case, class), with A = 2 / (E·D) and B = (2I + s) / (E·D²),
-            where D = Σp + Σg + s, I = Σ p·g and E is the number of averaged entries.
-    Tversky: A = [D - (1-alpha-beta)·N] / (E·D²), B = alpha·N / (E·D²),
-             where N=I+s and D=I+alpha·FP+beta·FN+s. FP/FN are accumulated directly.
-    Generalized Dice: A_c = 2·w_c / (E·D), B_c = w_c·N / (E·D²), where the numerator
-                      N and denominator D are class-weighted sums and E counts cases.
-    softmax CE:  dL/dz = (p·Σg - g) / (cases·voxels)
+    Dice:    N = 2·TP + s, E = FP + FN (squared: E = Σ (p - g)²),
+    Tversky: N = TP + s,   E = alpha·FP + beta·FN,
+    Generalized Dice: N = 2 Σ_c w_c TP_c + s, E = Σ_c w_c (FP_c + FN_c),
+
+and, with ``dL/dE = N/D²`` and ``dL/dN = -E/D²``,
+
+    dL/dp = [(1-g)·A - g·B] / D² for per-class constants A, B, summed over the E averaged entries:
+        Dice: A = N, B = N + 2E; Tversky: A = alpha·N, B = beta·N + E; weighted by w_c for generalized Dice;
+        squared Dice: dL/dp = 2 [(1-g)·N·p - g·(N·q + E)] / D², since p - g = (1-g)·p - g·q.
+    softmax CE:  dL/dz_i = -wg_i·q_i + p_i·Σ_{j≠i} wg_j      (wg = class weight · g), over cases·voxels
     sigmoid BCE: dL/dz = ((1-g)·p - g·q) / (cases·classes·voxels), with p = sigmoid(z), q = sigmoid(-z)
+
+The softmax is differentiated as ``dz_i = q_i·v_i - p_i·Σ_{j≠i} v_j`` with ``v_j = p_j dL/dp_j + r_j``,
+``r_j = dL/d(log p_j)`` of the cross-entropy or focal terms, which never forms ``1 - p_i`` or ``p_i - 1``.
+The complement ``q_i`` and the sum over ``j != i`` use the sum over the classes other than the one above
+one half (at most one class exceeds it) instead of subtracting from one or from the total, and the
+log-normalizer is ``log1p`` of the sum of ``exp(z_j - max)`` over the classes other than one maximal
+class, so that ``-log p_c`` is a sum of two non-negative terms (see :mod:`exacta._softmax`).
 
 Each block of voxels writes its own partial sums, which are then reduced with ``torch.sum``, so
 results do not depend on scheduling (atomic adds would). Half-precision logits are read as they
@@ -25,13 +38,15 @@ gradient penalties) raises rather than silently dropping the second-order term. 
 flow into the target; the loss modules use the PyTorch path when the target requires them.
 
 Focal loss uses a separate pointwise reduction, sharing the activation/target loader. Its
-softmax derivative uses q=dL/d(log p), then dL/dz=q-p·Σq; sigmoid differentiates the positive
-and negative focal terms separately. Stable log probabilities avoid log(0) for finite logits.
+softmax derivative uses r = dL/d(log p), then the softmax product above; sigmoid differentiates the
+positive and negative focal terms separately. Stable log probabilities avoid log(0) for finite logits.
 
-The sigmoid forms never subtract from one: where p rounds to 1, 1-p and p·(1-p) are 0 although
-q = sigmoid(-z) and p·q are not (4.2e-18 at z = 40). The derivative of the sigmoid is p·q, the
-gradient of the cross-entropy is (1-g)·p - g·q and the cross-entropy is a sum of non-negative terms,
-so their relative error stays a few roundoffs at any finite logit, in float32 and float64.
+The forms never subtract from one: where p rounds to 1, 1-p and p·(1-p) are 0 although q = 1 - p
+(the sum of the other softmax probabilities, or sigmoid(-z)) and p·q are not (4.2e-18 at z = 40).
+The derivative of the sigmoid is p·q, the gradient of the cross-entropy is (1-g)·p - g·q (sigmoid) or
+-wg_i·q_i + p_i·Σ_{j≠i} wg_j (softmax), the cross-entropies are sums of non-negative terms and the
+overlap losses are ratios of non-negative sums, so their relative error stays a few roundoffs at any
+finite logit, in float32 and float64.
 """
 
 from __future__ import annotations
@@ -109,7 +124,7 @@ class _SegLoss(torch.autograd.Function):
         batch, classes, voxels, c_pad, block = _layout(logits)
         compute = torch.float64 if logits.dtype == torch.float64 else torch.float32
         blocks = triton.cdiv(voxels, block)
-        rows = 6 if masked else 5
+        rows = 7 if masked else 6
         partial = torch.empty((batch, blocks, rows, c_pad), dtype=compute, device=logits.device)
         with torch.cuda.device(logits.device):  # Triton launches on the current device
             if batch and blocks:
@@ -117,7 +132,7 @@ class _SegLoss(torch.autograd.Function):
                     logits, target, mask if mask is not None else target,
                     class_weight if class_weight is not None else target, partial, voxels, classes, blocks,
                     ACT=ACTIVATIONS[activation], ONE_HOT=one_hot, C_PAD=c_pad, BLOCK=block,
-                    TVERSKY=tversky is not None, CE=ce, HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
+                    CE=ce, HAS_MASK=mask is not None, IGNORE_INDEX=ignore_index,
                     WEIGHTED=class_weight is not None, FOCAL=focal is not None,
                     GAMMA=focal[0] if focal else 0.0, ALPHA=focal[1] if focal else None,
                     COUNTS=masked, SQUARED=squared_pred,
@@ -126,47 +141,45 @@ class _SegLoss(torch.autograd.Function):
         sums = partial.sum(1, dtype=torch.float64)
         if distributed:
             sums = sum_ranks(sums.sum(0)).unsqueeze(0)
-        inter, prob, truth, ce_terms = (sums[:, r, :classes] for r in range(4))
-        invalid = sums[:, 4, 0].sum()  # class indices out of range
+        inter, fp, fn, truth, ce_terms = (sums[:, r, :classes] for r in range(5))
+        invalid = sums[:, 5, 0].sum()  # class indices out of range
         if masked and not one_hot and not torch.compiler.is_compiling():
             _raise_invalid_indices(invalid, classes)
-        valid_counts = sums[:, 5, 0] if masked else None
+        valid_counts = sums[:, 6, 0] if masked else None
         weighted_count = ((truth * class_weight).sum() if class_weight is not None
                           and activation == "softmax" and not one_hot else None)
 
         first = 0 if include_background or lambda_dice == 0 else 1
-        inter, prob, truth = inter[:, first:], prob[:, first:], truth[:, first:]
+        inter, fp, fn, truth = inter[:, first:], fp[:, first:], fn[:, first:], truth[:, first:]
         if batch_dice:
-            inter, prob, truth = inter.sum(0), prob.sum(0), truth.sum(0)
+            inter, fp, fn, truth = inter.sum(0), fp.sum(0), fn.sum(0), truth.sum(0)
+        # The loss of every (case, class) is err / (num + err), a ratio of sums of non-negative terms.
         if generalized is not None:
-            num, den, weights = generalized_dice_terms(
-                inter, prob, truth, weight_type=generalized[0], empty_target=generalized[1],
+            err, num, weights = generalized_dice_terms(
+                inter, fp + fn, truth, weight_type=generalized[0], empty_target=generalized[1],
                 smooth=smooth,
             )
         elif tversky is None:
-            den = prob + truth + smooth
+            err = fp + fn  # squared: fp holds Σ (p - g)² and fn is zero
             num = 2 * inter + smooth
         else:
             alpha, beta = tversky
-            # Rows named prob/truth hold FP/FN for Tversky, accumulated directly to avoid
-            # cancellation from subtracting almost equal sums near a perfect prediction.
-            den = inter + alpha * prob + beta * truth + smooth
+            err = alpha * fp + beta * fn
             num = inter + smooth
         if lambda_dice == 0:
-            num, den = torch.zeros_like(num), torch.ones_like(den)
+            err, num = torch.zeros_like(num), torch.ones_like(num)
             scale = 0.0
             loss = torch.zeros((), dtype=torch.float64, device=logits.device)
         elif valid_counts is not None:
-            num, den, scale = masked_overlap_terms(
-                num, den, valid_counts.sum() if batch_dice else valid_counts,
+            err, num, scale = masked_overlap_terms(
+                err, num, valid_counts.sum() if batch_dice else valid_counts,
             )
-            loss = lambda_dice * (overlap_power(1 - num / den, power) * scale).sum()
+            loss = lambda_dice * (overlap_power(err / (num + err), power) * scale).sum()
         else:
             scale = 1 / num.numel()
-            loss = lambda_dice * ((1 - (num / den).mean()) if power == 1 else
-                                  overlap_power(1 - num / den, power).mean())
+            loss = lambda_dice * overlap_power(err / (num + err), power).mean()
         if power != 1:
-            error = 1 - num / den
+            error = err / (num + err)
             factor = power * torch.where(error == 0, 1, error).pow(power - 1)
             scale = scale * torch.where(error == 0, 0, factor)
         ce_scale = torch.zeros((), dtype=torch.float64, device=logits.device)
@@ -179,16 +192,22 @@ class _SegLoss(torch.autograd.Function):
             loss = loss + lambda_ce * ce_terms.sum() / elements
             ce_scale = ce_scale + lambda_ce / elements
 
+        # dL/dp = [(1-g)·coef0 - g·coef1] with coef0 = N/D² and coef1 = (N + 2E)/D² for Dice (alpha·N/D² and
+        # (beta·N + E)/D² for Tversky), times the weight of the class and the averaging scale; the squared
+        # Dice has dL/dp = (1-g)·p·coef0 - g·(q·coef0 + coef1) with coef0 = 2N/D² and coef1 = 2E/D².
         coef = torch.zeros((batch, 2, c_pad), dtype=torch.float64, device=logits.device)
+        den = num + err
+        lead = lambda_dice * scale / (den * den)
         if generalized is not None:
-            coef[:, 0, first:classes] = lambda_dice * 2 * weights * scale / den
-            coef[:, 1, first:classes] = lambda_dice * weights * scale * num / (den * den)
-        elif tversky is None:
-            coef[:, 0, first:classes] = lambda_dice * 2 * scale / den
-            coef[:, 1, first:classes] = lambda_dice * scale * num / (den * den)
+            lead = lead * weights
+        if tversky is not None:
+            coef0, coef1 = tversky[0] * num, tversky[1] * num + err
+        elif squared_pred:
+            coef0, coef1 = 2 * num, 2 * err
         else:
-            coef[:, 0, first:classes] = lambda_dice * scale * (den - (1 - alpha - beta) * num) / (den * den)
-            coef[:, 1, first:classes] = lambda_dice * scale * alpha * num / (den * den)
+            coef0, coef1 = num, num + 2 * err
+        coef[:, 0, first:classes] = lead * coef0
+        coef[:, 1, first:classes] = lead * coef1
         ctx.save_for_backward(logits, target, coef, ce_scale, mask, class_weight)
         ctx.config = config
         loss = torch.where(invalid > 0, torch.nan, loss)
@@ -315,11 +334,16 @@ if triton is not None:
 
     @triton.jit
     def _tile(logits, target, voxel_mask, b, voxel0, voxels, classes, ACT, ONE_HOT,
-              HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE):
-        """Activation p, target g, logits z and log-normalizer of a (classes, voxels) tile.
+              HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE, LSE):
+        """Activation p, its complement q = 1 - p, target g, logits z and log-normalizer of a tile.
 
-        For softmax, z and the log-normalizer remain shifted by the maximum logit, so their
-        difference does not lose precision when all logits share a large offset.
+        q is the sum of the other probabilities where p exceeds one half (and 1 - p otherwise, where p <= 1/2),
+        sigmoid(-z) or 1 - p for the three activations, so that it does not vanish where p rounds to one.
+        For softmax, z remains shifted by the maximum logit, so that z and the log-normalizer, whose
+        difference is -log p, do not lose precision when all logits share a large offset; the log-normalizer
+        is log1p of the sum of exp(z_j) over the classes other than one maximal class, formed from the other
+        probabilities where one class exceeds a half (only when ``LSE``: the cross-entropy and focal terms need it,
+        the overlap terms do not).
         """
         offs = voxel0 + tl.arange(0, BLOCK)
         ch = tl.arange(0, C_PAD)
@@ -345,12 +369,23 @@ if triton is not None:
             e = tl.exp(tl.where(in_classes[:, None], z, float("-inf")))
             total = tl.sum(e, axis=0)
             p = e / total[None, :]
-            lse = tl.log(total)
+            big = p > 0.5
+            rest = tl.sum(tl.where(big, 0.0, p), axis=0)  # the other probabilities, when one class exceeds a half
+            q = tl.where(big, rest[None, :], 1.0 - p)
+            if LSE:
+                # log-normalizer log(sum_j exp(z_j - max)) = log1p(r), with r = sum_{j != top} exp(z_j - max) =
+                # rest / p_max = rest * total when one class has p > 1/2 (rest = 1 - p_max is exact then), and
+                # total - 1 (total >= 2) otherwise
+                lse = libdevice.log1p(tl.where(rest < 0.5, rest * total, total - 1.0))
+            else:
+                lse = tl.zeros([BLOCK], dtype=COMPUTE)
         elif ACT == 1:
             p = tl.sigmoid(z)
+            q = tl.sigmoid(-z)
             lse = tl.zeros([BLOCK], dtype=COMPUTE)
         else:
             p = z
+            q = 1.0 - z
             lse = tl.zeros([BLOCK], dtype=COMPUTE)
         if ONE_HOT:
             g = tl.load(target + row, mask=mask, other=0).to(COMPUTE)
@@ -359,13 +394,21 @@ if triton is not None:
             g = (ch[:, None] == t[None, :]).to(COMPUTE)
         if HAS_MASK or IGNORE_INDEX is not None:
             g = tl.where(valid[None, :], g, 0.0)
-        return p, g, z, lse, mask, row, ch, valid, bad
+        return p, q, g, z, lse, mask, row, ch, valid, bad
+
+    @triton.jit
+    def _softmax_vjp(p, q, v):
+        """dz_i = q_i v_i - p_i sum_{j != i} v_j, which equals v_i - p_i sum_j v_j without forming 1 - p_i."""
+        big = p > 0.5
+        below = tl.sum(tl.where(big, 0.0, v), axis=0)[None, :]
+        others = tl.where(big, below, tl.sum(v, axis=0)[None, :] - v)
+        return q * v - p * others
 
     @triton.jit
     def _forward(
         logits, target, voxel_mask, class_weight, partial, voxels, classes, blocks,
         ACT: tl.constexpr, ONE_HOT: tl.constexpr, C_PAD: tl.constexpr, BLOCK: tl.constexpr,
-        TVERSKY: tl.constexpr, CE: tl.constexpr,
+        CE: tl.constexpr,
         WEIGHTED: tl.constexpr, FOCAL: tl.constexpr, GAMMA: tl.constexpr, ALPHA: tl.constexpr,
         COUNTS: tl.constexpr, SQUARED: tl.constexpr,
         HAS_MASK: tl.constexpr, IGNORE_INDEX: tl.constexpr,
@@ -373,9 +416,9 @@ if triton is not None:
     ):  # fmt: skip
         blk = tl.program_id(0)
         b = tl.program_id(1).to(tl.int64)
-        p, g, z, lse, mask, row, ch, valid, bad = _tile(
+        p, q, g, z, lse, mask, row, ch, valid, bad = _tile(
             logits, target, voxel_mask, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT,
-            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE
+            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE, CE
         )
         w = (mask & valid[None, :]).to(COMPUTE)
         # Terms with g = 0 are left out rather than multiplied by 0: a class masked with a -inf
@@ -383,33 +426,33 @@ if triton is not None:
         if not CE:
             ce = tl.full((C_PAD, BLOCK), 0.0, COMPUTE)
         elif FOCAL:
-            ce = _focal_terms(p, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, False, C_PAD, BLOCK, COMPUTE)
-        elif ACT == 0:  # cross-entropy -Σ g log p, per class
+            ce = _focal_terms(p, q, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, False, C_PAD, BLOCK, COMPUTE)
+        elif ACT == 0:  # cross-entropy -Σ g log p = Σ g (log-normalizer - z), both terms non-negative
             ce = tl.where(g != 0, g * (lse[None, :] - z), 0.0)
         else:  # binary cross-entropy with logits: log1p(exp(-|z|)) plus (1-g)·z for z >= 0, g·|z| for z < 0
             linear = tl.where(z >= 0, tl.where(g != 1, (1.0 - g) * z, 0.0), tl.where(g != 0, -g * z, 0.0))
             ce = linear + libdevice.log1p(tl.exp(-tl.abs(z)))
         if CE and WEIGHTED:
             ce *= tl.load(class_weight + ch, mask=ch < classes, other=0).to(COMPUTE)[:, None]
-        rows: tl.constexpr = 6 if COUNTS else 5
+        rows: tl.constexpr = 7 if COUNTS else 6
         out = partial + ((b * blocks + blk) * rows) * C_PAD + ch
-        tl.store(out, tl.sum(p * g * w, axis=1))
-        if TVERSKY:
-            tl.store(out + C_PAD, tl.sum(p * (1.0 - g) * w, axis=1))
-            tl.store(out + 2 * C_PAD, tl.sum((1.0 - p) * g * w, axis=1))
-        elif SQUARED:
-            tl.store(out + C_PAD, tl.sum(p * p * w, axis=1))
-            tl.store(out + 2 * C_PAD, tl.sum(g * g * w, axis=1))
-        else:
-            tl.store(out + C_PAD, tl.sum(p * w, axis=1))
-            tl.store(out + 2 * C_PAD, tl.sum(g * w, axis=1))
-        tl.store(out + 3 * C_PAD, tl.sum(ce * w, axis=1))
+        gw = g * w
+        tl.store(out, tl.sum(p * gw, axis=1))
+        if SQUARED:  # Σ (p - g)² with p - g = (1-g)·p - g·q, and no separate FN
+            gap = (1.0 - g) * p - g * q
+            tl.store(out + C_PAD, tl.sum(gap * gap * w, axis=1))
+            tl.store(out + 2 * C_PAD, tl.zeros([C_PAD], dtype=COMPUTE))
+        else:  # FP and FN, each a sum of non-negative terms; w - g·w = (1-g)·w
+            tl.store(out + C_PAD, tl.sum(p * (w - gw), axis=1))
+            tl.store(out + 2 * C_PAD, tl.sum(q * gw, axis=1))
+        tl.store(out + 3 * C_PAD, tl.sum(gw, axis=1))
+        tl.store(out + 4 * C_PAD, tl.sum(ce * w, axis=1))
         invalid = tl.zeros([C_PAD], dtype=COMPUTE)
         if not ONE_HOT:
             invalid = tl.where(ch == 0, tl.sum(bad.to(COMPUTE), axis=0), 0.0)
-        tl.store(out + 4 * C_PAD, invalid)
+        tl.store(out + 5 * C_PAD, invalid)
         if COUNTS:
-            tl.store(out + 5 * C_PAD, tl.where(ch == 0, tl.sum(valid.to(COMPUTE), axis=0), 0.0))
+            tl.store(out + 6 * C_PAD, tl.where(ch == 0, tl.sum(valid.to(COMPUTE), axis=0), 0.0))
 
     @triton.jit
     def _backward(
@@ -421,68 +464,79 @@ if triton is not None:
     ):  # fmt: skip
         blk = tl.program_id(0)
         b = tl.program_id(1).to(tl.int64)
-        p, g, z, lse, mask, row, ch, valid, bad = _tile(
+        p, q, g, z, lse, mask, row, ch, valid, bad = _tile(
             logits, target, voxel_mask, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT,
-            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE
+            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE, CE and FOCAL
         )
-        a = tl.load(coef + (b * 2) * C_PAD + ch)
-        c = tl.load(coef + (b * 2 + 1) * C_PAD + ch)
-        d_p = c[:, None] * (2.0 * p if SQUARED else 1.0) - a[:, None] * g
+        a = tl.load(coef + (b * 2) * C_PAD + ch)[:, None]
+        c = tl.load(coef + (b * 2 + 1) * C_PAD + ch)[:, None]
+        # Every term is non-negative: the Dice derivative is (1-g)·a - g·c, and for the squared denominator
+        # (1-g)·a·p - g·(a·q + c), where p - g = (1-g)·p - g·q does not vanish as p rounds to g.
+        if SQUARED:
+            d_p = a * (1.0 - g) * p - g * (a * q + c)
+        else:
+            d_p = a * (1.0 - g) - c * g
         weight = tl.full((C_PAD, 1), 1.0, COMPUTE)
         if WEIGHTED:
             weight = tl.load(class_weight + ch, mask=ch < classes, other=0).to(COMPUTE)[:, None]
         if ACT == 0:
-            d_z = p * (d_p - tl.sum(p * d_p, axis=0)[None, :])
+            v = p * d_p
             if CE and not FOCAL:
-                wg = weight * g
-                d_z += tl.load(ce_scale) * (p * tl.sum(wg, axis=0)[None, :] - wg)
+                v -= tl.load(ce_scale) * weight * g  # cross-entropy: d/d(log p) = -weight·g
+            if CE and FOCAL:
+                v += tl.load(ce_scale) * _focal_terms(
+                    p, q, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, True, C_PAD, BLOCK, COMPUTE,
+                )
+            d_z = _softmax_vjp(p, q, v)
         elif ACT == 1:
-            q = tl.sigmoid(-z)  # 1 - p is 0 where p rounds to 1
-            d_z = d_p * p * q
+            d_z = d_p * p * q  # 1 - p is 0 where p rounds to 1
             if CE and not FOCAL:
                 d_z += tl.load(ce_scale) * weight * ((1.0 - g) * p - g * q)
+            if CE and FOCAL:
+                d_z += tl.load(ce_scale) * _focal_terms(
+                    p, q, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, True, C_PAD, BLOCK, COMPUTE,
+                )
         else:
             d_z = d_p
-        if CE and FOCAL:
-            d_z += tl.load(ce_scale) * _focal_terms(
-                p, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, True, C_PAD, BLOCK, COMPUTE,
-            )
         tl.store(grad + row, tl.where(valid[None, :], d_z, 0).to(grad.dtype.element_ty), mask=mask)
 
     @triton.jit
-    def _focal_terms(p, g, z, lse, ch, mask, ACT: tl.constexpr, GAMMA: tl.constexpr,
+    def _focal_terms(p, q, g, z, lse, ch, mask, ACT: tl.constexpr, GAMMA: tl.constexpr,
                      ALPHA: tl.constexpr, BACKWARD: tl.constexpr, C_PAD: tl.constexpr,
                      BLOCK: tl.constexpr, COMPUTE: tl.constexpr):
+        """Focal terms (forward) or their derivative (backward): d/d(log p) for softmax, d/dz for sigmoid."""
         if ACT == 0:
-            logp = z - lse[None, :]
-            # expm1 retains 1-p near p=1. Use exp(logp) consistently in its derivative.
-            p = tl.exp(logp)
-            u = -libdevice.expm1(logp)
-            if GAMMA == 0:
-                modulation = tl.full((C_PAD, BLOCK), 1.0, COMPUTE)
-            else:
-                modulation = tl.where(u > 0, tl.exp(GAMMA * tl.log(tl.where(u > 0, u, 1.0))), 0.0)
+            nll = lse[None, :] - z  # -log p, a sum of two non-negative terms
             weight = tl.full((C_PAD, 1), 1.0, COMPUTE)
             if ALPHA is not None:
                 weight = tl.where(
                     ch[:, None] == 0, tl.full((C_PAD, 1), 1.0 - ALPHA, COMPUTE),
                     tl.full((C_PAD, 1), ALPHA, COMPUTE),
                 )
-            if BACKWARD:
-                if GAMMA == 0:
-                    q = -weight * g
-                else:
-                    q = weight * g * modulation * (GAMMA * p * logp / tl.where(u > 0, u, 1.0) - 1.0)
-                q = tl.where(mask, q, 0.0)
-                dz = q - p * tl.sum(q, axis=0)[None, :]
+            # (1-p)**gamma from q = 1 - p, accurate where p rounds to 1 (exp(gamma * log) would lose
+            # gamma * |log| * u of relative accuracy). The power of an underflowed q is zero, with zero gradient.
+            live = q > 0
+            safe = tl.where(live, q, 1.0)
+            if GAMMA == 0:
+                modulation = tl.full((C_PAD, BLOCK), 1.0, COMPUTE)
             else:
-                terms = -weight * g * modulation * logp
+                modulation = tl.where(live, libdevice.pow(safe, tl.full((C_PAD, BLOCK), GAMMA, COMPUTE)), 0.0)
+            if BACKWARD:
+                # d/d(log p) of weight·g·q**gamma·nll, with dq/d(log p) = -p and dnll/d(log p) = -1.
+                if GAMMA == 0:
+                    r = -weight * g
+                else:  # q**(gamma-1) nll as q**gamma (nll / q): the first overflows for gamma < 1 and tiny q
+                    ratio = tl.where(live, nll / safe, 0.0)
+                    r = -weight * g * modulation * (1.0 + GAMMA * p * ratio)
+                result = tl.where(mask, r, 0.0)
+            else:
+                result = tl.where(g != 0, weight * g * modulation * nll, 0.0)
         else:
             # Stable log(sigmoid(z)) and log(sigmoid(-z)); neither forms log(0).
             tail = libdevice.log1p(tl.exp(-tl.abs(z)))
             pos_ce = tl.maximum(-z, 0.0) + tail
             neg_ce = tl.maximum(z, 0.0) + tail
-            u = tl.sigmoid(-z)
+            u = q
             # (1-p)**gamma and p**gamma from the accurate probabilities: exp(-gamma * ce) would lose
             # gamma * |log| * u of relative accuracy.
             pos_mod = libdevice.pow(u, tl.full((C_PAD, BLOCK), GAMMA, COMPUTE))
@@ -493,14 +547,11 @@ if triton is not None:
                 pos_weight *= ALPHA
                 neg_weight *= 1.0 - ALPHA
             if BACKWARD:
-                dz = (-pos_weight * pos_mod * (u + GAMMA * p * pos_ce)
-                      + neg_weight * neg_mod * (p + GAMMA * u * neg_ce))
+                result = (-pos_weight * pos_mod * (u + GAMMA * p * pos_ce)
+                          + neg_weight * neg_mod * (p + GAMMA * u * neg_ce))
             else:
-                terms = pos_weight * pos_mod * pos_ce + neg_weight * neg_mod * neg_ce
-        if BACKWARD:
-            return dz
-        else:
-            return terms
+                result = pos_weight * pos_mod * pos_ce + neg_weight * neg_mod * neg_ce
+        return result
 
     @triton.jit
     def _focal_kernel(
@@ -513,13 +564,16 @@ if triton is not None:
     ):
         blk = tl.program_id(0)
         b = tl.program_id(1).to(tl.int64)
-        p, g, z, lse, mask, row, ch, valid, bad = _tile(
+        p, q, g, z, lse, mask, row, ch, valid, bad = _tile(
             logits, target, voxel_mask, b, blk * BLOCK, voxels, classes, ACT, ONE_HOT,
-            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE
+            HAS_MASK, IGNORE_INDEX, C_PAD, BLOCK, COMPUTE, True
         )
-        result = _focal_terms(p, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, BACKWARD, C_PAD, BLOCK, COMPUTE)
+        result = _focal_terms(p, q, g, z, lse, ch, mask, ACT, GAMMA, ALPHA, BACKWARD, C_PAD, BLOCK, COMPUTE)
         if BACKWARD:
-            dz = result
+            if ACT == 0:
+                dz = _softmax_vjp(p, q, result)
+            else:
+                dz = result
         else:
             terms = result
         if BACKWARD:
