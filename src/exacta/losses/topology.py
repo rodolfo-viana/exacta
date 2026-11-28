@@ -109,7 +109,7 @@ class SoftClDiceLoss(nn.Module):
         self.backend = backend
 
     def forward(self, input: Tensor, target: Tensor, *, target_skeleton: Tensor | None = None) -> Tensor:
-        probs, truth, _ = _geometry_input(input, target, self.activation, self.target_format, self.include_background)
+        probs, truth, _, _ = _geometry_input(input, target, self.activation, self.target_format, self.include_background)
         sp = soft_skeletonize(probs, iterations=self.iterations, backend=self.backend)
         if target_skeleton is None:
             with torch.no_grad():

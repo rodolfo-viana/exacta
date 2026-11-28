@@ -133,6 +133,12 @@ class LovaszSoftmaxLoss(nn.Module):
     batch; True computes one loss per case and omits entirely ignored cases.
     Channel 0 can be excluded. Sorting is stable, so ties use flattened voxel order.
     Masking does not require a device-to-host transfer or a full one-hot target.
+
+    The errors ``|g - p|`` are ``p`` for a background voxel and ``1 - p`` for a foreground one, with ``1 - p`` the
+    sum of the other softmax probabilities (from logits) so that it does not round to zero where ``p`` rounds to
+    one: voxels at saturation are ranked by their exact errors, not tied (and ordered by index) as before, which
+    changes the Jaccard increments assigned to them, that is, the gradient, but not the Jaccard increments
+    themselves. With probabilities given, ``1 - p`` is that subtraction and the errors are those of ``|g - p|``.
     """
 
     def __init__(self, *, from_logits: bool = True, classes: Literal["present", "all"] = "present",
@@ -150,21 +156,26 @@ class LovaszSoftmaxLoss(nn.Module):
         first = 0 if self.include_background else 1
         if input.shape[1] <= first:
             raise ValueError("include_background=False needs at least 2 channels")
-        probs = _softmax.softmax(input) if self.from_logits else input
+        # Errors |g - p| come from p and the complement 1 - p, the latter the sum of the other softmax probabilities
+        # (so that it does not round to zero where p rounds to one)
+        probs, complement = _softmax.softmax_pair(input) if self.from_logits else (input, 1 - input)
         if not target.numel():
             return probs.sum() * 0
         if self.per_image:
-            values = torch.stack([self._flat(p, t, v, first) for p, t, v in zip(probs, target, valid)])
+            values = torch.stack([self._flat(p, q, t, v, first)
+                                  for p, q, t, v in zip(probs, complement, target, valid)])
             active = valid.flatten(1).any(1)
             return torch.where(active, values, 0).sum() / active.sum().clamp_min(1)
-        return self._flat(probs.movedim(1, 0), target, valid, first)
+        return self._flat(probs.movedim(1, 0), complement.movedim(1, 0), target, valid, first)
 
-    def _flat(self, probs: Tensor, target: Tensor, valid: Tensor, first: int) -> Tensor:
+    def _flat(self, probs: Tensor, complement: Tensor, target: Tensor, valid: Tensor, first: int) -> Tensor:
         target, valid = target.flatten(), valid.flatten()
         losses, active = [], []
         for c in range(first, probs.shape[0]):
             foreground = (target == c) & valid
-            errors = (foreground.to(probs.dtype) - probs[c].flatten()).abs()
+            marked = foreground.to(probs.dtype)
+            # |g - p| = |p (1 - g) - (1 - p) g|: p for a background voxel, 1 - p for a foreground one
+            errors = ((1 - marked) * probs[c].flatten() - marked * complement[c].flatten()).abs()
             ranked, order = torch.sort(torch.where(valid, errors, -1), descending=True, stable=True)
             keep = valid[order]
             total = foreground.sum()
@@ -190,6 +201,9 @@ class LovaszHingeLoss(nn.Module):
     use flattened voxel order, defining a reproducible valid subgradient. At a
     zero hinge margin, ReLU gives zero derivative. Native PyTorch sort runs on
     CPU/CUDA; no global distributed sorting is implied by DDP.
+
+    The errors ``1 - z (2t - 1)`` are formed from the logits, exactly near the margin (Sterbenz) and clipped to
+    zero beyond it, so that saturation loses nothing here.
     """
 
     def __init__(self, *, multilabel: bool = False, per_image: bool = True,

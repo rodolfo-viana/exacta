@@ -4,6 +4,28 @@ Release notes for Exacta.
 
 ## Unreleased
 
+- **Hausdorff and Lovasz softmax losses at saturated logits:** both formed `p - y` or `|g - p|` from a rounded
+  probability, which is exactly zero where the logit gap exceeds 37 in binary64 (17 in binary32) although the
+  difference is `q = 1 - p` (`4.2e-18` at a gap of 40). `HausdorffDTLoss` differentiated `(p - y)**2`: on
+  batches with gaps of 10 to 80 its value was off by up to 650 u (`u` being the roundoff) in binary64 and 630 u in
+  binary32, and the gradient of every voxel with `p` rounded to `y` by 100%. `LovaszSoftmaxLoss` sorts the
+  errors: those of saturated foreground voxels were all 0 and tied, ranked by index, so that the Jaccard
+  increments (the gradient) were assigned to them in the wrong order (a gradient off by up to 100%) and its value
+  was off by up to 1100 u. Now `p - y` is `p (1 - y) - (1 - p) y` and `|g - p|` is `p` for a background
+  voxel and `1 - p` for a foreground one, with `1 - p` the sum of the other softmax probabilities (or
+  `sigmoid(-z)`), the complements of PR #33: the largest relative error is `3 u` in value and `7 u` (binary64) to
+  `34 u` (binary32) in every gradient element or voxel on saturated, mixed and moderate batches, against an mpmath
+  reference. Saturated voxels are ranked by their exact errors, not tied: this changes which voxel receives which
+  increment (the gradient) wherever errors that rounded to the same float differ, never the increments, which come
+  from exact int64 counts; with probabilities given (`from_logits=False`) the errors are bitwise those of `|g - p|`
+  and nothing changes, and neither does the value at moderate logits beyond the last bits (the test that compares
+  with an exact rational reference of the increments is unchanged). Under `torch.compile` the complements are
+  formed with ordinary operations, as in PR #33. Unchanged, with the reason: `LovaszHingeLoss` forms `1 - z (2t - 1)`
+  from the logits, exact near the margin (Sterbenz) and clipped to zero beyond it, and `BoundaryLoss` is the signed
+  sum `mean(p * phi)`, which is `-sum_inside |phi| + error` with a non-negative error, so that its error is a few
+  roundoffs of `mean(|p * phi|)` (the conditioning of the sum, which no formula for the same number can beat where
+  its terms cancel) and it loses nothing at saturation, where the terms do not cancel.
+
 - **Overlap and softmax losses at saturated logits:** three computations lost digits where a loss is below
   the roundoff or the dominant softmax probability rounds to one (a logit gap above 37 in binary64, 17 in
   binary32), on both backends. (1) The Dice, Tversky, focal Tversky and generalized Dice losses were
