@@ -73,13 +73,13 @@ Definitions differ across libraries, so select parameters intentionally:
   segmentation_models_pytorch's Dice and Tversky losses with `batch_dice=True` and `smooth=0`.
   By default, as in MONAI, an empty target still penalizes predicted probability. It runs on the
   PyTorch backend.
-- `average` (Dice and Tversky; development version, after 0.1.2) selects how classes are reduced.
+- `average` (Dice and Tversky; since 0.2.0) selects how classes are reduced.
   `"macro"` (default) takes one ratio per class and averages them. `"micro"` first sums the
   statistics of the selected classes into one ratio per case (per batch with `batch_dice=True`),
   as in the `average="micro"` of Exacta's classification metrics and of Kornia's Dice loss; a
   class with a large target then weighs more than a small one. `include_background=False` leaves
   channel zero out of the pooled sums too.
-- `skip_absent=True` (Dice and Tversky; development version) averages only over the classes
+- `skip_absent=True` (Dice and Tversky; since 0.2.0) averages only over the classes
   present in the target of each case (target mass above zero; the whole batch with
   `batch_dice=True`), so an absent class leaves the mean and contributes neither loss nor
   gradient. `zero_absent=True` also gives an absent class no loss but keeps it in the mean, which
@@ -87,7 +87,7 @@ Definitions differ across libraries, so select parameters intentionally:
   case with `include_background=False`) has loss one and zero gradient and stays in the mean; an
   entirely ignored case is still omitted. The two options are mutually exclusive, and
   `skip_absent` does not combine with `average="micro"`, which has no class mean.
-- `smooth_numerator=False` (Dice and Tversky; development version) adds the smoothing constant to
+- `smooth_numerator=False` (Dice and Tversky; since 0.2.0) adds the smoothing constant to
   the denominator only, `1 - 2 sum(p*g)/(sum(p)+sum(g)+s)`, instead of to both terms (the
   default, as in MONAI with equal `smooth_nr` and `smooth_dr`). With `s=0` the two agree.
   Tversky with `alpha=beta=0.5` still equals Dice with twice the smoothing constant in either
@@ -264,7 +264,7 @@ their nonlinear Dice ratios into one larger-batch ratio.
 Only small statistics communicate. NCCL keeps these on the rank's CUDA device. Gloo uses CPU
 buffers, also allowing two CUDA workers on a single GPU for correctness tests. Local tests
 cover CPU and fused CUDA with two Gloo ranks, uneven batches, empty ranks, ignored ranks and
-all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in 0.1.2:**
+all-ignored batches. **The multi-GPU NCCL path is experimental and unverified in 0.2.0:**
 the two-GPU tests have not been run on suitable hardware. Gloo checks do not establish NCCL
 correctness or multi-GPU training throughput. Loss configuration and valid input shapes
 must agree across ranks; as with ordinary distributed training, a rank-local error can interrupt its peers.
