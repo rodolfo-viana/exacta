@@ -63,9 +63,8 @@ Release notes for Exacta.
   `u` being the roundoff; relative accuracy holds while the quantity is representable (in binary32 `(1 - p)^2`
   is subnormal beyond a gap of 44). At moderate logits values change by at most `4.4 u` and gradients by
   `13 u` of their largest component, in both dtypes. Double backward on the PyTorch backend and gradients
-  into a soft target are unchanged. Not changed: the Lovasz softmax still sorts the rounded errors
-  `|g - p|`, the squared error of `HausdorffDTLoss` still subtracts where `p` rounds to the target, and the
-  value of `BoundaryLoss` is a sum of terms of both signs (the entry above deals with them).
+  into a soft target are unchanged. Not changed here: the Lovasz softmax, the squared error of
+  `HausdorffDTLoss` and the value of `BoundaryLoss` (the entry above deals with them).
   Under `torch.compile` the same custom autograd functions are traced, with every output requested (PyTorch 2.4's
   dynamo cannot trace a function that returns None; the unused outputs are dead code in the compiled graph), so
   that the compiled value and gradient are as accurate as the eager ones: the composition of ordinary operations
@@ -74,7 +73,9 @@ Release notes for Exacta.
   (CPU, binary32), 0.95 (CPU, binary64), 0.58 (GPU, binary32) and 0.86 (GPU, binary64) times the eager time, and
   0.48, 0.60, 0.72 and 0.43 times that of the previous compiled graph. Double backward through a compiled graph
   does not work (an AOTAutograd limitation, with or without these functions); use eager execution for gradient
-  penalties.
+  penalties. On PyTorch 2.4 the compiled gradient of the focal power `p**gamma` with `0 < gamma < 1` was infinite
+  in binary32 where `1 - p` is subnormal, as the derivative `gamma p**(gamma - 1)` is: under `torch.compile`
+  that power is now computed in binary64 (binary32 inputs), which keeps the gradient finite and equal to the eager one.
   Cost: with softmax and integer labels (or a one-hot tensor that is exactly such labels: values 0 and 1, one 1
   per included voxel, which costs the `max` over the classes that yields the labels, about 3 ms of reductions
   and one host synchronisation) the PyTorch backend forms the sums from the label indices (no one-hot tensor)
@@ -110,7 +111,7 @@ Release notes for Exacta.
   in gradient in binary64 on both backends, and `7 u` in binary32 on PyTorch (the fused binary32 kernels
   reach `43 u` at `|z| = 40` through the fast exponential, as before). The same sigmoid serves
   `BoundaryLoss`, `HausdorffDTLoss` and `SkeletonRecallLoss` with `activation="sigmoid"` (the squared
-  error `(p - y)**2` of `HausdorffDTLoss` still cancels where `p` rounds to `y`). Values at moderate
+  error `(p - y)**2` of `HausdorffDTLoss` is dealt with in the first entry of this section). Values at moderate
   logits change only in the last bits, and the PyTorch backend still supports double backward and
   gradients into a soft target. The value of the Dice and Tversky losses remains `1 - ratio`, accurate in
   absolute rather than relative terms when the loss is below about `1e-16`.

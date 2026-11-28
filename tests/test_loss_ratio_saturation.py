@@ -1020,6 +1020,41 @@ def test_compiled_focal_power_stays_finite_for_a_small_gamma_in_binary32(loss, b
     torch.testing.assert_close(grad, eager_grad, rtol=1e-5, atol=1e-30)
 
 
+@pytest.mark.parametrize("backend", ["aot_eager", "inductor"])
+def test_compiled_sigmoid_focal_power_stays_finite_for_a_small_gamma_in_binary32(backend):
+    # The same, with the powers taken from sigma(z) and sigma(-z), subnormal at |z| = 100 in binary32.
+    logits = torch.tensor([[[-1e4, 100.0, 1e4], [1e4, -100.0, -1e4]]], requires_grad=True)
+    target = torch.tensor([[1, 0, 0]])
+    module = FocalLoss(gamma=0.1, activation="sigmoid", backend="torch")
+    eager_grad = torch.autograd.grad(module(logits, target), logits)[0]
+    compiled = torch.compile(module, fullgraph=True, backend=backend)
+    value = compiled(logits, target)
+    (grad,) = torch.autograd.grad(value, logits)
+    assert torch.isfinite(value) and torch.isfinite(grad).all()
+    torch.testing.assert_close(grad, eager_grad, rtol=1e-5, atol=1e-30)
+
+
+@pytest.mark.parametrize("gamma", [0.1, 0.5, 0.9])
+def test_power_below_one_keeps_a_finite_exact_gradient_with_and_without_the_function(monkeypatch, gamma):
+    # On PyTorch 2.4.1 the compiled gradient was that of ordinary operations, gamma p**(gamma - 1) grad, an
+    # overflow in binary32 for a subnormal p. The branch used under torch.compile must therefore give the exact
+    # gradient gamma p**gamma (grad / p) without the Function: with grad = p, that is gamma p**gamma. It is run
+    # here eagerly, on the Function and on the branch.
+    from exacta.losses.segmentation import _power
+
+    values = torch.tensor([0.0, 1.4e-45, 3.7e-44, 1e-30, 1e-10, 0.3, 1.0])
+    expected = (gamma * values.double().pow(gamma)).float()
+    for compiling in (False, True):
+        probability = values.clone().requires_grad_()
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.compiler, "is_compiling", lambda: compiling)
+            power = _power(probability, gamma)
+        (grad,) = torch.autograd.grad((power * values).sum(), probability)
+        torch.testing.assert_close(power, values.double().pow(gamma).float(), rtol=1e-6, atol=0)
+        assert torch.isfinite(grad).all(), f"compiling={compiling}"
+        torch.testing.assert_close(grad, expected, rtol=1e-5, atol=1e-30)
+
+
 def test_labels_outside_the_classes_raise_on_the_index_paths():
     z = torch.randn(1, 3, 4, dtype=torch.float64)
     for target in (torch.full((1, 4), 3), torch.full((1, 4), -1)):
