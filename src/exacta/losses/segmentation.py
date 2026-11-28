@@ -147,10 +147,12 @@ class _OverlapLoss(nn.Module):
             # Integer labels (or a one-hot tensor that holds exactly them): the same sums from the label indices,
             # without a one-hot tensor (see exacta._softmax._IndexOverlap). Background selection and the batch
             # sum act on the (B, C) sums.
-            *stats, nll = _softmax.index_overlap_statistics(
+            *label_stats, nll = _softmax.index_overlap_statistics(
                 input, labels, valid, squared=self._squared_denominator(), with_nll=nll_sink is not None,
             )
+            stats: Sequence[Tensor] = label_stats
             if nll_sink is not None:
+                assert nll is not None
                 nll_sink.append(nll)
             if not self.include_background:
                 if input.shape[1] < 2:
@@ -637,9 +639,9 @@ class DiceCELoss(nn.Module):
             labels = _label_indices(labels_or_onehot, prepared, valid, self.dice.target_format)
             if labels is not None:
                 nll: list[Tensor] = []
-                dice = self.dice._overlap(prepared, labels_or_onehot, valid, nll, labels)
-                ce = self._label_cross_entropy(nll[0], labels, valid, weight)
-                return self.lambda_dice * dice + self.lambda_ce * ce
+                shared_dice = self.dice._overlap(prepared, labels_or_onehot, valid, nll, labels)
+                shared_ce = self._label_cross_entropy(nll[0], labels, valid, weight)
+                return self.lambda_dice * shared_dice + self.lambda_ce * shared_ce
         dice = self.dice(input, target, mask=mask) if self.lambda_dice else None
         if not self.lambda_ce:
             assert dice is not None
@@ -911,7 +913,7 @@ def _zero_absent(error: Tensor, numerator: Tensor, truth: Tensor) -> tuple[Tenso
 
 
 def _global_overlap(
-    stats: tuple[Tensor, ...], count: Tensor | None, input: Tensor,
+    stats: Sequence[Tensor], count: Tensor | None, input: Tensor,
 ) -> tuple[tuple[Tensor, ...], Tensor]:
     """Sum the per-class statistics (and the voxel count) over the ranks, in float64."""
     count = (torch.tensor(input.numel() // input.shape[1], device=input.device, dtype=torch.float64)

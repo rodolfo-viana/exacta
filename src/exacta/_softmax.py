@@ -50,13 +50,15 @@ def _dense(index: Tensor) -> bool:
     return index.device.type == "cuda" and index.numel() >= _DENSE_VOXELS
 
 
-def _positions(index: Tensor, classes: int) -> Tensor | None:
-    """Where the mask form is used (large CUDA tensors): mask ``(B, C, *)`` of the entries at the class ``index``
-    ``(B, 1, *)`` of every voxel, to pass as ``hit`` to the helpers below that would otherwise rebuild it.
-    ``None`` elsewhere."""
-    if not _dense(index):
-        return None
+def _positions(index: Tensor, classes: int) -> Tensor:
+    """Mask ``(B, C, *)`` of the entries at the class ``index`` ``(B, 1, *)`` of every voxel."""
     return torch.arange(classes, device=index.device).reshape(1, -1, *([1] * (index.ndim - 2))) == index
+
+
+def _hit(index: Tensor, classes: int) -> Tensor | None:
+    """The mask of :func:`_positions` where the mask form is used (large CUDA tensors), to pass as ``hit`` to the
+    helpers below that would otherwise rebuild it; ``None`` elsewhere."""
+    return _positions(index, classes) if _dense(index) else None
 
 
 def _gather(x: Tensor, index: Tensor, hit: Tensor | None = None) -> Tensor:
@@ -151,7 +153,7 @@ class _Softmax(torch.autograd.Function):
                     v.sub_(grad_nll)
             total = v.sum(1, keepdim=True)
             dz = torch.sub(v, total).mul_(p).addcmul_(q, v)
-        hit = _positions(top, p.shape[1])
+        hit = _hit(top, p.shape[1])
         v_top = _gather(v, top, hit)
         p_top = _gather(p, top, hit) if graph else p.amax(1, keepdim=True)  # (amax would split a tie's gradient)
         dominant = _gather(q, top, hit) * v_top - p_top * _exclusive(v, top, owned=True, kept=v_top, hit=hit)
@@ -293,7 +295,7 @@ class _IndexOverlap(torch.autograd.Function):
         p = torch.softmax(zf, 1)
         work = p.scatter(1, index, 0)
         q_target = work.sum(1, keepdim=True)
-        hit = _positions(index, classes)
+        hit = _hit(index, classes)
         nll = _label_nll(zf, p, index, q_target, hit).reshape(target.shape) if with_nll else None
         if invalid is not None:
             work.masked_fill_(invalid, 0)
@@ -327,7 +329,7 @@ class _IndexOverlap(torch.autograd.Function):
         grad_inter = zero if grad_inter is None else grad_inter
         grad_first = zero if grad_first is None else grad_first
         grad_third = zero if grad_third is None else grad_third
-        hit = _positions(index, classes)
+        hit = _hit(index, classes)
         if graph:
             p = softmax(z.reshape(batch, classes, voxels))
             q_target = _exclusive(p, index, hit=hit)
@@ -349,7 +351,7 @@ class _IndexOverlap(torch.autograd.Function):
         total = v.sum(1, keepdim=True)
         p_top, top = p.max(1, keepdim=True)
         # p is a saved tensor, so its sum over the other classes is formed on a copy; v is ours.
-        top_hit = _positions(top, classes)
+        top_hit = _hit(top, classes)
         q_top = _exclusive(p, top, hit=top_hit)
         v_top = _gather(v, top, top_hit)
         dominant = q_top * v_top - p_top * _exclusive(v, top, owned=True, kept=v_top, hit=top_hit)
@@ -380,7 +382,7 @@ class _CrossEntropyIndex(torch.autograd.Function):
         zf = z.reshape(batch, classes, voxels)
         index = target.reshape(batch, 1, voxels)
         p = torch.softmax(zf, 1)
-        hit = _positions(index, classes)
+        hit = _hit(index, classes)
         q_target = _exclusive(p, index, owned=True, hit=hit)  # the other probabilities: 1 - p_t, without cancellation
         nll = _label_nll(zf, p, index, q_target, hit)
         ctx.save_for_backward(saved_z, target, p, q_target)
