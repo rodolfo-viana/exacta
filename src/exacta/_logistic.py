@@ -54,6 +54,8 @@ class _SigmoidPair(torch.autograd.Function):
 
 def sigmoid_pair(z: Tensor) -> tuple[Tensor, Tensor]:
     """``(sigma(z), sigma(-z))``: the probability and its complement ``1 - p``, each accurate at any logit."""
+    if torch.compiler.is_compiling():  # dynamo (PyTorch 2.4) traces the single-output Function, not the pair
+        return sigmoid(z), sigmoid(-z)
     return _SigmoidPair.apply(z)
 
 

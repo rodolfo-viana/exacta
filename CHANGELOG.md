@@ -45,6 +45,9 @@ Release notes for Exacta.
   into a soft target are unchanged. Not changed: the Lovasz softmax still sorts the rounded errors
   `|g - p|`, the squared error of `HausdorffDTLoss` still subtracts where `p` rounds to the target, and the
   value of `BoundaryLoss` is a sum of terms of both signs.
+  Under `torch.compile` the softmax, cross-entropy and overlap sums are formed with ordinary operations instead
+  of the custom autograd functions (PyTorch 2.4's dynamo cannot trace them): the values keep their accuracy, the
+  gradient is autograd's and loses the dominant class at saturated logits as before.
   Cost: with softmax and integer labels (or a one-hot tensor that is exactly such labels: values 0 and 1, one 1
   per included voxel, which costs the `max` over the classes that yields the labels, about 3 ms of reductions
   and one host synchronisation) the PyTorch backend forms the sums from the label indices (no one-hot tensor)

@@ -155,9 +155,9 @@ class _OverlapLoss(nn.Module):
             if not self.include_background:
                 if input.shape[1] < 2:
                     raise ValueError("include_background=False needs at least 2 channels")
-                stats = tuple(x[:, 1:] for x in stats)
+                stats = [x[:, 1:] for x in stats]
             if self.batch_dice:
-                stats = tuple(x.sum(0) for x in stats)
+                stats = [x.sum(0) for x in stats]
         else:
             probs, complement = _activate(self.activation, input)
             onehot = _one_hot(target, input, self.target_format).to(probs.dtype)
@@ -190,7 +190,7 @@ class _OverlapLoss(nn.Module):
             )
             return _overlap_mean(error, numerator, valid_counts).to(input.dtype)
         if self.average == "micro":
-            intersection, fp, fn, truth = (x.sum(-1, keepdim=True) for x in (intersection, fp, fn, truth))
+            intersection, fp, fn, truth = [x.sum(-1, keepdim=True) for x in (intersection, fp, fn, truth)]
         weights = self._tversky_weights()
         if weights is None:
             error, numerator = fp + fn, 2 * intersection
@@ -792,6 +792,9 @@ def _power(probability: Tensor, gamma: float) -> Tensor:
     """
     if gamma == 0:
         return torch.ones_like(probability)
+    if torch.compiler.is_compiling():  # a Function with a float argument and its own ctx attribute: not for dynamo
+        positive = probability > 0
+        return torch.where(positive, torch.where(positive, probability, 1).pow(gamma), 0)
     return _Power.apply(probability, gamma)
 
 
