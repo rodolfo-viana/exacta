@@ -794,9 +794,15 @@ def _power(probability: Tensor, gamma: float) -> Tensor:
     """
     if gamma == 0:
         return torch.ones_like(probability)
-    if torch.compiler.is_compiling():  # a Function with a float argument and its own ctx attribute: not for dynamo
+    if torch.compiler.is_compiling() and gamma < 1 and probability.dtype != torch.float64:
+        # On PyTorch 2.4.1 the compiled gradient here was that of ordinary operations, gamma x**(gamma-1) grad,
+        # which overflows binary32 for a subnormal x (a Function applied to the output of another Function
+        # seems to be traced as ordinary operations there, its backward unused). The same operations in
+        # binary64 cannot overflow (x**(gamma-1) < 1 / x, below 1e45 for a binary32 x), whether or not the
+        # Function is honored, and the cast back to the input dtype gives the Function's gradient.
         positive = probability > 0
-        return torch.where(positive, torch.where(positive, probability, 1).pow(gamma), 0)
+        wide = torch.where(positive, probability, 1).double()
+        return torch.where(positive, wide.pow(gamma), 0).to(probability.dtype)
     return _Power.apply(probability, gamma)
 
 

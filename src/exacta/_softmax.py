@@ -22,9 +22,10 @@ where that is exact enough.
 The backward passes are built from differentiable operations on the saved probabilities, so the PyTorch
 backend of the losses keeps supporting double backward (gradient penalties) and gradients into a soft target.
 
-Under ``torch.compile`` the public functions use ordinary differentiable operations instead of these Functions
-(dynamo in PyTorch 2.4 cannot trace Functions with non-tensor arguments, None outputs or in-place writes): the
-values are the same sums of non-negative terms, the gradient is autograd's.
+Under ``torch.compile`` the same Functions are traced (dynamo in PyTorch 2.4 cannot trace a Function with a
+None output or an in-place write into a tensor derived from an input that requires grad: every output is requested
+there, and the forwards work on detached inputs), so that the compiled gradient is as accurate as the eager one.
+Double backward does not work through a compiled graph (an AOTAutograd limitation, with or without these Functions).
 
 For integer labels (the usual case) the overlap sums and the cross-entropy come from the label indices
 directly (:class:`_IndexOverlap`, :class:`_CrossEntropyIndex`): no one-hot tensor, no dense ``1 - p``, and one
@@ -160,79 +161,38 @@ class _Softmax(torch.autograd.Function):
         return _put(dz, top, dominant, hit), None, None
 
 
-# Under torch.compile the public functions below use ordinary differentiable operations instead of the custom
-# autograd Functions: dynamo in PyTorch 2.4 cannot trace Functions with non-tensor arguments, None outputs or in-place
-# writes. The values keep their accuracy (the same sums of non-negative terms); the gradient is that of autograd,
-# which cancels where a probability rounds to one, as before this module existed.
-
-
-def _plain_complement(p: Tensor) -> Tensor:
-    """``1 - p`` along the class axis as the sum of the other probabilities where ``p`` exceeds one half."""
-    big = p > 0.5
-    return torch.where(big, torch.where(big, 0, p).sum(1, keepdim=True), 1 - p)
-
-
-def _plain_neg_log(z: Tensor) -> Tensor:
-    """``-log softmax(z)`` along the class axis: ``(max - z) + log(sum_j exp(z_j - max))``, the logarithm as
-    ``log1p(rest / p_max)`` when one probability exceeds a half (``rest`` the others) and ``-log p_max`` otherwise."""
-    p = torch.softmax(z, 1)
-    p_max = p.amax(1, keepdim=True)
-    rest = torch.where(p > 0.5, 0, p).sum(1, keepdim=True)
-    log_norm = torch.where(p_max > 0.5, torch.log1p(rest / p_max), -torch.log(p_max))
-    return log_norm + (z.amax(1, keepdim=True) - z)
-
-
-def _plain_index_overlap(z: Tensor, target: Tensor, valid: Tensor | None, squared: bool, with_nll: bool):
-    """:class:`_IndexOverlap` as a composition of ordinary operations (one-hot mask, products, sums)."""
-    classes = z.shape[1]
-    zf = z.flatten(2)  # (B, C, V), no math.prod or -1 (dynamo 2.4)
-    index = target.flatten(1).unsqueeze(1)
-    hit = torch.arange(classes, device=z.device).reshape(1, -1, 1) == index
-    p = torch.softmax(zf, 1)
-    q = _plain_complement(p)
-    g = hit.to(z.dtype)
-    if valid is not None:
-        ok = valid.flatten(1).unsqueeze(1)
-        p, q, g = torch.where(ok, p, 0), torch.where(ok, q, 0), torch.where(ok, g, 0)
-    inter, mass = (p * g).sum(2), g.sum(2)
-    if squared:
-        first, third = ((1 - g) * p - g * q).square().sum(2), torch.zeros_like(inter)
-    else:
-        first, third = (p * (1 - g)).sum(2), (q * g).sum(2)
-    nll = torch.where(hit, _plain_neg_log(zf), 0).sum(1).reshape(target.shape) if with_nll else None
-    return inter, first, third, mass, nll
+def _apply(z: Tensor, complement: bool, nll: bool) -> tuple[Tensor, Tensor | None, Tensor | None]:
+    """:class:`_Softmax`, with every output requested under ``torch.compile``: dynamo in PyTorch 2.4 cannot trace a
+    Function that returns None (the unused outputs are removed from the compiled graph as dead code)."""
+    if torch.compiler.is_compiling():
+        complement = nll = True
+    return _Softmax.apply(z, complement, nll)
 
 
 def softmax(z: Tensor) -> Tensor:
     """``torch.softmax(z, 1)`` with a derivative that does not lose the dominant class at saturation."""
-    if torch.compiler.is_compiling():
-        return torch.softmax(z, 1)
-    return _Softmax.apply(z, False, False)[0]
+    return _apply(z, False, False)[0]
 
 
 def softmax_pair(z: Tensor) -> tuple[Tensor, Tensor]:
     """``(p, q)``: ``softmax(z, 1)`` and ``1 - p``, formed as the sum of the other probabilities."""
-    if torch.compiler.is_compiling():
-        p = torch.softmax(z, 1)
-        return p, _plain_complement(p)
-    p, q, _ = _Softmax.apply(z, True, False)
+    p, q, _ = _apply(z, True, False)
+    assert q is not None
     return p, q
 
 
 def softmax_stats(z: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     """``(p, q, nll)``: ``softmax(z, 1)``, ``1 - p`` and ``-log p``, each accurate at any finite logits."""
-    if torch.compiler.is_compiling():
-        p = torch.softmax(z, 1)
-        return p, _plain_complement(p), _plain_neg_log(z)
-    p, q, nll = _Softmax.apply(z, True, True)
+    p, q, nll = _apply(z, True, True)
+    assert q is not None and nll is not None
     return p, q, nll
 
 
 def neg_log_softmax(z: Tensor) -> Tensor:
     """``-log_softmax(z, 1)``: non-negative, relatively accurate for every class, with the stable gradient."""
-    if torch.compiler.is_compiling():
-        return _plain_neg_log(z)
-    return _Softmax.apply(z, False, True)[2]
+    nll = _apply(z, False, True)[2]
+    assert nll is not None
+    return nll
 
 
 def _label_nll(zf: Tensor, p: Tensor, index: Tensor, q_target: Tensor, hit: Tensor | None = None) -> Tensor:
@@ -367,9 +327,9 @@ def index_overlap_statistics(
     ``with_nll`` the per-voxel ``-log p_t`` (``target.shape``), which shares the softmax, the sum of the other
     probabilities and the backward pass; see :class:`_IndexOverlap`. The gradient flows to ``z`` only, with no
     one-hot tensor and no cancellation at saturated logits."""
-    if torch.compiler.is_compiling():
-        return _plain_index_overlap(z, target.long(), valid, squared, with_nll)
-    return _IndexOverlap.apply(z, target.long(), valid, squared, with_nll)
+    # every output under torch.compile (no None output for dynamo, see _apply); the unused nll is dead code there
+    *stats, nll = _IndexOverlap.apply(z, target.long(), valid, squared, with_nll or torch.compiler.is_compiling())
+    return stats[0], stats[1], stats[2], stats[3], nll if with_nll else None
 
 
 class _CrossEntropyIndex(torch.autograd.Function):
@@ -406,7 +366,4 @@ def cross_entropy_index(z: Tensor, target: Tensor) -> Tensor:
     """Per-voxel ``-log softmax(z, 1)[target]`` for integer class indices, with the stable gradient
     ``p - onehot`` (shape ``target.shape``). ``torch.nn.functional.cross_entropy(reduction="none")`` returns 0
     for the dominant class at saturation and a zero gradient."""
-    if torch.compiler.is_compiling():
-        index = target.long().flatten(1).unsqueeze(1)
-        return _plain_neg_log(z.flatten(2)).gather(1, index).reshape(target.shape)
     return _CrossEntropyIndex.apply(z, target.long())

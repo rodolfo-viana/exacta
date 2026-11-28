@@ -17,7 +17,10 @@ from exacta.losses.segmentation import (
 
 def _geometry_input(input: Tensor, target: Tensor, activation: Activation,
                     target_format: TargetFormat, include_background: bool,
-                    mask: Tensor | None = None) -> tuple[Tensor, Tensor, Tensor | None]:
+                    mask: Tensor | None = None, *, complement: bool = False,
+                    ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
+    """Selected probabilities, target, mask and, with ``complement``, ``1 - p`` formed without cancellation
+    (the sum of the other softmax probabilities, or ``sigmoid(-z)``) for the losses that need ``p - y``."""
     input = _upcast(input)
     if input.ndim not in (4, 5) or any(n == 0 for n in input.shape):
         raise ValueError("geometry losses require nonempty (B, C, H, W) or (B, C, D, H, W)")
@@ -28,13 +31,22 @@ def _geometry_input(input: Tensor, target: Tensor, activation: Activation,
         raise ValueError("geometry losses require complete binary targets; ignored labels are not geometry")
     if valid is not None:
         input = torch.where(valid[:, None], input, 0)
-    probs = (_softmax.softmax(input) if activation == "softmax"
-             else _logistic.sigmoid(input) if activation == "sigmoid" else input)
+    rest: Tensor | None = None
+    if not complement:
+        probs = (_softmax.softmax(input) if activation == "softmax"
+                 else _logistic.sigmoid(input) if activation == "sigmoid" else input)
+    elif activation == "softmax":
+        probs, rest = _softmax.softmax_pair(input)
+    elif activation == "sigmoid":
+        probs, rest = _logistic.sigmoid_pair(input)
+    else:
+        probs, rest = input, 1 - input
     if not include_background:
         if input.shape[1] < 2:
             raise ValueError("include_background=False needs at least 2 channels")
         probs, truth = probs[:, 1:], truth[:, 1:]
-    return probs, truth, valid
+        rest = None if rest is None else rest[:, 1:]
+    return probs, truth, valid, rest
 
 
 def _options(activation: Activation, target_format: TargetFormat) -> None:
@@ -108,6 +120,13 @@ class BoundaryLoss(nn.Module):
     explicit empty/full-mask policies. Forward accepts a precomputed ``distance_map``
     for the selected channels; otherwise ``spacing`` is required. A mask affects the
     reduction only; target labels must remain complete throughout the image.
+
+    The value is a signed sum (``phi`` is negative inside the target), ``-sum_inside |phi| + error`` with
+    ``error = sum_outside p |phi| + sum_inside (1 - p) |phi|`` non-negative, so it keeps its digits where it is not
+    near its zero and cannot keep them there under any formula: its error is a few roundoffs of
+    ``mean(|p * phi|)``, which is the conditioning of the sum. Nothing in it cancels at saturated logits, where it
+    is the sum of the distances inside the target; the gradient uses the softmax derivative of
+    :mod:`exacta._softmax`.
     """
 
     def __init__(self, *, activation: Activation = "softmax", target_format: TargetFormat = "index",
@@ -119,8 +138,8 @@ class BoundaryLoss(nn.Module):
 
     def forward(self, input: Tensor, target: Tensor, *, spacing: Any = None,
                 distance_map: Tensor | None = None, mask: Tensor | None = None) -> Tensor:
-        probs, truth, valid = _geometry_input(input, target, self.activation, self.target_format,
-                                               self.include_background, mask)
+        probs, truth, valid, _ = _geometry_input(input, target, self.activation, self.target_format,
+                                                  self.include_background, mask)
         distances = distance_maps(truth, spacing=spacing, signed=True) if distance_map is None else distance_map
         distances = _cached_map(distances, probs)
         return _voxel_mean(probs * distances, valid, channels=probs.shape[1])
@@ -131,7 +150,9 @@ class HausdorffDTLoss(BoundaryLoss):
 
     This is a training surrogate, not Hausdorff distance or HD95. Distances use hard
     masks at ``p > threshold`` and are detached; only the squared error is
-    differentiated. Uniform hard masks have distance zero (MONAI convention).
+    differentiated, as ``p (1 - y) - (1 - p) y`` with ``1 - p`` the sum of the other softmax probabilities (or
+    ``sigmoid(-z)``), so that it keeps its relative accuracy where ``p`` rounds to ``y``. Uniform hard masks have
+    distance zero (MONAI convention).
     Consequently two opposite uniform hard masks give zero: combine with Dice/CE.
     Per-channel thresholding is used also for softmax outputs, not argmax.
     ``distance_map`` caches the unpowered target map from ``distance_maps``.
@@ -152,8 +173,9 @@ class HausdorffDTLoss(BoundaryLoss):
     def forward(self, input: Tensor, target: Tensor, *, spacing: Any = None,
                 distance_map: Tensor | None = None, mask: Tensor | None = None) -> Tensor:
         valid = _check_mask(mask, input)
-        probs, truth, _ = _geometry_input(input, target, self.activation, self.target_format,
-                                           self.include_background)
+        probs, truth, _, rest = _geometry_input(input, target, self.activation, self.target_format,
+                                                 self.include_background, complement=True)
+        assert rest is not None
         if not bool(torch.isfinite(probs).all()):
             raise ValueError("prediction geometry requires finite probabilities everywhere")
         target_dt = distance_maps(truth, spacing=spacing) if distance_map is None else distance_map
@@ -161,5 +183,7 @@ class HausdorffDTLoss(BoundaryLoss):
         if bool((target_dt < 0).any()):
             raise ValueError("Hausdorff target distance map must be nonnegative")
         pred_dt = distance_maps(probs.detach() > self.threshold, spacing=spacing).to(probs.dtype)
-        weighted = (probs - truth).square() * (pred_dt.pow(self.alpha) + target_dt.pow(self.alpha))
+        # p - y as p (1 - y) - (1 - p) y, with 1 - p from the logits: it does not vanish where p rounds to y
+        gap = (1 - truth) * probs - truth * rest
+        weighted = gap.square() * (pred_dt.pow(self.alpha) + target_dt.pow(self.alpha))
         return _voxel_mean(weighted, valid, channels=probs.shape[1])
