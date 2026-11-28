@@ -19,8 +19,7 @@ Release notes for Exacta.
   increment (the gradient) wherever errors that rounded to the same float differ, never the increments, which come
   from exact int64 counts; with probabilities given (`from_logits=False`) the errors are bitwise those of `|g - p|`
   and nothing changes, and neither does the value at moderate logits beyond the last bits (the test that compares
-  with an exact rational reference of the increments is unchanged). Under `torch.compile` the complements are
-  formed with ordinary operations, as in PR #33. Unchanged, with the reason: `LovaszHingeLoss` forms `1 - z (2t - 1)`
+  with an exact rational reference of the increments is unchanged). Unchanged, with the reason: `LovaszHingeLoss` forms `1 - z (2t - 1)`
   from the logits, exact near the margin (Sterbenz) and clipped to zero beyond it, and `BoundaryLoss` is the signed
   sum `mean(p * phi)`, which is `-sum_inside |phi| + error` with a non-negative error, so that its error is a few
   roundoffs of `mean(|p * phi|)` (the conditioning of the sum, which no formula for the same number can beat where
@@ -66,10 +65,16 @@ Release notes for Exacta.
   `13 u` of their largest component, in both dtypes. Double backward on the PyTorch backend and gradients
   into a soft target are unchanged. Not changed: the Lovasz softmax still sorts the rounded errors
   `|g - p|`, the squared error of `HausdorffDTLoss` still subtracts where `p` rounds to the target, and the
-  value of `BoundaryLoss` is a sum of terms of both signs.
-  Under `torch.compile` the softmax, cross-entropy and overlap sums are formed with ordinary operations instead
-  of the custom autograd functions (PyTorch 2.4's dynamo cannot trace them): the values keep their accuracy, the
-  gradient is autograd's and loses the dominant class at saturated logits as before.
+  value of `BoundaryLoss` is a sum of terms of both signs (the entry above deals with them).
+  Under `torch.compile` the same custom autograd functions are traced, with every output requested (PyTorch 2.4's
+  dynamo cannot trace a function that returns None; the unused outputs are dead code in the compiled graph), so
+  that the compiled value and gradient are as accurate as the eager ones: the composition of ordinary operations
+  used there before lost every digit of the gradient of the dominant class of the overlap losses at saturated
+  logits (and reached 400 u per voxel at moderate ones). `DiceCELoss` on a `1 x 4 x 128^3` volume then takes 0.81
+  (CPU, binary32), 0.95 (CPU, binary64), 0.58 (GPU, binary32) and 0.86 (GPU, binary64) times the eager time, and
+  0.48, 0.60, 0.72 and 0.43 times that of the previous compiled graph. Double backward through a compiled graph
+  does not work (an AOTAutograd limitation, with or without these functions); use eager execution for gradient
+  penalties.
   Cost: with softmax and integer labels (or a one-hot tensor that is exactly such labels: values 0 and 1, one 1
   per included voxel, which costs the `max` over the classes that yields the labels, about 3 ms of reductions
   and one host synchronisation) the PyTorch backend forms the sums from the label indices (no one-hot tensor)

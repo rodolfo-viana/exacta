@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from exacta import _triton_losses
 from exacta.losses import (
     DiceCELoss, DiceFocalLoss, DiceLoss, FocalLoss, FocalTverskyLoss, GeneralizedDiceCELoss, GeneralizedDiceLoss,
-    GeneralizedWassersteinDiceLoss, SkeletonRecallLoss, TopKCELoss, TverskyLoss,
+    GeneralizedWassersteinDiceLoss, LovaszSoftmaxLoss, SkeletonRecallLoss, TopKCELoss, TverskyLoss,
 )
 
 mpmath = pytest.importorskip("mpmath")
@@ -863,14 +863,48 @@ def test_function_forwards_do_not_write_into_tensors_that_require_grad():
             assert not any(o.requires_grad for o in outputs if o is not None)
 
 
-# -- torch.compile: ordinary operations instead of the custom Functions ----------------------------------------
+# -- torch.compile: the same Functions, traced -----------------------------------------------------------------
+
+
+def _plain_complement(p):
+    big = p > 0.5
+    return torch.where(big, torch.where(big, 0, p).sum(1, keepdim=True), 1 - p)
+
+
+def _plain_neg_log(z):
+    p = torch.softmax(z, 1)
+    p_max = p.amax(1, keepdim=True)
+    rest = torch.where(p > 0.5, 0, p).sum(1, keepdim=True)
+    log_norm = torch.where(p_max > 0.5, torch.log1p(rest / p_max), -torch.log(p_max))
+    return log_norm + (z.amax(1, keepdim=True) - z)
+
+
+def _plain_index_overlap(z, target, valid, squared, with_nll):
+    """The sums of the label Function as a composition of ordinary operations (one-hot mask, products, sums)."""
+    batch, classes = z.shape[:2]
+    zf = z.reshape(batch, classes, -1)
+    index = target.reshape(batch, 1, -1)
+    hit = torch.arange(classes).reshape(1, -1, 1) == index
+    p = torch.softmax(zf, 1)
+    q = _plain_complement(p)
+    g = hit.to(z.dtype)
+    if valid is not None:
+        ok = valid.reshape(batch, 1, -1)
+        p, q, g = torch.where(ok, p, 0), torch.where(ok, q, 0), torch.where(ok, g, 0)
+    inter, mass = (p * g).sum(2), g.sum(2)
+    if squared:
+        first, third = ((1 - g) * p - g * q).square().sum(2), torch.zeros_like(inter)
+    else:
+        first, third = (p * (1 - g)).sum(2), (q * g).sum(2)
+    nll = torch.where(hit, _plain_neg_log(zf), 0).sum(1).reshape(target.shape) if with_nll else None
+    return inter, first, third, mass, nll
 
 
 @pytest.mark.parametrize("squared", [False, True])
 @pytest.mark.parametrize("scale", [2.0, 25.0], ids=["moderate", "saturated"])
-def test_the_compile_composition_has_the_values_of_the_functions(squared, scale):
-    # The composition used under torch.compile (ordinary operations) gives the sums and the log-probabilities of the
-    # Functions to a few roundoffs, also at saturated logits; its gradient is autograd's (checked at moderate logits).
+def test_the_functions_have_the_values_of_a_composition_of_ordinary_operations(squared, scale):
+    # The sums and the log-probabilities of the Functions agree to a few roundoffs with a composition of ordinary
+    # operations (also at saturated logits, where its gradient is autograd's and loses the dominant class).
     from exacta import _softmax
 
     gen = torch.Generator().manual_seed(12)
@@ -881,7 +915,7 @@ def test_the_compile_composition_has_the_values_of_the_functions(squared, scale)
     outs = []
     for fast in (True, False):
         x = z.clone().requires_grad_()
-        function = _softmax._IndexOverlap.apply if fast else _softmax._plain_index_overlap
+        function = _softmax._IndexOverlap.apply if fast else _plain_index_overlap
         *stats, nll = function(x, target, valid, squared, True)
         loss = sum((0.3 * (i + 1) * s_).sum() for i, s_ in enumerate(stats)) + nll.sum()
         outs.append((stats, nll, torch.autograd.grad(loss, x)[0]))
@@ -903,52 +937,87 @@ COMPILED = {
     "dice_focal": lambda: DiceFocalLoss(gamma=0.5, alpha=0.25),
     "focal": lambda: FocalLoss(gamma=0.5),
     "topk_ce": lambda: TopKCELoss(fraction=0.5),
+    "lovasz": lambda: LovaszSoftmaxLoss(),
     "wasserstein": lambda: GeneralizedWassersteinDiceLoss(torch.tensor([[0.0, 1, 1], [1, 0, 0.5], [1, 0.5, 0]])),
 }
+COMPILE_BACKENDS = [(name, "aot_eager") for name in COMPILED] + [(name, "inductor") for name in
+                                                                 ("dice", "generalized_dice_ce", "focal")]
 
 
-@pytest.mark.parametrize("name", list(COMPILED))
-def test_compiled_losses_trace_without_the_custom_functions_and_match_eager(name, monkeypatch):
-    # Dynamo in PyTorch 2.4 cannot trace Functions with non-tensor arguments or None outputs: the compiled graph
-    # must not contain any of the new ones (fullgraph=True fails on a graph break), and must agree with eager.
-    from exacta import _logistic, _softmax
-    from exacta.losses import segmentation
-
+@pytest.mark.parametrize("name,backend", COMPILE_BACKENDS)
+def test_compiled_losses_trace_without_a_graph_break_and_match_eager(name, backend):
+    # fullgraph=True fails on any graph break (dynamo in PyTorch 2.4 cannot trace a Function with a None output).
     gen = torch.Generator().manual_seed(21)
     target = torch.randint(3, (2, 5, 4), generator=gen)
     z = 2.0 * torch.randn(2, 3, 5, 4, generator=gen, dtype=torch.float64)
     mask = torch.rand(2, 5, 4, generator=gen) < 0.85
     module = COMPILED[name]()
     inputs = (F.one_hot(target, 3).movedim(-1, 1).double() if "one_hot" in name else target)
-    keyword = {"mask": mask}
 
     def run(loss_of):
         x = z.clone().requires_grad_()
-        loss = loss_of(x, inputs, **keyword)
+        loss = loss_of(x, inputs, mask=mask)
         return loss, torch.autograd.grad(loss, x)[0]
 
     eager = run(module)
-
-    def refuse(*args, **kwargs):
-        raise AssertionError("a custom Function was applied under torch.compile")
-
-    for owner in (_softmax._Softmax, _softmax._IndexOverlap, _softmax._CrossEntropyIndex, _logistic._SigmoidPair,
-                  segmentation._Power):
-        monkeypatch.setattr(owner, "forward", staticmethod(refuse))  # dynamo inlines forward, not the patched apply
-    compiled = run(torch.compile(module, fullgraph=True, backend="aot_eager"))
+    compiled = run(torch.compile(module, fullgraph=True, backend=backend))
     torch.testing.assert_close(compiled[0], eager[0], rtol=1e-9, atol=1e-12)
     torch.testing.assert_close(compiled[1], eager[1], rtol=1e-7, atol=1e-10)
 
 
-@pytest.mark.parametrize("name", ["dice", "tversky", "generalized_dice", "ce", "dice_ce"])
-def test_compiled_values_stay_relatively_accurate_at_saturated_logits(name):
-    # The values under torch.compile are the sums of non-negative terms too (only the gradient is autograd's).
-    z, g = _batch(name, "saturated", torch.float64, 0)
-    value, _ = reference(SPECS[name].terms, z, g)
-    module = SPECS[name].make("torch")
-    compiled = torch.compile(module, fullgraph=True, backend="aot_eager")
-    got = compiled(z.clone().requires_grad_(), g.argmax(1)).item()
-    assert _relative(got, value) <= 16 * U[torch.float64]
+ACCURATE_COMPILED = ["dice", "dice_squared", "tversky", "generalized_dice", "ce", "dice_ce", "focal", "dice_focal",
+                     "dice_soft_targets", "ce_soft_targets"]
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=["binary64", "binary32"])
+@pytest.mark.parametrize("name,backend", [(n, "aot_eager") for n in ACCURATE_COMPILED]
+                         + [(n, "inductor") for n in ("dice", "dice_squared", "dice_ce", "generalized_dice")])
+def test_compiled_value_and_gradient_are_relatively_accurate(name, backend, dtype):
+    # The custom Functions are traced, so the compiled gradient keeps the dominant class as the eager one does
+    # (autograd's own derivative of the softmax lost every digit of it at saturated and mixed batches).
+    spec = SPECS[name]
+    torch._dynamo.reset()
+    module = torch.compile(spec.make("torch"), fullgraph=True, backend=backend)
+    bound = BOUND["torch", dtype]
+    for kind, seed in itertools.product(("saturated", "mixed", "moderate"), (0, 1)):
+        z, g = _batch(name, kind, dtype, seed)
+        value, reference_grad = reference(spec.terms, z.to(dtype), g.to(dtype))
+        x = z.to(dtype).clone().requires_grad_()
+        loss = module(x, g.to(dtype) if spec.soft else g.argmax(1))
+        (grad,) = torch.autograd.grad(loss, x)
+        assert grad.dtype == dtype and loss.dtype == dtype
+        batch, classes, voxels = z.shape
+        got = grad.double().flatten().tolist()
+        with mpmath.workdps(DIGITS):
+            absolute = [abs(mp.mpf(a) - r) for a, r in zip(got, reference_grad)]
+            magnitude = [abs(r) for r in reference_grad]
+            normal = [m > TINY[dtype] * 1e4 for m in magnitude]
+            element = max(float(a / m) for a, m, ok in zip(absolute, magnitude, normal) if ok) / U[dtype]
+            voxel = max(float(a / max(magnitude[(i // (classes * voxels) * classes + c) * voxels + i % voxels]
+                                      for c in range(classes)))
+                        for i, (a, ok) in enumerate(zip(absolute, normal)) if ok) / U[dtype]
+        context = f"{kind} seed {seed}"
+        assert _relative(loss.item(), value) / U[dtype] <= bound, f"value, {context}"
+        if kind == "saturated":
+            assert element <= bound, f"gradient element: {element:.3g} u, {context}"
+        assert voxel <= (bound if kind == "saturated" else BOUND_VOXEL), f"gradient: {voxel:.3g} u, {context}"
+
+
+@pytest.mark.parametrize("backend", ["aot_eager", "inductor"])
+@pytest.mark.parametrize("loss", [lambda: FocalLoss(gamma=0.1), lambda: DiceFocalLoss(gamma=0.1)],
+                         ids=["focal", "dice_focal"])
+def test_compiled_focal_power_stays_finite_for_a_small_gamma_in_binary32(loss, backend):
+    # p**gamma with 0 < gamma < 1 has the derivative gamma p**(gamma - 1), which overflows binary32 for a subnormal
+    # (1 - p) unless it is formed as gamma p**gamma (grad / p): confident predictions must give finite gradients.
+    logits = torch.tensor([[[-1e4, 50.0, 1e4], [1e4, -50.0, -1e4]]], requires_grad=True)
+    target = torch.tensor([[1, 0, 0]])
+    module = loss()
+    eager_grad = torch.autograd.grad(module(logits, target), logits)[0]
+    compiled = torch.compile(module, fullgraph=True, backend=backend)
+    value = compiled(logits, target)
+    (grad,) = torch.autograd.grad(value, logits)
+    assert torch.isfinite(value) and torch.isfinite(grad).all()
+    torch.testing.assert_close(grad, eager_grad, rtol=1e-5, atol=1e-30)
 
 
 def test_labels_outside_the_classes_raise_on_the_index_paths():

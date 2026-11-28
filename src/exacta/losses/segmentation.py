@@ -794,9 +794,6 @@ def _power(probability: Tensor, gamma: float) -> Tensor:
     """
     if gamma == 0:
         return torch.ones_like(probability)
-    if torch.compiler.is_compiling():  # a Function with a float argument and its own ctx attribute: not for dynamo
-        positive = probability > 0
-        return torch.where(positive, torch.where(positive, probability, 1).pow(gamma), 0)
     return _Power.apply(probability, gamma)
 
 
